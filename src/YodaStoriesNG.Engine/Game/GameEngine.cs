@@ -86,6 +86,14 @@ public class GameEngine : IDisposable
     public void StartNewGame()
     {
         _state.Reset();
+        _messages.Clear();
+
+        // Give player a starting weapon (lightsaber tile - around 799-810 range)
+        _state.SelectedWeapon = 808;  // Lightsaber
+
+        // Welcome message
+        _messages.ShowMessage("Welcome to Yoda Stories!", MessageType.System);
+        _messages.ShowMessage("Use N/P to explore zones with NPCs", MessageType.Info);
 
         // Find the starting zone (typically zone 0 or first non-empty zone)
         for (int i = 0; i < _gameData!.Zones.Count; i++)
@@ -274,7 +282,15 @@ public class GameEngine : IDisposable
                 // Select inventory item (keys 1-8)
                 var slot = keyCode - SDLK_1;
                 if (slot < _state.Inventory.Count)
+                {
                     _state.SelectedItem = _state.Inventory[slot];
+                    var itemName = GetTileName(_state.Inventory[slot]) ?? $"Item {slot + 1}";
+                    _messages.ShowMessage($"Selected: {itemName}", MessageType.Info);
+                }
+                else
+                {
+                    _messages.ShowMessage($"Slot {slot + 1} is empty", MessageType.Info);
+                }
                 break;
 
             case SDLK_r:
@@ -562,6 +578,10 @@ public class GameEngine : IDisposable
                 return;
             }
         }
+
+        // No NPC found - show swing/miss feedback
+        _state.AttackFlashTimer = 0.2;  // Brief flash for swing
+        _messages.ShowMessage("*swing*", MessageType.Combat);
     }
 
     private void UpdateCamera()
@@ -649,6 +669,28 @@ public class GameEngine : IDisposable
 
                 _state.ZoneNPCs.Add(npc);
             }
+        }
+
+        // Count items in zone
+        int itemCount = 0;
+        foreach (var obj in _state.CurrentZone.Objects)
+        {
+            if ((obj.Type == ZoneObjectType.CrateItem || obj.Type == ZoneObjectType.CrateWeapon) &&
+                !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+            {
+                itemCount++;
+            }
+        }
+
+        // Show zone summary if there's interesting content
+        if (_state.ZoneNPCs.Count > 0 || itemCount > 0)
+        {
+            var parts = new List<string>();
+            if (_state.ZoneNPCs.Count > 0)
+                parts.Add($"{_state.ZoneNPCs.Count} NPC(s)");
+            if (itemCount > 0)
+                parts.Add($"{itemCount} item(s)");
+            _messages.ShowMessage($"Zone {_state.CurrentZoneId}: {string.Join(", ", parts)}", MessageType.Info);
         }
     }
 
