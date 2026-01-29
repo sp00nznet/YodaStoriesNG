@@ -44,6 +44,9 @@ public class GameState
     public int CameraX { get; set; }
     public int CameraY { get; set; }
 
+    // NPCs in current zone
+    public List<NPC> ZoneNPCs { get; set; } = new();
+
     /// <summary>
     /// Resets the game state for a new game.
     /// </summary>
@@ -68,6 +71,7 @@ public class GameState
         AnimationTimer = 0;
         CameraX = 0;
         CameraY = 0;
+        ZoneNPCs.Clear();
     }
 
     /// <summary>

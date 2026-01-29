@@ -137,6 +137,9 @@ public class GameEngine : IDisposable
 
         Console.WriteLine($"Zone {zoneId}: {zone.Width}x{zone.Height}, planet: {zone.Planet}, spawn: ({_state.PlayerX},{_state.PlayerY})");
 
+        // Initialize NPCs from zone objects
+        InitializeZoneNPCs();
+
         // Reset camera for zone
         UpdateCamera();
 
@@ -447,6 +450,26 @@ public class GameEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Initializes NPCs from zone objects.
+    /// </summary>
+    private void InitializeZoneNPCs()
+    {
+        _state.ZoneNPCs.Clear();
+
+        if (_state.CurrentZone == null)
+            return;
+
+        foreach (var obj in _state.CurrentZone.Objects)
+        {
+            if (obj.Type == ZoneObjectType.PuzzleNPC)
+            {
+                var npc = NPC.FromZoneObject(obj);
+                _state.ZoneNPCs.Add(npc);
+            }
+        }
+    }
+
     private void Update(double deltaTime)
     {
         if (_state.IsPaused)
@@ -458,6 +481,12 @@ public class GameEngine : IDisposable
         {
             _state.AnimationTimer -= AnimationFrameTime;
             _state.AnimationFrame = (_state.AnimationFrame + 1) % 3;
+
+            // Sync NPC animations
+            foreach (var npc in _state.ZoneNPCs)
+            {
+                npc.AnimationFrame = _state.AnimationFrame;
+            }
         }
 
         // Check for game over conditions
@@ -476,6 +505,9 @@ public class GameEngine : IDisposable
         // Render zone
         _renderer.RenderZone(_state.CurrentZone, _state.CameraX, _state.CameraY);
 
+        // Render NPCs
+        RenderNPCs();
+
         // Render player character
         RenderPlayer();
 
@@ -484,6 +516,51 @@ public class GameEngine : IDisposable
 
         // Present frame
         _renderer.Present();
+    }
+
+    private void RenderNPCs()
+    {
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (!npc.IsEnabled || !npc.IsAlive)
+                continue;
+
+            // Check if NPC is within viewport
+            if (npc.X < _state.CameraX || npc.X >= _state.CameraX + GameRenderer.ViewportTilesX ||
+                npc.Y < _state.CameraY || npc.Y >= _state.CameraY + GameRenderer.ViewportTilesY)
+                continue;
+
+            // If CharacterId is a valid character, use character animation frames
+            if (npc.CharacterId >= 0 && npc.CharacterId < _gameData!.Characters.Count)
+            {
+                var character = _gameData.Characters[npc.CharacterId];
+
+                // Get animation frame based on direction
+                var frames = npc.Direction switch
+                {
+                    Direction.Up => character.Frames.WalkUp,
+                    Direction.Down => character.Frames.WalkDown,
+                    Direction.Left => character.Frames.WalkLeft,
+                    Direction.Right => character.Frames.WalkRight,
+                    _ => character.Frames.WalkDown
+                };
+
+                if (frames != null && frames.Length > 0 && frames[0] != 0)
+                {
+                    var frameIndex = Math.Min(npc.AnimationFrame, frames.Length - 1);
+                    var tileId = frames[frameIndex];
+                    if (tileId < _gameData.Tiles.Count)
+                    {
+                        _renderer!.RenderSprite(tileId, npc.X, npc.Y, _state.CameraX, _state.CameraY);
+                    }
+                }
+            }
+            // If CharacterId is actually a tile ID (>= character count), render that tile directly
+            else if (npc.CharacterId < _gameData!.Tiles.Count)
+            {
+                _renderer!.RenderSprite(npc.CharacterId, npc.X, npc.Y, _state.CameraX, _state.CameraY);
+            }
+        }
     }
 
     private void RenderPlayer()

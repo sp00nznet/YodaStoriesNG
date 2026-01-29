@@ -285,16 +285,24 @@ public class DtaParser
 
         // Read object count and objects
         var objectCount = _reader.ReadUInt16();
+
         for (int j = 0; j < objectCount; j++)
         {
+            // Object format: Type(2), pad(2), X(2), Y(2), pad(2), Argument(2) = 12 bytes
+            var objType = (ZoneObjectType)_reader.ReadUInt16();
+            _reader.ReadUInt16(); // padding
+            var objX = _reader.ReadUInt16();
+            var objY = _reader.ReadUInt16();
+            _reader.ReadUInt16(); // padding
+            var objArg = _reader.ReadUInt16();
+
             var obj = new ZoneObject
             {
-                Type = (ZoneObjectType)_reader.ReadUInt16(),
-                X = _reader.ReadUInt16(),
-                Y = _reader.ReadUInt16(),
-                Argument = _reader.ReadUInt16()
+                Type = objType,
+                X = objX,
+                Y = objY,
+                Argument = objArg
             };
-            _reader.ReadUInt32(); // padding/extra data
             zone.Objects.Add(obj);
         }
 
@@ -312,7 +320,8 @@ public class DtaParser
                     break;
                 case "IZX2":
                     var izx2Len = _reader.ReadUInt16();
-                    zone.Aux2Data = new ZoneAux2Data { RawData = _reader.ReadBytes(Math.Max(0, izx2Len - 6)) };
+                    var izx2Data = _reader.ReadBytes(Math.Max(0, izx2Len - 6));
+                    zone.Aux2Data = new ZoneAux2Data { RawData = izx2Data };
                     break;
                 case "IZX3":
                     var izx3Len = _reader.ReadUInt16();
@@ -336,6 +345,7 @@ public class DtaParser
         return zone;
     }
 
+    /// <summary>
     private Zone ParseZoneData(int zoneId, byte[] zoneData)
     {
         var zone = new Zone { Id = zoneId };
