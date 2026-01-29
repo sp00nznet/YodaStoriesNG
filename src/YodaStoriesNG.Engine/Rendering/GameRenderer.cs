@@ -302,9 +302,70 @@ public unsafe class GameRenderer : IDisposable
                 RenderTile(inventory[i], slotX, slotY);
             }
 
-            // Slot number (keys 1-8)
-            // Note: Text rendering would require TTF font, using simple indicators for now
+            // Slot number indicator (small colored square for slot position)
+            SDL.SetRenderDrawColor(_renderer, 150, 150, 150, 255);
+            var numRect = new SDLRect { X = slotX + 2, Y = slotY + Tile.Height * Scale - 6, W = 6, H = 6 };
+            SDL.RenderFillRect(_renderer, &numRect);
         }
+    }
+
+    /// <summary>
+    /// Renders zone info overlay.
+    /// </summary>
+    public void RenderZoneInfo(int zoneId, string planetName, int width, int height)
+    {
+        // Zone info bar at top of screen
+        SDL.SetRenderDrawColor(_renderer, 0, 0, 0, 180);
+        var infoRect = new SDLRect { X = 0, Y = 0, W = WindowWidth, H = 24 };
+        SDL.RenderFillRect(_renderer, &infoRect);
+
+        // Zone indicator squares
+        SDL.SetRenderDrawColor(_renderer, 255, 255, 255, 255);
+        var zoneRect = new SDLRect { X = 5, Y = 5, W = 14, H = 14 };
+        SDL.RenderDrawRect(_renderer, &zoneRect);
+
+        // Planet color indicator
+        byte r = 255, g = 255, b = 255;
+        switch (planetName.ToLower())
+        {
+            case "desert": r = 255; g = 200; b = 100; break;  // Tatooine
+            case "snow": r = 200; g = 220; b = 255; break;    // Hoth
+            case "forest": r = 100; g = 200; b = 100; break;  // Endor
+            case "swamp": r = 100; g = 150; b = 100; break;   // Dagobah
+        }
+        SDL.SetRenderDrawColor(_renderer, r, g, b, 255);
+        var planetRect = new SDLRect { X = 7, Y = 7, W = 10, H = 10 };
+        SDL.RenderFillRect(_renderer, &planetRect);
+    }
+
+    /// <summary>
+    /// Renders a screen overlay for damage/attack feedback.
+    /// </summary>
+    public void RenderDamageOverlay(double intensity)
+    {
+        if (intensity <= 0)
+            return;
+
+        var alpha = (byte)(intensity * 100);
+        SDL.SetRenderDrawColor(_renderer, 255, 0, 0, alpha);
+        var fullScreen = new SDLRect { X = 0, Y = 0, W = WindowWidth, H = ViewportTilesY * Tile.Height * Scale };
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+        SDL.RenderFillRect(_renderer, &fullScreen);
+    }
+
+    /// <summary>
+    /// Renders a screen overlay for attack feedback.
+    /// </summary>
+    public void RenderAttackOverlay(double intensity)
+    {
+        if (intensity <= 0)
+            return;
+
+        var alpha = (byte)(intensity * 80);
+        SDL.SetRenderDrawColor(_renderer, 255, 255, 0, alpha);
+        var fullScreen = new SDLRect { X = 0, Y = 0, W = WindowWidth, H = ViewportTilesY * Tile.Height * Scale };
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+        SDL.RenderFillRect(_renderer, &fullScreen);
     }
 
     private void RenderTileUnscaled(int tileId, int x, int y)

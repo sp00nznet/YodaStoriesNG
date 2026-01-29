@@ -449,6 +449,7 @@ public class GameEngine : IDisposable
                 }
 
                 bool killed = npc.TakeDamage(damage);
+                _state.AttackFlashTimer = 0.5;  // Trigger attack flash
                 Console.WriteLine($"Player attacks! NPC takes {damage} damage. NPC Health: {npc.Health}");
 
                 if (killed)
@@ -573,6 +574,12 @@ public class GameEngine : IDisposable
         // Update NPC AI
         UpdateNPCs(deltaTime);
 
+        // Decay visual effect timers
+        if (_state.DamageFlashTimer > 0)
+            _state.DamageFlashTimer = Math.Max(0, _state.DamageFlashTimer - deltaTime * 4);
+        if (_state.AttackFlashTimer > 0)
+            _state.AttackFlashTimer = Math.Max(0, _state.AttackFlashTimer - deltaTime * 6);
+
         // Check for game over conditions
         if (_state.Health <= 0 && !_state.IsGameOver)
         {
@@ -632,6 +639,7 @@ public class GameEngine : IDisposable
                     {
                         npc.ActionTimer = 0;
                         _state.Health -= npc.Damage;
+                        _state.DamageFlashTimer = 1.0;  // Trigger damage flash
                         Console.WriteLine($"NPC attacks! Player takes {npc.Damage} damage. Health: {_state.Health}");
                     }
                 }
@@ -782,6 +790,19 @@ public class GameEngine : IDisposable
 
         // Render HUD
         _renderer.RenderHUD(_state.Health, _state.MaxHealth, _state.Inventory, _state.SelectedWeapon, _state.SelectedItem);
+
+        // Render zone info
+        _renderer.RenderZoneInfo(
+            _state.CurrentZoneId,
+            _state.CurrentZone.Planet.ToString(),
+            _state.CurrentZone.Width,
+            _state.CurrentZone.Height);
+
+        // Render visual feedback overlays
+        if (_state.DamageFlashTimer > 0)
+            _renderer.RenderDamageOverlay(_state.DamageFlashTimer);
+        if (_state.AttackFlashTimer > 0)
+            _renderer.RenderAttackOverlay(_state.AttackFlashTimer);
 
         // Present frame
         _renderer.Present();

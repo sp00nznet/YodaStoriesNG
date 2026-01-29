@@ -40,6 +40,10 @@ public class GameState
     public int AnimationFrame { get; set; }
     public double AnimationTimer { get; set; }
 
+    // Visual feedback
+    public double DamageFlashTimer { get; set; }
+    public double AttackFlashTimer { get; set; }
+
     // Camera position (for large zones)
     public int CameraX { get; set; }
     public int CameraY { get; set; }
