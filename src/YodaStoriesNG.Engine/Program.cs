@@ -48,8 +48,9 @@ class Program
 
         Console.WriteLine("Controls:");
         Console.WriteLine("  Arrow keys / WASD - Move");
-        Console.WriteLine("  Space - Use item / Attack");
+        Console.WriteLine("  Space - Attack / Talk / Dismiss dialogue");
         Console.WriteLine("  1-8 - Select inventory item");
+        Console.WriteLine("  M - Toggle sound mute");
         Console.WriteLine("  N/P - Next/Previous zone (debug)");
         Console.WriteLine("  R - Restart game");
         Console.WriteLine("  ESC - Quit");

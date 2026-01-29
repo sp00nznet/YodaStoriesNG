@@ -1,7 +1,9 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine.Audio;
 using YodaStoriesNG.Engine.Data;
 using YodaStoriesNG.Engine.Parsing;
 using YodaStoriesNG.Engine.Rendering;
+using YodaStoriesNG.Engine.UI;
 
 namespace YodaStoriesNG.Engine.Game;
 
@@ -14,6 +16,8 @@ public class GameEngine : IDisposable
     private GameState _state;
     private GameRenderer? _renderer;
     private ActionExecutor? _actionExecutor;
+    private MessageSystem _messages = new();
+    private SoundManager? _sounds;
 
     private bool _isRunning;
     private readonly string _dataPath;
@@ -59,6 +63,16 @@ public class GameEngine : IDisposable
 
         // Initialize action executor
         _actionExecutor = new ActionExecutor(_gameData, _state);
+
+        // Initialize sound manager
+        _sounds = new SoundManager(_dataPath);
+        _sounds.Initialize();
+
+        // Load common sounds
+        foreach (var sound in _gameData.Sounds)
+        {
+            _sounds.LoadSound(sound.Id, sound.FileName);
+        }
 
         // Start new game
         StartNewGame();
@@ -137,6 +151,10 @@ public class GameEngine : IDisposable
 
         Console.WriteLine($"Zone {zoneId}: {zone.Width}x{zone.Height}, planet: {zone.Planet}, spawn: ({_state.PlayerX},{_state.PlayerY})");
 
+        // Show zone entry message
+        _messages.ShowMessage($"Entering {zone.Planet} zone", MessageType.Info);
+        _sounds?.PlaySound(SoundManager.SoundDoor);
+
         // Initialize NPCs from zone objects
         InitializeZoneNPCs();
 
@@ -214,6 +232,7 @@ public class GameEngine : IDisposable
         const int SDLK_8 = 56;
         const int SDLK_a = 97;
         const int SDLK_d = 100;
+        const int SDLK_m = 109;
         const int SDLK_n = 110;
         const int SDLK_p = 112;
         const int SDLK_r = 114;
@@ -271,6 +290,15 @@ public class GameEngine : IDisposable
             case SDLK_p:
                 // Previous zone (debug)
                 LoadZone((_state.CurrentZoneId - 1 + _gameData!.Zones.Count) % _gameData.Zones.Count);
+                break;
+
+            case SDLK_m:
+                // Toggle sound mute
+                if (_sounds != null)
+                {
+                    _sounds.ToggleMute();
+                    _messages.ShowMessage(_sounds.IsMuted ? "Sound OFF" : "Sound ON", MessageType.System);
+                }
                 break;
         }
     }
@@ -352,7 +380,9 @@ public class GameEngine : IDisposable
                     {
                         _state.AddItem(obj.Argument);
                         _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
-                        Console.WriteLine($"Picked up item: {obj.Argument}");
+                        var itemName = GetTileName(obj.Argument) ?? $"Item #{obj.Argument}";
+                        _messages.ShowPickup(itemName);
+                        _sounds?.PlaySound(SoundManager.SoundPickup);
                     }
                     break;
 
@@ -362,7 +392,9 @@ public class GameEngine : IDisposable
                     {
                         _state.SelectedWeapon = obj.Argument;
                         _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
-                        Console.WriteLine($"Picked up weapon: {obj.Argument}");
+                        var weaponName = GetTileName(obj.Argument) ?? $"Weapon #{obj.Argument}";
+                        _messages.ShowPickup(weaponName);
+                        _sounds?.PlaySound(SoundManager.SoundPickup);
                     }
                     break;
 
@@ -408,15 +440,75 @@ public class GameEngine : IDisposable
 
     private void UseItem()
     {
+        // If dialogue is active, dismiss it
+        if (_messages.HasDialogue)
+        {
+            _messages.DismissDialogue();
+            return;
+        }
+
         if (_state.SelectedItem.HasValue)
         {
             _actionExecutor?.ExecuteZoneActions(ActionTrigger.UseItem);
         }
         else
         {
-            // Attack in facing direction
-            PerformAttack();
+            // Check for friendly NPC interaction first
+            if (!TryInteractWithNPC())
+            {
+                // Attack in facing direction
+                PerformAttack();
+            }
         }
+    }
+
+    private bool TryInteractWithNPC()
+    {
+        // Get position in front of player
+        int targetX = _state.PlayerX;
+        int targetY = _state.PlayerY;
+
+        switch (_state.PlayerDirection)
+        {
+            case Direction.Up: targetY--; break;
+            case Direction.Down: targetY++; break;
+            case Direction.Left: targetX--; break;
+            case Direction.Right: targetX++; break;
+        }
+
+        // Check for NPC at target position
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (!npc.IsEnabled || !npc.IsAlive)
+                continue;
+
+            if (npc.X == targetX && npc.Y == targetY && !npc.IsHostile)
+            {
+                // Friendly NPC interaction
+                var npcName = GetCharacterName(npc.CharacterId) ?? "Stranger";
+
+                // Make NPC face the player
+                npc.Direction = GetDirectionToward(npc.X, npc.Y, _state.PlayerX, _state.PlayerY);
+
+                // Show dialogue
+                var dialogues = new[]
+                {
+                    "Hello there, traveler!",
+                    "May the Force be with you.",
+                    "I have nothing to trade right now.",
+                    "Be careful out there!",
+                    "The Empire has been causing trouble...",
+                    "Have you seen any droids around?",
+                    "This is a peaceful place.",
+                    "Good luck on your journey!"
+                };
+                var dialogue = dialogues[_random.Next(dialogues.Length)];
+                _messages.ShowDialogue(npcName, dialogue);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void PerformAttack()
@@ -450,11 +542,19 @@ public class GameEngine : IDisposable
 
                 bool killed = npc.TakeDamage(damage);
                 _state.AttackFlashTimer = 0.5;  // Trigger attack flash
-                Console.WriteLine($"Player attacks! NPC takes {damage} damage. NPC Health: {npc.Health}");
+                _sounds?.PlaySound(SoundManager.SoundAttack);
+
+                // Get NPC name for message
+                var npcName = GetCharacterName(npc.CharacterId) ?? "Enemy";
 
                 if (killed)
                 {
-                    Console.WriteLine("NPC defeated!");
+                    _messages.ShowCombat($"{npcName} defeated!");
+                    _sounds?.PlaySound(SoundManager.SoundDeath);
+                }
+                else
+                {
+                    _messages.ShowCombat($"Hit {npcName}! ({npc.Health} HP left)");
                 }
 
                 // Trigger attack action
@@ -580,10 +680,14 @@ public class GameEngine : IDisposable
         if (_state.AttackFlashTimer > 0)
             _state.AttackFlashTimer = Math.Max(0, _state.AttackFlashTimer - deltaTime * 6);
 
+        // Update messages
+        _messages.Update(deltaTime);
+
         // Check for game over conditions
         if (_state.Health <= 0 && !_state.IsGameOver)
         {
             _state.IsGameOver = true;
+            _messages.ShowMessage("GAME OVER - Press R to restart", MessageType.System);
             Console.WriteLine("Game Over!");
         }
     }
@@ -640,7 +744,10 @@ public class GameEngine : IDisposable
                         npc.ActionTimer = 0;
                         _state.Health -= npc.Damage;
                         _state.DamageFlashTimer = 1.0;  // Trigger damage flash
-                        Console.WriteLine($"NPC attacks! Player takes {npc.Damage} damage. Health: {_state.Health}");
+                        _sounds?.PlaySound(SoundManager.SoundHurt);
+
+                        var attackerName = GetCharacterName(npc.CharacterId) ?? "Enemy";
+                        _messages.ShowCombat($"{attackerName} hits you! (-{npc.Damage} HP)");
                     }
                 }
             }
@@ -804,6 +911,9 @@ public class GameEngine : IDisposable
         if (_state.AttackFlashTimer > 0)
             _renderer.RenderAttackOverlay(_state.AttackFlashTimer);
 
+        // Render messages
+        _renderer.RenderMessages(_messages.GetMessages(), _messages.CurrentDialogue);
+
         // Present frame
         _renderer.Present();
     }
@@ -931,8 +1041,32 @@ public class GameEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Gets a tile name by ID, if available.
+    /// </summary>
+    private string? GetTileName(int tileId)
+    {
+        if (_gameData!.TileNames.TryGetValue(tileId, out var name))
+            return name;
+        return null;
+    }
+
+    /// <summary>
+    /// Gets a character name by ID.
+    /// </summary>
+    private string? GetCharacterName(int characterId)
+    {
+        if (characterId >= 0 && characterId < _gameData!.Characters.Count)
+        {
+            var name = _gameData.Characters[characterId].Name;
+            return string.IsNullOrEmpty(name) ? null : name;
+        }
+        return null;
+    }
+
     public void Dispose()
     {
+        _sounds?.Dispose();
         _renderer?.Dispose();
     }
 }

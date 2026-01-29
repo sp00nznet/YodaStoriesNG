@@ -1,5 +1,6 @@
 using Hexa.NET.SDL2;
 using YodaStoriesNG.Engine.Data;
+using YodaStoriesNG.Engine.UI;
 
 namespace YodaStoriesNG.Engine.Rendering;
 
@@ -399,6 +400,114 @@ public unsafe class GameRenderer : IDisposable
         {
             return SDL.PollEvent(evtPtr) != 0;
         }
+    }
+
+    /// <summary>
+    /// Renders game messages on screen.
+    /// </summary>
+    public void RenderMessages(IReadOnlyList<GameMessage> messages, GameMessage? dialogue)
+    {
+        // Render regular messages (top-right corner)
+        var messageY = 30;
+        foreach (var msg in messages)
+        {
+            var alpha = (byte)(Math.Min(1.0, msg.TimeRemaining) * 255);
+            RenderMessageBox(msg.Text, WindowWidth - 10, messageY, alpha, msg.Type, alignRight: true);
+            messageY += 28;
+        }
+
+        // Render dialogue box (bottom of game area)
+        if (dialogue != null)
+        {
+            var dialogueY = ViewportTilesY * Tile.Height * Scale - 60;
+            RenderDialogueBox(dialogue.Text, 10, dialogueY);
+        }
+    }
+
+    private void RenderMessageBox(string text, int x, int y, byte alpha, MessageType type, bool alignRight = false)
+    {
+        // Calculate text width (rough estimate: 7 pixels per character)
+        var textWidth = text.Length * 7;
+        var boxWidth = textWidth + 16;
+        var boxX = alignRight ? x - boxWidth : x;
+
+        // Background color based on message type
+        byte r = 0, g = 0, b = 0;
+        switch (type)
+        {
+            case MessageType.Pickup: r = 0; g = 100; b = 0; break;
+            case MessageType.Combat: r = 150; g = 50; b = 0; break;
+            case MessageType.System: r = 0; g = 50; b = 150; break;
+            default: r = 30; g = 30; b = 30; break;
+        }
+
+        // Draw background
+        SDL.SetRenderDrawColor(_renderer, r, g, b, (byte)(alpha * 0.8));
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+        var bgRect = new SDLRect { X = boxX, Y = y, W = boxWidth, H = 24 };
+        SDL.RenderFillRect(_renderer, &bgRect);
+
+        // Draw border
+        SDL.SetRenderDrawColor(_renderer, 255, 255, 255, alpha);
+        SDL.RenderDrawRect(_renderer, &bgRect);
+
+        // Draw text representation (simple rectangles for each character)
+        SDL.SetRenderDrawColor(_renderer, 255, 255, 255, alpha);
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] != ' ')
+            {
+                var charRect = new SDLRect { X = boxX + 8 + i * 7, Y = y + 6, W = 5, H = 12 };
+                SDL.RenderFillRect(_renderer, &charRect);
+            }
+        }
+    }
+
+    private void RenderDialogueBox(string text, int x, int y)
+    {
+        var boxWidth = WindowWidth - 20;
+
+        // Draw background
+        SDL.SetRenderDrawColor(_renderer, 20, 20, 50, 230);
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+        var bgRect = new SDLRect { X = x, Y = y, W = boxWidth, H = 56 };
+        SDL.RenderFillRect(_renderer, &bgRect);
+
+        // Draw border
+        SDL.SetRenderDrawColor(_renderer, 200, 200, 255, 255);
+        SDL.RenderDrawRect(_renderer, &bgRect);
+
+        // Draw inner border
+        var innerRect = new SDLRect { X = x + 2, Y = y + 2, W = boxWidth - 4, H = 52 };
+        SDL.RenderDrawRect(_renderer, &innerRect);
+
+        // Draw text representation
+        SDL.SetRenderDrawColor(_renderer, 255, 255, 255, 255);
+        var textX = x + 10;
+        var textY = y + 10;
+        var maxCharsPerLine = (boxWidth - 20) / 7;
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            // Word wrap
+            if (i > 0 && i % maxCharsPerLine == 0)
+            {
+                textY += 16;
+                textX = x + 10;
+            }
+
+            if (text[i] != ' ')
+            {
+                var charRect = new SDLRect { X = textX, Y = textY, W = 5, H = 12 };
+                SDL.RenderFillRect(_renderer, &charRect);
+            }
+            textX += 7;
+        }
+
+        // Draw "Press Space to continue" indicator
+        SDL.SetRenderDrawColor(_renderer, 150, 150, 200, 255);
+        var indicatorRect = new SDLRect { X = x + boxWidth - 30, Y = y + 46, W = 20, H = 6 };
+        SDL.RenderFillRect(_renderer, &indicatorRect);
     }
 
     public void Dispose()
