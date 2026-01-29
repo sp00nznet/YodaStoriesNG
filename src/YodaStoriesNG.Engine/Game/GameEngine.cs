@@ -410,9 +410,54 @@ public class GameEngine : IDisposable
         {
             _actionExecutor?.ExecuteZoneActions(ActionTrigger.UseItem);
         }
-        else if (_state.SelectedWeapon.HasValue)
+        else
         {
-            _actionExecutor?.ExecuteZoneActions(ActionTrigger.Attack);
+            // Attack in facing direction
+            PerformAttack();
+        }
+    }
+
+    private void PerformAttack()
+    {
+        // Calculate attack position based on facing direction
+        int targetX = _state.PlayerX;
+        int targetY = _state.PlayerY;
+
+        switch (_state.PlayerDirection)
+        {
+            case Direction.Up: targetY--; break;
+            case Direction.Down: targetY++; break;
+            case Direction.Left: targetX--; break;
+            case Direction.Right: targetX++; break;
+        }
+
+        // Check for NPC at target position
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (!npc.IsEnabled || !npc.IsAlive)
+                continue;
+
+            if (npc.X == targetX && npc.Y == targetY)
+            {
+                // Calculate damage (base damage + weapon bonus)
+                int damage = 25;
+                if (_state.SelectedWeapon.HasValue)
+                {
+                    damage = 50;  // Weapon does more damage
+                }
+
+                bool killed = npc.TakeDamage(damage);
+                Console.WriteLine($"Player attacks! NPC takes {damage} damage. NPC Health: {npc.Health}");
+
+                if (killed)
+                {
+                    Console.WriteLine("NPC defeated!");
+                }
+
+                // Trigger attack action
+                _actionExecutor?.ExecuteZoneActions(ActionTrigger.Attack);
+                return;
+            }
         }
     }
 
@@ -465,6 +510,40 @@ public class GameEngine : IDisposable
             if (obj.Type == ZoneObjectType.PuzzleNPC)
             {
                 var npc = NPC.FromZoneObject(obj);
+
+                // Set NPC properties based on character type if it's a valid character
+                if (npc.CharacterId < _gameData!.Characters.Count)
+                {
+                    var character = _gameData.Characters[npc.CharacterId];
+
+                    // Enemy characters are hostile and chase the player
+                    if (character.Type == CharacterType.Enemy)
+                    {
+                        npc.IsHostile = true;
+                        npc.Behavior = NPCBehavior.Chasing;
+                        npc.MoveCooldown = 0.4;  // Enemies move faster
+                    }
+                    // Friendly NPCs just wander
+                    else if (character.Type == CharacterType.Friendly)
+                    {
+                        npc.Behavior = NPCBehavior.Wandering;
+                        npc.MoveCooldown = 0.8;  // Friendlies move slower
+                    }
+
+                    // Apply character aux data for damage
+                    if (character.AuxData != null)
+                    {
+                        npc.Damage = character.AuxData.Damage;
+                    }
+
+                    // Apply character weapon data for health
+                    if (character.Weapon != null)
+                    {
+                        npc.MaxHealth = character.Weapon.Health;
+                        npc.Health = character.Weapon.Health;
+                    }
+                }
+
                 _state.ZoneNPCs.Add(npc);
             }
         }
@@ -489,12 +568,197 @@ public class GameEngine : IDisposable
             }
         }
 
+        // Update NPC AI
+        UpdateNPCs(deltaTime);
+
         // Check for game over conditions
         if (_state.Health <= 0 && !_state.IsGameOver)
         {
             _state.IsGameOver = true;
             Console.WriteLine("Game Over!");
         }
+    }
+
+    private static readonly Random _random = new();
+
+    private void UpdateNPCs(double deltaTime)
+    {
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (!npc.IsEnabled || !npc.IsAlive)
+                continue;
+
+            // Update move timer
+            npc.MoveTimer += deltaTime;
+
+            // Check if it's time to move
+            if (npc.MoveTimer < npc.MoveCooldown)
+                continue;
+
+            npc.MoveTimer = 0;
+
+            switch (npc.Behavior)
+            {
+                case NPCBehavior.Wandering:
+                    UpdateWanderingNPC(npc);
+                    break;
+                case NPCBehavior.Chasing:
+                    UpdateChasingNPC(npc);
+                    break;
+                case NPCBehavior.Fleeing:
+                    UpdateFleeingNPC(npc);
+                    break;
+                case NPCBehavior.Stationary:
+                default:
+                    // Face the player if nearby
+                    var distToPlayer = npc.DistanceTo(_state.PlayerX, _state.PlayerY);
+                    if (distToPlayer <= 3)
+                    {
+                        npc.Direction = GetDirectionToward(npc.X, npc.Y, _state.PlayerX, _state.PlayerY);
+                    }
+                    break;
+            }
+
+            // Hostile NPCs attack if adjacent to player
+            if (npc.IsHostile)
+            {
+                npc.ActionTimer += deltaTime;
+                if (npc.ActionTimer >= npc.AttackCooldown)
+                {
+                    var dist = npc.DistanceTo(_state.PlayerX, _state.PlayerY);
+                    if (dist <= npc.AttackRange)
+                    {
+                        npc.ActionTimer = 0;
+                        _state.Health -= npc.Damage;
+                        Console.WriteLine($"NPC attacks! Player takes {npc.Damage} damage. Health: {_state.Health}");
+                    }
+                }
+            }
+        }
+    }
+
+    private void UpdateWanderingNPC(NPC npc)
+    {
+        // Random movement within wander radius of start position
+        var direction = _random.Next(4);
+        int dx = 0, dy = 0;
+
+        switch (direction)
+        {
+            case 0: dy = -1; npc.Direction = Direction.Up; break;
+            case 1: dy = 1; npc.Direction = Direction.Down; break;
+            case 2: dx = -1; npc.Direction = Direction.Left; break;
+            case 3: dx = 1; npc.Direction = Direction.Right; break;
+        }
+
+        var newX = npc.X + dx;
+        var newY = npc.Y + dy;
+
+        // Check if within wander radius
+        if (Math.Abs(newX - npc.StartX) > npc.WanderRadius ||
+            Math.Abs(newY - npc.StartY) > npc.WanderRadius)
+            return;
+
+        // Check if valid position
+        if (IsValidNPCPosition(newX, newY, npc))
+        {
+            npc.X = newX;
+            npc.Y = newY;
+        }
+    }
+
+    private void UpdateChasingNPC(NPC npc)
+    {
+        // Move toward player
+        var dx = Math.Sign(_state.PlayerX - npc.X);
+        var dy = Math.Sign(_state.PlayerY - npc.Y);
+
+        // Prefer horizontal or vertical based on distance
+        if (_random.Next(2) == 0 && dx != 0)
+        {
+            npc.Direction = dx > 0 ? Direction.Right : Direction.Left;
+            if (IsValidNPCPosition(npc.X + dx, npc.Y, npc))
+            {
+                npc.X += dx;
+                return;
+            }
+        }
+
+        if (dy != 0)
+        {
+            npc.Direction = dy > 0 ? Direction.Down : Direction.Up;
+            if (IsValidNPCPosition(npc.X, npc.Y + dy, npc))
+            {
+                npc.Y += dy;
+            }
+        }
+    }
+
+    private void UpdateFleeingNPC(NPC npc)
+    {
+        // Move away from player
+        var dx = -Math.Sign(_state.PlayerX - npc.X);
+        var dy = -Math.Sign(_state.PlayerY - npc.Y);
+
+        if (_random.Next(2) == 0 && dx != 0)
+        {
+            npc.Direction = dx > 0 ? Direction.Right : Direction.Left;
+            if (IsValidNPCPosition(npc.X + dx, npc.Y, npc))
+            {
+                npc.X += dx;
+                return;
+            }
+        }
+
+        if (dy != 0)
+        {
+            npc.Direction = dy > 0 ? Direction.Down : Direction.Up;
+            if (IsValidNPCPosition(npc.X, npc.Y + dy, npc))
+            {
+                npc.Y += dy;
+            }
+        }
+    }
+
+    private Direction GetDirectionToward(int fromX, int fromY, int toX, int toY)
+    {
+        var dx = toX - fromX;
+        var dy = toY - fromY;
+
+        if (Math.Abs(dx) > Math.Abs(dy))
+            return dx > 0 ? Direction.Right : Direction.Left;
+        else
+            return dy > 0 ? Direction.Down : Direction.Up;
+    }
+
+    private bool IsValidNPCPosition(int x, int y, NPC npc)
+    {
+        // Check bounds
+        if (x < 0 || x >= _state.CurrentZone!.Width ||
+            y < 0 || y >= _state.CurrentZone.Height)
+            return false;
+
+        // Check collision with player
+        if (x == _state.PlayerX && y == _state.PlayerY)
+            return false;
+
+        // Check collision with other NPCs
+        foreach (var other in _state.ZoneNPCs)
+        {
+            if (other != npc && other.IsEnabled && other.X == x && other.Y == y)
+                return false;
+        }
+
+        // Check collision with middle layer tiles (walls/objects)
+        var middleTile = _state.CurrentZone.GetTile(x, y, 1);
+        if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
+        {
+            var tile = _gameData.Tiles[middleTile];
+            if (tile.IsObject && !tile.IsDraggable)
+                return false;
+        }
+
+        return true;
     }
 
     private void Render()
