@@ -120,11 +120,25 @@ public enum ZoneObjectType : ushort
 }
 
 /// <summary>
+/// Represents an entity defined in IZAX data (NPC spawn with associated item).
+/// </summary>
+public class IZAXEntity
+{
+    public ushort CharacterId { get; set; }
+    public ushort X { get; set; }
+    public ushort Y { get; set; }
+    public ushort ItemTileId { get; set; }
+    public ushort ItemQuantity { get; set; }
+    public byte[] Data { get; set; } = new byte[6];
+}
+
+/// <summary>
 /// IZAX auxiliary data structure.
 /// </summary>
 public class ZoneAuxData
 {
     public byte[] RawData { get; set; } = Array.Empty<byte>();
+    public List<IZAXEntity> Entities { get; set; } = new();
 }
 
 /// <summary>

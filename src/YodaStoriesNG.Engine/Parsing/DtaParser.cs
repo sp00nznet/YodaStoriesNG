@@ -306,7 +306,8 @@ public class DtaParser
             {
                 case "IZAX":
                     var izaxLen = _reader.ReadUInt16();
-                    zone.AuxData = new ZoneAuxData { RawData = _reader.ReadBytes(Math.Max(0, izaxLen - 6)) };
+                    var izaxData = _reader.ReadBytes(Math.Max(0, izaxLen - 6));
+                    zone.AuxData = ParseIZAXData(izaxData);
                     break;
                 case "IZX2":
                     var izx2Len = _reader.ReadUInt16();
@@ -321,9 +322,7 @@ public class DtaParser
                     zone.Aux4Data = new ZoneAux4Data { RawData = _reader.ReadBytes(8) };
                     break;
                 case "IACT":
-                    var actLen = _reader.ReadUInt32();
-                    _reader.BaseStream.Seek(_reader.BaseStream.Position + actLen, SeekOrigin.Begin);
-                    zone.Actions.Add(new Data.Action());
+                    zone.Actions.Add(ParseIACT());
                     break;
                 default:
                     // Not a zone subsection - go back and return
@@ -454,7 +453,59 @@ public class DtaParser
         var length = reader.ReadUInt16();
         var dataLength = Math.Max(0, length - 6);
         var data = reader.ReadBytes(dataLength);
-        return new ZoneAuxData { RawData = data };
+        return ParseIZAXData(data);
+    }
+
+    /// <summary>
+    /// Parses IZAX entity data from raw bytes.
+    /// IZAX format: 2 bytes count, then for each entity: charId(2), x(2), y(2), itemTile(2), itemQty(2), data(6)
+    /// </summary>
+    private ZoneAuxData ParseIZAXData(byte[] data)
+    {
+        var auxData = new ZoneAuxData { RawData = data };
+
+        // Parse entity data from raw bytes
+        if (data.Length >= 2)
+        {
+            using var ms = new MemoryStream(data);
+            using var entityReader = new BinaryReader(ms);
+
+            try
+            {
+                var entityCount = entityReader.ReadUInt16();
+
+                // Each entity is 16 bytes: charId(2) + x(2) + y(2) + itemTile(2) + itemQty(2) + data(6)
+                for (int i = 0; i < entityCount && ms.Position + 16 <= ms.Length; i++)
+                {
+                    var charId = entityReader.ReadUInt16();
+
+                    // Skip invalid entries (0xFFFF means empty slot)
+                    if (charId == 0xFFFF)
+                    {
+                        entityReader.ReadBytes(14); // Skip rest of entry
+                        continue;
+                    }
+
+                    var entity = new IZAXEntity
+                    {
+                        CharacterId = charId,
+                        X = entityReader.ReadUInt16(),
+                        Y = entityReader.ReadUInt16(),
+                        ItemTileId = entityReader.ReadUInt16(),
+                        ItemQuantity = entityReader.ReadUInt16(),
+                        Data = entityReader.ReadBytes(6)
+                    };
+
+                    auxData.Entities.Add(entity);
+                }
+            }
+            catch
+            {
+                // Parsing failed - keep raw data, but entities list will be empty/partial
+            }
+        }
+
+        return auxData;
     }
 
     private ZoneAux2Data ParseIZX2FromReader(BinaryReader reader)
@@ -483,14 +534,69 @@ public class DtaParser
     private Data.Action ParseActionFromReader(BinaryReader reader, MemoryStream ms)
     {
         var action = new Data.Action();
-        var length = reader.ReadUInt32();
+        // IACT length is 2 bytes (not 4)
+        var length = reader.ReadUInt16();
         var endPos = ms.Position + length;
 
-        // Skip IACT data for now
-        if (endPos <= ms.Length)
+        try
+        {
+            // Parse conditions
+            var conditionCount = reader.ReadUInt16();
+            for (int i = 0; i < conditionCount && ms.Position < endPos; i++)
+            {
+                var condition = new Condition();
+                condition.Opcode = (ConditionOpcode)reader.ReadUInt16();
+                var argCount = reader.ReadUInt16();
+                var textLength = reader.ReadUInt16();
+
+                for (int j = 0; j < argCount && ms.Position < endPos; j++)
+                {
+                    condition.Arguments.Add(reader.ReadInt16());
+                }
+
+                if (textLength > 0 && ms.Position + textLength <= endPos)
+                {
+                    var textBytes = reader.ReadBytes(textLength);
+                    condition.Text = System.Text.Encoding.ASCII.GetString(textBytes).TrimEnd('\0');
+                }
+
+                action.Conditions.Add(condition);
+            }
+
+            // Parse instructions
+            if (ms.Position < endPos)
+            {
+                var instructionCount = reader.ReadUInt16();
+                for (int i = 0; i < instructionCount && ms.Position < endPos; i++)
+                {
+                    var instruction = new Instruction();
+                    instruction.Opcode = (InstructionOpcode)reader.ReadUInt16();
+                    var argCount = reader.ReadUInt16();
+                    var textLength = reader.ReadUInt16();
+
+                    for (int j = 0; j < argCount && ms.Position < endPos; j++)
+                    {
+                        instruction.Arguments.Add(reader.ReadInt16());
+                    }
+
+                    if (textLength > 0 && ms.Position + textLength <= endPos)
+                    {
+                        var textBytes = reader.ReadBytes(textLength);
+                        instruction.Text = System.Text.Encoding.ASCII.GetString(textBytes).TrimEnd('\0');
+                    }
+
+                    action.Instructions.Add(instruction);
+                }
+            }
+        }
+        catch
+        {
+            // If parsing fails, just seek to end of action
+        }
+
+        // Ensure we're at the end of the action
+        if (ms.Position != endPos && endPos <= ms.Length)
             ms.Seek(endPos, SeekOrigin.Begin);
-        else
-            ms.Seek(0, SeekOrigin.End);
 
         return action;
     }
@@ -499,16 +605,19 @@ public class DtaParser
     private Condition ParseCondition()
     {
         var condition = new Condition();
+        // Format: opcode (2 bytes) + argCount (2 bytes) + textLength (2 bytes) + args + text
         condition.Opcode = (ConditionOpcode)_reader.ReadUInt16();
         var argCount = _reader.ReadUInt16();
         var textLength = _reader.ReadUInt16();
 
+        // Read variable number of arguments based on argCount
         for (int i = 0; i < argCount; i++)
         {
             condition.Arguments.Add(_reader.ReadInt16());
         }
 
-        if (textLength > 0)
+        // Read text if present
+        if (textLength > 0 && textLength < 1000)
         {
             var textBytes = _reader.ReadBytes(textLength);
             condition.Text = System.Text.Encoding.ASCII.GetString(textBytes).TrimEnd('\0');
@@ -520,22 +629,66 @@ public class DtaParser
     private Instruction ParseInstruction()
     {
         var instruction = new Instruction();
+        // Format: opcode (2 bytes) + argCount (2 bytes) + textLength (2 bytes) + args + text
         instruction.Opcode = (InstructionOpcode)_reader.ReadUInt16();
         var argCount = _reader.ReadUInt16();
         var textLength = _reader.ReadUInt16();
 
+        // Read variable number of arguments based on argCount
         for (int i = 0; i < argCount; i++)
         {
             instruction.Arguments.Add(_reader.ReadInt16());
         }
 
-        if (textLength > 0)
+        // Read text if present
+        if (textLength > 0 && textLength < 1000)
         {
             var textBytes = _reader.ReadBytes(textLength);
             instruction.Text = System.Text.Encoding.ASCII.GetString(textBytes).TrimEnd('\0');
         }
 
         return instruction;
+    }
+
+    /// <summary>
+    /// Parses an IACT (action script) section using the main reader.
+    /// </summary>
+    private Data.Action ParseIACT()
+    {
+        var action = new Data.Action();
+        // IACT length is 2 bytes
+        var length = _reader.ReadUInt16();
+        var endPos = _reader.BaseStream.Position + length;
+
+        try
+        {
+            // Parse conditions
+            var conditionCount = _reader.ReadUInt16();
+            for (int i = 0; i < conditionCount && _reader.BaseStream.Position < endPos; i++)
+            {
+                action.Conditions.Add(ParseCondition());
+            }
+
+            // Parse instructions
+            if (_reader.BaseStream.Position < endPos)
+            {
+                var instructionCount = _reader.ReadUInt16();
+                for (int i = 0; i < instructionCount && _reader.BaseStream.Position < endPos; i++)
+                {
+                    action.Instructions.Add(ParseInstruction());
+                }
+            }
+        }
+        catch
+        {
+            // If parsing fails, just seek to end of action
+        }
+
+        // Ensure we're at the end of the action
+        if (_reader.BaseStream.Position != endPos && endPos <= _reader.BaseStream.Length)
+            _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
+
+        return action;
     }
 
     private void ParsePuzzlesSection(uint length)
@@ -554,14 +707,24 @@ public class DtaParser
 
             _reader.BaseStream.Seek(-4, SeekOrigin.Current);
 
-            // Read unknown header bytes
-            var unknown1 = _reader.ReadUInt16();
+            // PUZ2 format:
+            // - 2 bytes: puzzle type (0=Quest, 1=Transport, 2=Trade, 3=Use, 4=Goal)
+            // - 2 bytes: item1 (required item or NPC)
+            // - 2 bytes: item2 (reward item or destination)
+            // - 2 bytes: unknown (possibly flags or zone reference)
+            // - 2 bytes: unknown (possibly planet or difficulty)
+            // - 5 strings (length-prefixed)
+            var puzzleType = _reader.ReadInt16();
+            puzzle.Type = (PuzzleType)puzzleType;
             puzzle.Item1 = _reader.ReadUInt16();
             puzzle.Item2 = _reader.ReadUInt16();
             var unknown2 = _reader.ReadUInt16();
             var unknown3 = _reader.ReadUInt16();
 
             // Read puzzle strings (5 strings typically)
+            // String 0: Puzzle name/description
+            // String 1: Hint or goal text
+            // String 2-4: Additional dialogue/text
             for (int i = 0; i < 5; i++)
             {
                 var strLen = _reader.ReadUInt16();
@@ -583,7 +746,10 @@ public class DtaParser
 
         // Ensure we're at the end
         _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
-        Console.WriteLine($"Loaded {_data.Puzzles.Count} puzzles");
+
+        // Log puzzle statistics
+        var typeStats = _data.Puzzles.GroupBy(p => p.Type).Select(g => $"{g.Key}={g.Count()}");
+        Console.WriteLine($"Loaded {_data.Puzzles.Count} puzzles: {string.Join(", ", typeStats)}");
     }
 
     private void ParseCharactersSection(uint length)

@@ -1,5 +1,6 @@
 using Hexa.NET.SDL2;
 using YodaStoriesNG.Engine.Data;
+using YodaStoriesNG.Engine.Game;
 using YodaStoriesNG.Engine.UI;
 
 namespace YodaStoriesNG.Engine.Rendering;
@@ -23,13 +24,21 @@ public unsafe class GameRenderer : IDisposable
 
     private readonly GameData _gameData;
     private readonly TileRenderer _tileRenderer;
+    private readonly BitmapFont _font;
 
-    // Screen dimensions (9 tiles visible at once)
+    // Screen dimensions - Widescreen layout with HUD on right side
     public const int ViewportTilesX = 9;
     public const int ViewportTilesY = 9;
     public const int Scale = 2; // 2x scaling for better visibility
-    public const int WindowWidth = ViewportTilesX * Tile.Width * Scale;
-    public const int WindowHeight = ViewportTilesY * Tile.Height * Scale + 100 * Scale; // Extra space for HUD
+    public const int GameAreaWidth = ViewportTilesX * Tile.Width * Scale;  // 576 pixels
+    public const int GameAreaHeight = ViewportTilesY * Tile.Height * Scale; // 576 pixels
+    public const int SidebarWidth = 220; // HUD sidebar on right
+    public const int WindowWidth = GameAreaWidth + SidebarWidth;  // 796 pixels wide
+    public const int WindowHeight = GameAreaHeight; // 576 pixels tall (no bottom HUD)
+
+    // Legacy constants for portrait mode (preserved for future use)
+    // public const int PortraitWindowWidth = ViewportTilesX * Tile.Width * Scale;
+    // public const int PortraitWindowHeight = ViewportTilesY * Tile.Height * Scale + 100 * Scale;
 
     public bool IsInitialized => _window != null;
 
@@ -37,6 +46,7 @@ public unsafe class GameRenderer : IDisposable
     {
         _gameData = gameData;
         _tileRenderer = new TileRenderer();
+        _font = new BitmapFont();
     }
 
     public bool Initialize(string title = "Yoda Stories NG")
@@ -68,6 +78,12 @@ public unsafe class GameRenderer : IDisposable
         {
             Console.WriteLine($"SDL_CreateRenderer failed: {SDL.GetErrorS()}");
             return false;
+        }
+
+        // Initialize bitmap font
+        if (!_font.Initialize(_renderer))
+        {
+            Console.WriteLine("Warning: Failed to initialize bitmap font");
         }
 
         // Create tile atlas texture
@@ -127,13 +143,11 @@ public unsafe class GameRenderer : IDisposable
         {
             RenderTileLayer(zone, layer, cameraX, cameraY);
         }
-    }
 
-    private static bool _debugRendered = false;
+    }
 
     private void RenderTileLayer(Zone zone, int layer, int cameraX, int cameraY)
     {
-        int tilesRendered = 0;
         for (int screenY = 0; screenY < ViewportTilesY; screenY++)
         {
             for (int screenX = 0; screenX < ViewportTilesX; screenX++)
@@ -154,19 +168,12 @@ public unsafe class GameRenderer : IDisposable
                 if (layer > 0 && !tile.IsTransparent && tile.PixelData[0] == 0)
                     continue;
 
-                RenderTile(tileId, screenX * Tile.Width * Scale, screenY * Tile.Height * Scale);
-                tilesRendered++;
+                var screenPosX = screenX * Tile.Width * Scale;
+                var screenPosY = screenY * Tile.Height * Scale;
+                RenderTile(tileId, screenPosX, screenPosY);
             }
         }
-
-        if (!_debugRendered && layer == 0)
-        {
-            Console.WriteLine($"Layer {layer}: Rendered {tilesRendered} tiles");
-            _debugRendered = true;
-        }
     }
-
-    private static bool _debugAtlas = false;
 
     /// <summary>
     /// Renders a single tile at the specified screen position.
@@ -174,14 +181,7 @@ public unsafe class GameRenderer : IDisposable
     public void RenderTile(int tileId, int x, int y)
     {
         if (_tileAtlas == null || tileId < 0 || tileId >= _gameData.Tiles.Count)
-        {
-            if (!_debugAtlas)
-            {
-                Console.WriteLine($"RenderTile skipped: atlas={_tileAtlas != null}, tileId={tileId}, tileCount={_gameData.Tiles.Count}");
-                _debugAtlas = true;
-            }
             return;
-        }
 
         // Calculate source rectangle in atlas
         var atlasX = (tileId % _tilesPerRow) * Tile.Width;
@@ -229,44 +229,65 @@ public unsafe class GameRenderer : IDisposable
     }
 
     /// <summary>
-    /// Renders the HUD (health, inventory, etc.).
+    /// Renders the HUD (health, inventory, etc.) on the right sidebar.
     /// </summary>
     public void RenderHUD(int health, int maxHealth, List<int> inventory, int? selectedWeapon, int? selectedItem = null)
     {
-        var hudY = ViewportTilesY * Tile.Height * Scale;
+        var hudX = GameAreaWidth;  // Right side of game area
+        var hudY = 0;
 
-        // Background
-        SDL.SetRenderDrawColor(_renderer, 40, 40, 40, 255);
-        var hudRect = new SDLRect { X = 0, Y = hudY, W = WindowWidth, H = 100 * Scale };
+        // Sidebar background
+        SDL.SetRenderDrawColor(_renderer, 30, 30, 35, 255);
+        var hudRect = new SDLRect { X = hudX, Y = hudY, W = SidebarWidth, H = WindowHeight };
         SDL.RenderFillRect(_renderer, &hudRect);
 
+        // Sidebar border
+        SDL.SetRenderDrawColor(_renderer, 80, 80, 100, 255);
+        var borderRect = new SDLRect { X = hudX, Y = 0, W = 2, H = WindowHeight };
+        SDL.RenderFillRect(_renderer, &borderRect);
+
+        // === HEALTH SECTION ===
+        var sectionY = 15;
+        _font.RenderText(_renderer, "HEALTH", hudX + 10, sectionY, 1, 200, 200, 200, 255);
+        sectionY += 18;
+
         // Health bar background
-        SDL.SetRenderDrawColor(_renderer, 80, 0, 0, 255);
-        var healthBg = new SDLRect { X = 10, Y = hudY + 10, W = 150, H = 20 };
+        SDL.SetRenderDrawColor(_renderer, 60, 20, 20, 255);
+        var healthBg = new SDLRect { X = hudX + 10, Y = sectionY, W = SidebarWidth - 20, H = 24 };
         SDL.RenderFillRect(_renderer, &healthBg);
 
         // Health bar fill
-        var healthWidth = (int)((float)health / maxHealth * 150);
-        SDL.SetRenderDrawColor(_renderer, 200, 0, 0, 255);
-        var healthRect = new SDLRect { X = 10, Y = hudY + 10, W = healthWidth, H = 20 };
+        var healthWidth = (int)((float)health / maxHealth * (SidebarWidth - 20));
+        SDL.SetRenderDrawColor(_renderer, 180, 40, 40, 255);
+        var healthRect = new SDLRect { X = hudX + 10, Y = sectionY, W = healthWidth, H = 24 };
         SDL.RenderFillRect(_renderer, &healthRect);
 
         // Health bar border
-        SDL.SetRenderDrawColor(_renderer, 255, 255, 255, 255);
-        var healthBorder = new SDLRect { X = 10, Y = hudY + 10, W = 150, H = 20 };
-        SDL.RenderDrawRect(_renderer, &healthBorder);
+        SDL.SetRenderDrawColor(_renderer, 200, 100, 100, 255);
+        SDL.RenderDrawRect(_renderer, &healthBg);
 
-        // Weapon slot (on left side)
-        var weaponSlotX = 10;
-        var weaponSlotY = hudY + 40;
+        // Health text centered
+        var healthText = $"{health}/{maxHealth}";
+        var textWidth = _font.GetTextWidth(healthText);
+        _font.RenderText(_renderer, healthText, hudX + (SidebarWidth - textWidth) / 2, sectionY + 7, 1, 255, 255, 255, 255);
+
+        // === WEAPON SECTION ===
+        sectionY += 45;
+        _font.RenderText(_renderer, "WEAPON [TAB]", hudX + 10, sectionY, 1, 200, 200, 200, 255);
+        sectionY += 18;
+
+        // Weapon slot
+        var weaponSlotX = hudX + 10;
+        var weaponSlotY = sectionY;
+        var weaponSlotSize = Tile.Width * Scale;
 
         // Weapon slot background
-        SDL.SetRenderDrawColor(_renderer, 80, 80, 40, 255);
-        var weaponSlotRect = new SDLRect { X = weaponSlotX, Y = weaponSlotY, W = Tile.Width * Scale, H = Tile.Height * Scale };
+        SDL.SetRenderDrawColor(_renderer, 50, 50, 30, 255);
+        var weaponSlotRect = new SDLRect { X = weaponSlotX, Y = weaponSlotY, W = weaponSlotSize, H = weaponSlotSize };
         SDL.RenderFillRect(_renderer, &weaponSlotRect);
 
-        // Weapon slot border
-        SDL.SetRenderDrawColor(_renderer, 255, 200, 0, 255);
+        // Weapon slot border (gold)
+        SDL.SetRenderDrawColor(_renderer, 200, 180, 50, 255);
         SDL.RenderDrawRect(_renderer, &weaponSlotRect);
 
         // Weapon tile
@@ -274,40 +295,78 @@ public unsafe class GameRenderer : IDisposable
         {
             RenderTile(selectedWeapon.Value, weaponSlotX, weaponSlotY);
         }
+        else
+        {
+            _font.RenderText(_renderer, "FISTS", weaponSlotX + 8, weaponSlotY + 24, 1, 150, 150, 150, 255);
+        }
 
-        // Inventory slots (8 slots)
+        // === INVENTORY SECTION ===
+        sectionY += weaponSlotSize + 20;
+        _font.RenderText(_renderer, "INVENTORY [1-8]", hudX + 10, sectionY, 1, 200, 200, 200, 255);
+        sectionY += 18;
+
+        // Inventory grid (2x4 layout)
+        var slotSize = 44;
+        var slotPadding = 4;
+        var gridStartX = hudX + 10;
+        var gridStartY = sectionY;
+
         for (int i = 0; i < 8; i++)
         {
-            var slotX = 90 + i * (Tile.Width * Scale + 8);
-            var slotY = hudY + 40;
+            var col = i % 2;
+            var row = i / 2;
+            var slotX = gridStartX + col * (slotSize + slotPadding);
+            var slotY = gridStartY + row * (slotSize + slotPadding);
 
             // Slot background
-            SDL.SetRenderDrawColor(_renderer, 60, 60, 60, 255);
-            var slotRect = new SDLRect { X = slotX, Y = slotY, W = Tile.Width * Scale, H = Tile.Height * Scale };
+            SDL.SetRenderDrawColor(_renderer, 40, 40, 45, 255);
+            var slotRect = new SDLRect { X = slotX, Y = slotY, W = slotSize, H = slotSize };
             SDL.RenderFillRect(_renderer, &slotRect);
 
-            // Highlight selected item
+            // Highlight selected item (green border)
             if (selectedItem.HasValue && i < inventory.Count && inventory[i] == selectedItem.Value)
             {
-                SDL.SetRenderDrawColor(_renderer, 0, 255, 0, 255);
+                SDL.SetRenderDrawColor(_renderer, 50, 255, 50, 255);
+                var innerRect = new SDLRect { X = slotX - 2, Y = slotY - 2, W = slotSize + 4, H = slotSize + 4 };
+                SDL.RenderDrawRect(_renderer, &innerRect);
             }
             else
             {
-                SDL.SetRenderDrawColor(_renderer, 100, 100, 100, 255);
+                SDL.SetRenderDrawColor(_renderer, 80, 80, 90, 255);
             }
             SDL.RenderDrawRect(_renderer, &slotRect);
 
             // Item tile
             if (i < inventory.Count && inventory[i] > 0 && inventory[i] < _gameData.Tiles.Count)
             {
-                RenderTile(inventory[i], slotX, slotY);
+                // Center the tile in the slot
+                var tileX = slotX + (slotSize - Tile.Width) / 2;
+                var tileY = slotY + (slotSize - Tile.Height) / 2;
+                RenderTileUnscaled(inventory[i], tileX, tileY);
             }
 
-            // Slot number indicator (small colored square for slot position)
-            SDL.SetRenderDrawColor(_renderer, 150, 150, 150, 255);
-            var numRect = new SDLRect { X = slotX + 2, Y = slotY + Tile.Height * Scale - 6, W = 6, H = 6 };
-            SDL.RenderFillRect(_renderer, &numRect);
+            // Slot number (bottom right corner)
+            _font.RenderText(_renderer, $"{i + 1}", slotX + slotSize - 10, slotY + slotSize - 12, 1, 120, 120, 130, 200);
         }
+
+        // === CONTROLS SECTION ===
+        sectionY = gridStartY + 4 * (slotSize + slotPadding) + 15;
+        SDL.SetRenderDrawColor(_renderer, 50, 50, 60, 255);
+        var controlsBg = new SDLRect { X = hudX + 5, Y = sectionY, W = SidebarWidth - 10, H = WindowHeight - sectionY - 5 };
+        SDL.RenderFillRect(_renderer, &controlsBg);
+
+        sectionY += 8;
+        _font.RenderText(_renderer, "CONTROLS", hudX + 10, sectionY, 1, 150, 180, 200, 255);
+        sectionY += 16;
+        _font.RenderText(_renderer, "WASD - Move", hudX + 10, sectionY, 1, 130, 130, 140, 255);
+        sectionY += 12;
+        _font.RenderText(_renderer, "SPACE - Action", hudX + 10, sectionY, 1, 130, 130, 140, 255);
+        sectionY += 12;
+        _font.RenderText(_renderer, "O - Objective", hudX + 10, sectionY, 1, 130, 130, 140, 255);
+        sectionY += 12;
+        _font.RenderText(_renderer, "X - Travel", hudX + 10, sectionY, 1, 130, 130, 140, 255);
+        sectionY += 12;
+        _font.RenderText(_renderer, "R - Restart", hudX + 10, sectionY, 1, 130, 130, 140, 255);
     }
 
     /// <summary>
@@ -315,15 +374,11 @@ public unsafe class GameRenderer : IDisposable
     /// </summary>
     public void RenderZoneInfo(int zoneId, string planetName, int width, int height)
     {
-        // Zone info bar at top of screen
+        // Zone info bar at top of game area (not over sidebar)
         SDL.SetRenderDrawColor(_renderer, 0, 0, 0, 180);
-        var infoRect = new SDLRect { X = 0, Y = 0, W = WindowWidth, H = 24 };
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+        var infoRect = new SDLRect { X = 0, Y = 0, W = GameAreaWidth, H = 20 };
         SDL.RenderFillRect(_renderer, &infoRect);
-
-        // Zone indicator squares
-        SDL.SetRenderDrawColor(_renderer, 255, 255, 255, 255);
-        var zoneRect = new SDLRect { X = 5, Y = 5, W = 14, H = 14 };
-        SDL.RenderDrawRect(_renderer, &zoneRect);
 
         // Planet color indicator
         byte r = 255, g = 255, b = 255;
@@ -334,9 +389,14 @@ public unsafe class GameRenderer : IDisposable
             case "forest": r = 100; g = 200; b = 100; break;  // Endor
             case "swamp": r = 100; g = 150; b = 100; break;   // Dagobah
         }
+
+        // Draw planet indicator square
         SDL.SetRenderDrawColor(_renderer, r, g, b, 255);
-        var planetRect = new SDLRect { X = 7, Y = 7, W = 10, H = 10 };
+        var planetRect = new SDLRect { X = 5, Y = 5, W = 10, H = 10 };
         SDL.RenderFillRect(_renderer, &planetRect);
+
+        // Draw zone info text
+        _font.RenderText(_renderer, $"Zone {zoneId} - {planetName} ({width}x{height})", 20, 6, 1, r, g, b, 255);
     }
 
     /// <summary>
@@ -349,9 +409,9 @@ public unsafe class GameRenderer : IDisposable
 
         var alpha = (byte)(intensity * 100);
         SDL.SetRenderDrawColor(_renderer, 255, 0, 0, alpha);
-        var fullScreen = new SDLRect { X = 0, Y = 0, W = WindowWidth, H = ViewportTilesY * Tile.Height * Scale };
+        var gameArea = new SDLRect { X = 0, Y = 0, W = GameAreaWidth, H = GameAreaHeight };
         SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
-        SDL.RenderFillRect(_renderer, &fullScreen);
+        SDL.RenderFillRect(_renderer, &gameArea);
     }
 
     /// <summary>
@@ -364,9 +424,107 @@ public unsafe class GameRenderer : IDisposable
 
         var alpha = (byte)(intensity * 80);
         SDL.SetRenderDrawColor(_renderer, 255, 255, 0, alpha);
-        var fullScreen = new SDLRect { X = 0, Y = 0, W = WindowWidth, H = ViewportTilesY * Tile.Height * Scale };
+        var gameArea = new SDLRect { X = 0, Y = 0, W = GameAreaWidth, H = GameAreaHeight };
         SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
-        SDL.RenderFillRect(_renderer, &fullScreen);
+        SDL.RenderFillRect(_renderer, &gameArea);
+    }
+
+    /// <summary>
+    /// Renders a melee slash effect.
+    /// </summary>
+    public void RenderMeleeSlash(int playerScreenX, int playerScreenY, int direction, double progress)
+    {
+        // Calculate slash position based on direction
+        int offsetX = 0, offsetY = 0;
+
+        // Direction: 0=Up, 1=Down, 2=Left, 3=Right
+        switch (direction)
+        {
+            case 0: offsetY = -Tile.Height * Scale / 2; break;
+            case 1: offsetY = Tile.Height * Scale / 2; break;
+            case 2: offsetX = -Tile.Width * Scale / 2; break;
+            case 3: offsetX = Tile.Width * Scale / 2; break;
+        }
+
+        // Animate the slash - it expands then fades
+        var slashProgress = 1.0 - progress;  // 0 to 1
+        var alpha = (byte)((1.0 - slashProgress) * 255);
+        var size = (int)(8 + slashProgress * 24);
+
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+
+        // Draw lightsaber-like slash (green/cyan color)
+        SDL.SetRenderDrawColor(_renderer, 100, 255, 150, alpha);
+
+        var centerX = playerScreenX + Tile.Width * Scale / 2 + offsetX;
+        var centerY = playerScreenY + Tile.Height * Scale / 2 + offsetY;
+
+        // Draw slash line based on direction
+        if (direction == 0 || direction == 1)
+        {
+            // Vertical slash - horizontal swing
+            var slashRect = new SDLRect
+            {
+                X = centerX - size / 2,
+                Y = centerY - 4,
+                W = size,
+                H = 8
+            };
+            SDL.RenderFillRect(_renderer, &slashRect);
+        }
+        else
+        {
+            // Horizontal slash - vertical swing
+            var slashRect = new SDLRect
+            {
+                X = centerX - 4,
+                Y = centerY - size / 2,
+                W = 8,
+                H = size
+            };
+            SDL.RenderFillRect(_renderer, &slashRect);
+        }
+
+        // Draw glow effect
+        SDL.SetRenderDrawColor(_renderer, 200, 255, 200, (byte)(alpha / 2));
+        var glowRect = new SDLRect
+        {
+            X = centerX - size / 2 - 2,
+            Y = centerY - size / 2 - 2,
+            W = size + 4,
+            H = size + 4
+        };
+        SDL.RenderDrawRect(_renderer, &glowRect);
+    }
+
+    /// <summary>
+    /// Renders a projectile (blaster bolt).
+    /// </summary>
+    public void RenderProjectile(int screenX, int screenY, Game.ProjectileType type)
+    {
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+
+        // Draw blaster bolt (red/orange)
+        byte r = 255, g = 100, b = 50;
+        if (type == Game.ProjectileType.HeavyBlaster)
+        {
+            g = 50; b = 150;  // More purple for heavy
+        }
+
+        // Core
+        SDL.SetRenderDrawColor(_renderer, 255, 255, 200, 255);
+        var coreRect = new SDLRect { X = screenX + 12, Y = screenY + 12, W = 8, H = 8 };
+        SDL.RenderFillRect(_renderer, &coreRect);
+
+        // Glow
+        SDL.SetRenderDrawColor(_renderer, r, g, b, 180);
+        var glowRect = new SDLRect { X = screenX + 8, Y = screenY + 8, W = 16, H = 16 };
+        SDL.RenderFillRect(_renderer, &glowRect);
+
+        // Outer glow
+        SDL.SetRenderDrawColor(_renderer, r, g, b, 80);
+        var outerRect = new SDLRect { X = screenX + 4, Y = screenY + 4, W = 24, H = 24 };
+        SDL.RenderDrawRect(_renderer, &outerRect);
     }
 
     private void RenderTileUnscaled(int tileId, int x, int y)
@@ -407,27 +565,27 @@ public unsafe class GameRenderer : IDisposable
     /// </summary>
     public void RenderMessages(IReadOnlyList<GameMessage> messages, GameMessage? dialogue)
     {
-        // Render regular messages (top-right corner)
+        // Render regular messages (top-right of game area, not sidebar)
         var messageY = 30;
         foreach (var msg in messages)
         {
             var alpha = (byte)(Math.Min(1.0, msg.TimeRemaining) * 255);
-            RenderMessageBox(msg.Text, WindowWidth - 10, messageY, alpha, msg.Type, alignRight: true);
+            RenderMessageBox(msg.Text, GameAreaWidth - 10, messageY, alpha, msg.Type, alignRight: true);
             messageY += 28;
         }
 
         // Render dialogue box (bottom of game area)
         if (dialogue != null)
         {
-            var dialogueY = ViewportTilesY * Tile.Height * Scale - 60;
+            var dialogueY = GameAreaHeight - 70;
             RenderDialogueBox(dialogue.Text, 10, dialogueY);
         }
     }
 
     private void RenderMessageBox(string text, int x, int y, byte alpha, MessageType type, bool alignRight = false)
     {
-        // Calculate text width (rough estimate: 7 pixels per character)
-        var textWidth = text.Length * 7;
+        // Calculate text width using font
+        var textWidth = _font.GetTextWidth(text);
         var boxWidth = textWidth + 16;
         var boxX = alignRight ? x - boxWidth : x;
 
@@ -444,33 +602,50 @@ public unsafe class GameRenderer : IDisposable
         // Draw background
         SDL.SetRenderDrawColor(_renderer, r, g, b, (byte)(alpha * 0.8));
         SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
-        var bgRect = new SDLRect { X = boxX, Y = y, W = boxWidth, H = 24 };
+        var bgRect = new SDLRect { X = boxX, Y = y, W = boxWidth, H = 20 };
         SDL.RenderFillRect(_renderer, &bgRect);
 
         // Draw border
         SDL.SetRenderDrawColor(_renderer, 255, 255, 255, alpha);
         SDL.RenderDrawRect(_renderer, &bgRect);
 
-        // Draw text representation (simple rectangles for each character)
-        SDL.SetRenderDrawColor(_renderer, 255, 255, 255, alpha);
-        for (int i = 0; i < text.Length; i++)
-        {
-            if (text[i] != ' ')
-            {
-                var charRect = new SDLRect { X = boxX + 8 + i * 7, Y = y + 6, W = 5, H = 12 };
-                SDL.RenderFillRect(_renderer, &charRect);
-            }
-        }
+        // Draw text using bitmap font
+        _font.RenderText(_renderer, text, boxX + 8, y + 6, 1, 255, 255, 255, alpha);
     }
 
     private void RenderDialogueBox(string text, int x, int y)
     {
-        var boxWidth = WindowWidth - 20;
+        var boxWidth = GameAreaWidth - 20;  // Fit within game area only
+        var maxCharsPerLine = (boxWidth - 20) / 8;  // 8 pixels per character
+
+        // Word wrap the text
+        var wrappedLines = new List<string>();
+        var words = text.Split(' ');
+        var currentLine = "";
+
+        foreach (var word in words)
+        {
+            if (currentLine.Length + word.Length + 1 <= maxCharsPerLine)
+            {
+                currentLine += (currentLine.Length > 0 ? " " : "") + word;
+            }
+            else
+            {
+                if (currentLine.Length > 0)
+                    wrappedLines.Add(currentLine);
+                currentLine = word;
+            }
+        }
+        if (currentLine.Length > 0)
+            wrappedLines.Add(currentLine);
+
+        // Calculate box height based on lines
+        var boxHeight = Math.Max(40, 16 + wrappedLines.Count * 12 + 16);
 
         // Draw background
         SDL.SetRenderDrawColor(_renderer, 20, 20, 50, 230);
         SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
-        var bgRect = new SDLRect { X = x, Y = y, W = boxWidth, H = 56 };
+        var bgRect = new SDLRect { X = x, Y = y, W = boxWidth, H = boxHeight };
         SDL.RenderFillRect(_renderer, &bgRect);
 
         // Draw border
@@ -478,40 +653,25 @@ public unsafe class GameRenderer : IDisposable
         SDL.RenderDrawRect(_renderer, &bgRect);
 
         // Draw inner border
-        var innerRect = new SDLRect { X = x + 2, Y = y + 2, W = boxWidth - 4, H = 52 };
+        var innerRect = new SDLRect { X = x + 2, Y = y + 2, W = boxWidth - 4, H = boxHeight - 4 };
         SDL.RenderDrawRect(_renderer, &innerRect);
 
-        // Draw text representation
-        SDL.SetRenderDrawColor(_renderer, 255, 255, 255, 255);
-        var textX = x + 10;
-        var textY = y + 10;
-        var maxCharsPerLine = (boxWidth - 20) / 7;
-
-        for (int i = 0; i < text.Length; i++)
+        // Draw text using bitmap font
+        var textY = y + 8;
+        foreach (var line in wrappedLines)
         {
-            // Word wrap
-            if (i > 0 && i % maxCharsPerLine == 0)
-            {
-                textY += 16;
-                textX = x + 10;
-            }
-
-            if (text[i] != ' ')
-            {
-                var charRect = new SDLRect { X = textX, Y = textY, W = 5, H = 12 };
-                SDL.RenderFillRect(_renderer, &charRect);
-            }
-            textX += 7;
+            _font.RenderText(_renderer, line, x + 10, textY);
+            textY += 12;
         }
 
-        // Draw "Press Space to continue" indicator
-        SDL.SetRenderDrawColor(_renderer, 150, 150, 200, 255);
-        var indicatorRect = new SDLRect { X = x + boxWidth - 30, Y = y + 46, W = 20, H = 6 };
-        SDL.RenderFillRect(_renderer, &indicatorRect);
+        // Draw "Press Space" hint at bottom right
+        _font.RenderText(_renderer, "[SPACE]", x + boxWidth - 70, y + boxHeight - 14, 1, 150, 150, 200, 255);
     }
 
     public void Dispose()
     {
+        _font?.Dispose();
+
         if (_tileAtlas != null)
         {
             SDL.DestroyTexture(_tileAtlas);

@@ -45,6 +45,11 @@ public class NPC
     public int Damage { get; set; } = 10;
     public int AttackRange { get; set; } = 1;
 
+    // Item handoff (from IZAX data)
+    public int? CarriedItemId { get; set; }  // Item this NPC will give when interacted with
+    public int CarriedItemQuantity { get; set; } = 1;
+    public bool HasGivenItem { get; set; } = false;  // Track if item was already given
+
     /// <summary>
     /// Creates an NPC from a zone object.
     /// </summary>

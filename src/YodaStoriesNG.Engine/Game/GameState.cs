@@ -17,6 +17,7 @@ public class GameState
     // Current zone
     public int CurrentZoneId { get; set; }
     public Zone? CurrentZone { get; set; }
+    public int PreviousZoneId { get; set; } = -1;  // For "return" doors (65535 destination)
 
     // Inventory
     public List<int> Inventory { get; set; } = new();
@@ -44,12 +45,26 @@ public class GameState
     public double DamageFlashTimer { get; set; }
     public double AttackFlashTimer { get; set; }
 
+    // Attack state
+    public bool IsAttacking { get; set; }
+    public double AttackTimer { get; set; }
+
+    // Weapons (can have multiple, toggle between them)
+    public List<int> Weapons { get; set; } = new();
+    public int CurrentWeaponIndex { get; set; }
+
     // Camera position (for large zones)
     public int CameraX { get; set; }
     public int CameraY { get; set; }
 
+    // X-Wing position (for rendering in Dagobah zones)
+    public (int X, int Y)? XWingPosition { get; set; }
+
     // NPCs in current zone
     public List<NPC> ZoneNPCs { get; set; } = new();
+
+    // Active projectiles
+    public List<Projectile> Projectiles { get; set; } = new();
 
     // Track collected objects by zone (key = "zoneId_x_y")
     public HashSet<string> CollectedObjects { get; set; } = new();
@@ -80,6 +95,11 @@ public class GameState
         CameraY = 0;
         ZoneNPCs.Clear();
         CollectedObjects.Clear();
+        IsAttacking = false;
+        AttackTimer = 0;
+        Weapons.Clear();
+        CurrentWeaponIndex = 0;
+        Projectiles.Clear();
     }
 
     /// <summary>
@@ -122,12 +142,11 @@ public class GameState
         Inventory.Contains(itemId);
 
     /// <summary>
-    /// Adds an item to inventory.
+    /// Adds an item to inventory (allows duplicates for stacking).
     /// </summary>
     public void AddItem(int itemId)
     {
-        if (!Inventory.Contains(itemId))
-            Inventory.Add(itemId);
+        Inventory.Add(itemId);
     }
 
     /// <summary>

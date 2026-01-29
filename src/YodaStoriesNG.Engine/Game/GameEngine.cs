@@ -10,21 +10,28 @@ namespace YodaStoriesNG.Engine.Game;
 /// <summary>
 /// Main game engine that coordinates all systems.
 /// </summary>
-public class GameEngine : IDisposable
+public unsafe class GameEngine : IDisposable
 {
     private GameData? _gameData;
     private GameState _state;
     private GameRenderer? _renderer;
     private ActionExecutor? _actionExecutor;
+    private WorldGenerator? _worldGenerator;
     private MessageSystem _messages = new();
     private SoundManager? _sounds;
 
     private bool _isRunning;
     private readonly string _dataPath;
 
+    // Controller support
+    private SDLGameController* _controller;
+    private bool _controllerConnected;
+    private const int ControllerDeadzone = 8000;  // Analog stick deadzone
+
     // Timing
     private const double TargetFrameTime = 1.0 / 60.0; // 60 FPS
     private const double AnimationFrameTime = 0.15; // 150ms per animation frame
+    private double _controllerMoveTimer = 0;  // Rate limit controller movement
 
     public GameEngine(string dataPath)
     {
@@ -64,6 +71,11 @@ public class GameEngine : IDisposable
         // Initialize action executor
         _actionExecutor = new ActionExecutor(_gameData, _state);
 
+        // Wire up action executor events
+        _actionExecutor.OnDialogue += (speaker, text) => _messages.ShowDialogue(speaker, text);
+        _actionExecutor.OnMessage += (text) => _messages.ShowMessage(text, MessageType.Info);
+        _actionExecutor.OnPlaySound += (soundId) => _sounds?.PlaySound(soundId);
+
         // Initialize sound manager
         _sounds = new SoundManager(_dataPath);
         _sounds.Initialize();
@@ -74,10 +86,51 @@ public class GameEngine : IDisposable
             _sounds.LoadSound(sound.Id, sound.FileName);
         }
 
+        // Initialize game controller support
+        InitializeController();
+
         // Start new game
         StartNewGame();
 
         return true;
+    }
+
+    /// <summary>
+    /// Initializes game controller (Xbox controller support).
+    /// </summary>
+    private void InitializeController()
+    {
+        // Initialize SDL game controller subsystem
+        if (SDL.InitSubSystem(0x00002000) < 0)  // SDL_INIT_GAMECONTROLLER
+        {
+            Console.WriteLine($"Failed to init game controller: {SDL.GetErrorS()}");
+            return;
+        }
+
+        // Check for connected controllers
+        var numJoysticks = SDL.NumJoysticks();
+        Console.WriteLine($"Found {numJoysticks} joystick(s)");
+
+        for (int i = 0; i < numJoysticks; i++)
+        {
+            if (SDL.IsGameController(i) != 0)
+            {
+                _controller = SDL.GameControllerOpen(i);
+                if (_controller != null)
+                {
+                    var name = SDL.GameControllerNameS(_controller);
+                    Console.WriteLine($"Controller connected: {name}");
+                    _controllerConnected = true;
+                    _messages.ShowMessage($"Controller: {name}", MessageType.System);
+                    break;
+                }
+            }
+        }
+
+        if (!_controllerConnected)
+        {
+            Console.WriteLine("No game controller found (plug in Xbox controller to use)");
+        }
     }
 
     /// <summary>
@@ -88,21 +141,43 @@ public class GameEngine : IDisposable
         _state.Reset();
         _messages.Clear();
 
-        // Give player a starting weapon (lightsaber tile - around 799-810 range)
-        _state.SelectedWeapon = 808;  // Lightsaber
+        // Give player starting weapon - just fists until they find a weapon
+        _state.Weapons.Add(0);    // Fists (no tile, bare hands)
+        _state.CurrentWeaponIndex = 0;
+        _state.SelectedWeapon = null;  // No weapon equipped initially
 
-        // Welcome message
-        _messages.ShowMessage("Welcome to Yoda Stories!", MessageType.System);
-        _messages.ShowMessage("Use N/P to explore zones with NPCs", MessageType.Info);
+        // Generate the world
+        _worldGenerator = new WorldGenerator(_gameData!);
+        _worldGenerator.DumpDagobahInfo();  // Debug: print Dagobah zone analysis
+        var world = _worldGenerator.GenerateWorld();
 
-        // Find the starting zone (typically zone 0 or first non-empty zone)
-        for (int i = 0; i < _gameData!.Zones.Count; i++)
+        // Welcome message - show mission info
+        _messages.ShowMessage("Find Yoda to receive your mission.", MessageType.System);
+        _messages.ShowMessage("Tab=Toggle weapon, Space=Talk, O=Objective", MessageType.Info);
+
+        // Show mission name if available
+        if (world.Mission != null)
         {
-            var zone = _gameData.Zones[i];
-            if (zone.Width > 0 && zone.Height > 0)
+            _messages.ShowMessage($"Mission: {world.Mission.Name}", MessageType.System);
+        }
+
+        // Load the starting zone (from Dagobah or landing zone)
+        var startZoneId = world.StartingZoneId;
+        if (startZoneId >= 0 && startZoneId < _gameData!.Zones.Count)
+        {
+            LoadZone(startZoneId);
+        }
+        else
+        {
+            // Fallback to first valid zone
+            for (int i = 0; i < _gameData!.Zones.Count; i++)
             {
-                LoadZone(i);
-                break;
+                var zone = _gameData.Zones[i];
+                if (zone.Width > 0 && zone.Height > 0)
+                {
+                    LoadZone(i);
+                    break;
+                }
             }
         }
     }
@@ -159,12 +234,35 @@ public class GameEngine : IDisposable
 
         Console.WriteLine($"Zone {zoneId}: {zone.Width}x{zone.Height}, planet: {zone.Planet}, spawn: ({_state.PlayerX},{_state.PlayerY})");
 
+        // Debug: show zone objects
+        foreach (var obj in zone.Objects)
+        {
+            if (obj.Type == ZoneObjectType.DoorEntrance || obj.Type == ZoneObjectType.DoorExit ||
+                obj.Type == ZoneObjectType.Teleporter || obj.Type == ZoneObjectType.Lock)
+            {
+                Console.WriteLine($"  Object: {obj.Type} at ({obj.X},{obj.Y}) -> zone {obj.Argument}");
+            }
+        }
+
         // Show zone entry message
         _messages.ShowMessage($"Entering {zone.Planet} zone", MessageType.Info);
         _sounds?.PlaySound(SoundManager.SoundDoor);
 
+        // Debug: Show action count for zones with scripts
+        if (zone.Actions.Any(a => a.Instructions.Count > 0))
+        {
+            int totalInstructions = zone.Actions.Sum(a => a.Instructions.Count);
+            Console.WriteLine($"  Zone has {zone.Actions.Count} scripts ({totalInstructions} instructions)");
+        }
+
         // Initialize NPCs from zone objects
         InitializeZoneNPCs();
+
+        // Spawn Yoda if this is his zone
+        SpawnYodaIfNeeded(zoneId);
+
+        // Check for X-Wing in this zone
+        CheckForXWing(zoneId);
 
         // Reset camera for zone
         UpdateCamera();
@@ -223,7 +321,159 @@ public class GameEngine : IDisposable
                 case SDLEventType.Keydown:
                     HandleKeyDown(evt.Key.Keysym.Sym);
                     break;
+
+                // Controller events
+                case SDLEventType.Controllerdeviceadded:
+                    if (!_controllerConnected)
+                    {
+                        _controller = SDL.GameControllerOpen(evt.Cdevice.Which);
+                        if (_controller != null)
+                        {
+                            var name = SDL.GameControllerNameS(_controller);
+                            Console.WriteLine($"Controller connected: {name}");
+                            _controllerConnected = true;
+                            _messages.ShowMessage($"Controller: {name}", MessageType.System);
+                        }
+                    }
+                    break;
+
+                case SDLEventType.Controllerdeviceremoved:
+                    if (_controllerConnected)
+                    {
+                        SDL.GameControllerClose(_controller);
+                        _controller = null;
+                        _controllerConnected = false;
+                        Console.WriteLine("Controller disconnected");
+                        _messages.ShowMessage("Controller disconnected", MessageType.System);
+                    }
+                    break;
+
+                case SDLEventType.Controllerbuttondown:
+                    HandleControllerButton(evt.Cbutton.Button, true);
+                    break;
+
+                case SDLEventType.Controllerbuttonup:
+                    HandleControllerButton(evt.Cbutton.Button, false);
+                    break;
             }
+        }
+
+        // Handle analog stick movement (called every frame)
+        if (_controllerConnected && _controller != null)
+        {
+            HandleControllerAnalog();
+        }
+    }
+
+    /// <summary>
+    /// Handles controller button presses.
+    /// Xbox controller mapping:
+    /// - A: Action/Talk (Space)
+    /// - B: Cancel/Back
+    /// - X: Use Item
+    /// - Y: Show Objective
+    /// - LB/RB: Cycle weapons
+    /// - Start: Restart
+    /// - D-Pad: Movement
+    /// </summary>
+    private void HandleControllerButton(byte button, bool pressed)
+    {
+        if (!pressed) return;  // Only handle button down
+
+        // SDL GameController button constants
+        const byte SDL_CONTROLLER_BUTTON_A = 0;
+        const byte SDL_CONTROLLER_BUTTON_B = 1;
+        const byte SDL_CONTROLLER_BUTTON_X = 2;
+        const byte SDL_CONTROLLER_BUTTON_Y = 3;
+        const byte SDL_CONTROLLER_BUTTON_BACK = 4;
+        const byte SDL_CONTROLLER_BUTTON_START = 6;
+        const byte SDL_CONTROLLER_BUTTON_LEFTSHOULDER = 9;
+        const byte SDL_CONTROLLER_BUTTON_RIGHTSHOULDER = 10;
+        const byte SDL_CONTROLLER_BUTTON_DPAD_UP = 11;
+        const byte SDL_CONTROLLER_BUTTON_DPAD_DOWN = 12;
+        const byte SDL_CONTROLLER_BUTTON_DPAD_LEFT = 13;
+        const byte SDL_CONTROLLER_BUTTON_DPAD_RIGHT = 14;
+
+        switch (button)
+        {
+            case SDL_CONTROLLER_BUTTON_A:
+                UseItem();  // A = Action/Talk
+                break;
+            case SDL_CONTROLLER_BUTTON_B:
+                if (_messages.HasDialogue)
+                    _messages.DismissDialogue();
+                break;
+            case SDL_CONTROLLER_BUTTON_X:
+                TravelToPlanet();  // X = Travel
+                break;
+            case SDL_CONTROLLER_BUTTON_Y:
+                ShowMissionObjective();  // Y = Objective
+                break;
+            case SDL_CONTROLLER_BUTTON_START:
+                StartNewGame();  // Start = Restart
+                break;
+            case SDL_CONTROLLER_BUTTON_BACK:
+                _isRunning = false;  // Back = Quit
+                break;
+            case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+            case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+                ToggleWeapon();  // Shoulder buttons = Toggle weapon
+                break;
+            case SDL_CONTROLLER_BUTTON_DPAD_UP:
+                TryMovePlayer(0, -1, Direction.Up, false);
+                break;
+            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+                TryMovePlayer(0, 1, Direction.Down, false);
+                break;
+            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+                TryMovePlayer(-1, 0, Direction.Left, false);
+                break;
+            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                TryMovePlayer(1, 0, Direction.Right, false);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Handles controller analog stick movement.
+    /// </summary>
+    private void HandleControllerAnalog()
+    {
+        // Rate limit movement
+        _controllerMoveTimer -= TargetFrameTime;
+        if (_controllerMoveTimer > 0) return;
+
+        // Get left stick axes
+        var leftX = SDL.GameControllerGetAxis(_controller, SDLGameControllerAxis.Leftx);
+        var leftY = SDL.GameControllerGetAxis(_controller, SDLGameControllerAxis.Lefty);
+
+        // Apply deadzone
+        if (Math.Abs(leftX) < ControllerDeadzone) leftX = 0;
+        if (Math.Abs(leftY) < ControllerDeadzone) leftY = 0;
+
+        // Determine movement direction
+        int dx = 0, dy = 0;
+        var dir = _state.PlayerDirection;
+
+        if (Math.Abs(leftX) > Math.Abs(leftY))
+        {
+            // Horizontal movement
+            if (leftX > 0) { dx = 1; dir = Direction.Right; }
+            else if (leftX < 0) { dx = -1; dir = Direction.Left; }
+        }
+        else
+        {
+            // Vertical movement
+            if (leftY > 0) { dy = 1; dir = Direction.Down; }
+            else if (leftY < 0) { dy = -1; dir = Direction.Up; }
+        }
+
+        if (dx != 0 || dy != 0)
+        {
+            TryMovePlayer(dx, dy, dir, false);
+            // Movement rate based on stick magnitude
+            var magnitude = Math.Max(Math.Abs(leftX), Math.Abs(leftY));
+            _controllerMoveTimer = 0.15 - (magnitude / 32768.0) * 0.1;  // 0.05 to 0.15 seconds
         }
     }
 
@@ -238,14 +488,18 @@ public class GameEngine : IDisposable
         const int SDLK_RIGHT = 1073741903;
         const int SDLK_1 = 49;
         const int SDLK_8 = 56;
+        const int SDLK_TAB = 9;
         const int SDLK_a = 97;
         const int SDLK_d = 100;
+        const int SDLK_f = 102;
         const int SDLK_m = 109;
         const int SDLK_n = 110;
+        const int SDLK_o = 111;
         const int SDLK_p = 112;
         const int SDLK_r = 114;
         const int SDLK_s = 115;
         const int SDLK_w = 119;
+        const int SDLK_x = 120;
 
         switch (keyCode)
         {
@@ -255,22 +509,22 @@ public class GameEngine : IDisposable
 
             case SDLK_UP:
             case SDLK_w:
-                TryMovePlayer(0, -1, Direction.Up);
+                TryMovePlayer(0, -1, Direction.Up, IsShiftHeld());
                 break;
 
             case SDLK_DOWN:
             case SDLK_s:
-                TryMovePlayer(0, 1, Direction.Down);
+                TryMovePlayer(0, 1, Direction.Down, IsShiftHeld());
                 break;
 
             case SDLK_LEFT:
             case SDLK_a:
-                TryMovePlayer(-1, 0, Direction.Left);
+                TryMovePlayer(-1, 0, Direction.Left, IsShiftHeld());
                 break;
 
             case SDLK_RIGHT:
             case SDLK_d:
-                TryMovePlayer(1, 0, Direction.Right);
+                TryMovePlayer(1, 0, Direction.Right, IsShiftHeld());
                 break;
 
             case SDLK_SPACE:
@@ -298,6 +552,11 @@ public class GameEngine : IDisposable
                 StartNewGame();
                 break;
 
+            case SDLK_x:
+                // X-Wing travel
+                TravelToPlanet();
+                break;
+
             case SDLK_n:
                 // Next zone (debug)
                 LoadZone((_state.CurrentZoneId + 1) % _gameData!.Zones.Count);
@@ -316,10 +575,175 @@ public class GameEngine : IDisposable
                     _messages.ShowMessage(_sounds.IsMuted ? "Sound OFF" : "Sound ON", MessageType.System);
                 }
                 break;
+
+            case SDLK_f:  // F key - find zone with NPCs
+                FindZoneWithContent();
+                break;
+
+            case SDLK_o:  // O key - show current objective
+                ShowMissionObjective();
+                break;
+
+            case SDLK_TAB:  // Tab - toggle weapon
+                ToggleWeapon();
+                break;
         }
     }
 
-    private void TryMovePlayer(int dx, int dy, Direction direction)
+    private void ToggleWeapon()
+    {
+        if (_state.Weapons.Count == 0)
+        {
+            _messages.ShowMessage("No weapons!", MessageType.Info);
+            return;
+        }
+
+        _state.CurrentWeaponIndex = (_state.CurrentWeaponIndex + 1) % _state.Weapons.Count;
+        var weaponId = _state.Weapons[_state.CurrentWeaponIndex];
+
+        if (weaponId == 0)
+        {
+            _state.SelectedWeapon = null;
+            _messages.ShowMessage("Equipped: Fists", MessageType.Info);
+        }
+        else
+        {
+            _state.SelectedWeapon = weaponId;
+            var weaponName = GetTileName(weaponId) ?? $"Weapon";
+            _messages.ShowMessage($"Equipped: {weaponName}", MessageType.Info);
+        }
+    }
+
+    private void ShowMissionObjective()
+    {
+        if (_worldGenerator?.CurrentWorld == null)
+        {
+            _messages.ShowMessage("No active mission.", MessageType.Info);
+            return;
+        }
+
+        var world = _worldGenerator.CurrentWorld;
+        var mission = world.Mission;
+
+        if (mission == null)
+        {
+            _messages.ShowMessage("Explore the area.", MessageType.Info);
+            return;
+        }
+
+        // Show mission name
+        _messages.ShowMessage($"Mission: {mission.Name}", MessageType.System);
+
+        // Show current objective
+        var objective = world.GetCurrentObjective();
+        _messages.ShowMessage($"Objective: {objective}", MessageType.Info);
+
+        // Show progress
+        if (mission.PuzzleChain.Count > 0)
+        {
+            var completed = mission.PuzzleChain.Count(s => s.IsCompleted);
+            _messages.ShowMessage($"Progress: {completed}/{mission.PuzzleChain.Count} steps", MessageType.Info);
+        }
+
+        // Show current required item if applicable
+        var currentStep = mission.CurrentPuzzleStep;
+        if (currentStep != null && currentStep.RequiredItemId > 0)
+        {
+            var itemName = GetTileName(currentStep.RequiredItemId) ?? $"Item #{currentStep.RequiredItemId}";
+            bool hasItem = _state.HasItem(currentStep.RequiredItemId);
+            _messages.ShowMessage($"Need: {itemName} {(hasItem ? "(owned)" : "(not found)")}", MessageType.Info);
+        }
+    }
+
+    private void FindZoneWithContent()
+    {
+        // Search for next zone with NPCs or items starting from current zone
+        for (int i = 1; i < _gameData!.Zones.Count; i++)
+        {
+            var zoneId = (_state.CurrentZoneId + i) % _gameData.Zones.Count;
+            var zone = _gameData.Zones[zoneId];
+
+            if (zone.Width == 0 || zone.Height == 0)
+                continue;
+
+            int npcCount = 0;
+            int itemCount = 0;
+            int friendlyCount = 0;
+            int enemyCount = 0;
+
+            foreach (var obj in zone.Objects)
+            {
+                if (obj.Type == ZoneObjectType.PuzzleNPC)
+                {
+                    npcCount++;
+                    // Check if valid character and what type
+                    if (obj.Argument < _gameData.Characters.Count)
+                    {
+                        var charType = _gameData.Characters[obj.Argument].Type;
+                        if (charType == CharacterType.Enemy)
+                            enemyCount++;
+                        else if (charType == CharacterType.Friendly)
+                            friendlyCount++;
+                    }
+                }
+                if (obj.Type == ZoneObjectType.CrateItem || obj.Type == ZoneObjectType.CrateWeapon)
+                    itemCount++;
+            }
+
+            if (npcCount > 0 || itemCount > 0)
+            {
+                Console.WriteLine($"Found zone {zoneId} with {npcCount} NPCs ({friendlyCount} friendly, {enemyCount} hostile), {itemCount} items");
+                LoadZone(zoneId);
+                return;
+            }
+        }
+
+        _messages.ShowMessage("No zones with content found", MessageType.System);
+    }
+
+    private bool IsShiftHeld()
+    {
+        // Check if Shift key is held using SDL
+        var modState = SDL.GetModState();
+        return (modState & SDLKeymod.Shift) != 0;
+    }
+
+    /// <summary>
+    /// Tries to pull a draggable block from behind the player to where the player was.
+    /// </summary>
+    private void TryPullBlock(int oldPlayerX, int oldPlayerY, int moveDirectionX, int moveDirectionY)
+    {
+        // Block behind player (opposite to movement direction)
+        int behindX = oldPlayerX - moveDirectionX;
+        int behindY = oldPlayerY - moveDirectionY;
+
+        // Check bounds
+        if (behindX < 0 || behindX >= _state.CurrentZone!.Width ||
+            behindY < 0 || behindY >= _state.CurrentZone.Height)
+        {
+            return;  // Nothing to pull from off-screen
+        }
+
+        // Check if there's a draggable block behind
+        var behindTile = _state.CurrentZone.GetTile(behindX, behindY, 1);
+        if (behindTile == 0xFFFF || behindTile >= _gameData!.Tiles.Count)
+        {
+            return;  // No tile there
+        }
+
+        var tile = _gameData.Tiles[behindTile];
+        if (!tile.IsDraggable)
+        {
+            return;  // Not draggable
+        }
+
+        // Pull the block to where the player was standing
+        _state.CurrentZone.SetTile(oldPlayerX, oldPlayerY, 1, behindTile);
+        _state.CurrentZone.SetTile(behindX, behindY, 1, 0xFFFF);
+        _messages.ShowMessage("*pull*", MessageType.Info);
+    }
+
+    private void TryMovePlayer(int dx, int dy, Direction direction, bool tryPull = false)
     {
         _state.PlayerDirection = direction;
 
@@ -340,7 +764,41 @@ public class GameEngine : IDisposable
         if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
         {
             var tile = _gameData.Tiles[middleTile];
-            if (tile.IsObject && !tile.IsDraggable)
+
+            if (tile.IsDraggable)
+            {
+                // Try to push the block
+                var pushX = newX + dx;
+                var pushY = newY + dy;
+
+                // Check if push destination is valid
+                if (pushX >= 0 && pushX < _state.CurrentZone.Width &&
+                    pushY >= 0 && pushY < _state.CurrentZone.Height)
+                {
+                    var destTile = _state.CurrentZone.GetTile(pushX, pushY, 1);
+                    if (destTile == 0xFFFF || (destTile < _gameData.Tiles.Count && !_gameData.Tiles[destTile].IsObject))
+                    {
+                        // Push the block
+                        _state.CurrentZone.SetTile(pushX, pushY, 1, middleTile);
+                        _state.CurrentZone.SetTile(newX, newY, 1, 0xFFFF);
+                        _messages.ShowMessage("*push*", MessageType.Info);
+                        // Continue to move player into the now-empty space
+                    }
+                    else
+                    {
+                        // Can't push - something blocking
+                        _actionExecutor?.ExecuteZoneActions(ActionTrigger.Bump);
+                        return;
+                    }
+                }
+                else
+                {
+                    // Can't push off edge
+                    _actionExecutor?.ExecuteZoneActions(ActionTrigger.Bump);
+                    return;
+                }
+            }
+            else if (tile.IsObject)
             {
                 // Collision - trigger bump action
                 _actionExecutor?.ExecuteZoneActions(ActionTrigger.Bump);
@@ -348,9 +806,29 @@ public class GameEngine : IDisposable
             }
         }
 
+        // Check collision with NPCs
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (npc.IsEnabled && npc.IsAlive && npc.X == newX && npc.Y == newY)
+            {
+                // Can't walk through NPCs
+                return;
+            }
+        }
+
+        // Remember old position for pull
+        var oldX = _state.PlayerX;
+        var oldY = _state.PlayerY;
+
         // Move player
         _state.PlayerX = newX;
         _state.PlayerY = newY;
+
+        // Pull block if shift is held
+        if (tryPull)
+        {
+            TryPullBlock(oldX, oldY, dx, dy);
+        }
 
         // Update camera
         UpdateCamera();
@@ -360,25 +838,204 @@ public class GameEngine : IDisposable
 
         // Check for zone objects at new position
         CheckZoneObjects();
+
+        // Debug: check what's at player position
+        var objTile = _state.CurrentZone.GetTile(newX, newY, 1);
+        if (objTile != 0xFFFF && objTile < _gameData!.Tiles.Count)
+        {
+            var tile = _gameData.Tiles[objTile];
+            Console.WriteLine($"Standing on tile {objTile}: floor={tile.IsFloor}, obj={tile.IsObject}, drag={tile.IsDraggable}");
+        }
+
+        // Check for nearby friendly NPCs
+        CheckNearbyNPCs();
+    }
+
+    private void CheckNearbyNPCs()
+    {
+        // Get position in front of player
+        int targetX = _state.PlayerX;
+        int targetY = _state.PlayerY;
+
+        switch (_state.PlayerDirection)
+        {
+            case Direction.Up: targetY--; break;
+            case Direction.Down: targetY++; break;
+            case Direction.Left: targetX--; break;
+            case Direction.Right: targetX++; break;
+        }
+
+        // Check for NPC at target position
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (!npc.IsEnabled || !npc.IsAlive)
+                continue;
+
+            if (npc.X == targetX && npc.Y == targetY && !npc.IsHostile)
+            {
+                var npcName = GetCharacterName(npc.CharacterId) ?? "Someone";
+                _messages.ShowMessage($"[Space] Talk to {npcName}", MessageType.Info);
+                return;
+            }
+        }
     }
 
     private void HandleZoneTransition(int dx, int dy)
     {
-        // Check for door objects at player position
+        // Check for transition objects at player position and edge position
+        var edgeX = _state.PlayerX + dx;
+        var edgeY = _state.PlayerY + dy;
+
+        // First check for door/teleporter objects
         foreach (var obj in _state.CurrentZone!.Objects)
         {
-            if ((obj.Type == ZoneObjectType.DoorEntrance || obj.Type == ZoneObjectType.DoorExit) &&
-                obj.X == _state.PlayerX && obj.Y == _state.PlayerY)
+            // Check if this is a transition object at player pos or just past edge
+            bool atPlayerPos = obj.X == _state.PlayerX && obj.Y == _state.PlayerY;
+            bool atEdge = obj.X == Math.Clamp(edgeX, 0, _state.CurrentZone.Width - 1) &&
+                          obj.Y == Math.Clamp(edgeY, 0, _state.CurrentZone.Height - 1);
+
+            if (!atPlayerPos && !atEdge)
+                continue;
+
+            switch (obj.Type)
             {
-                if (obj.Argument > 0 && obj.Argument < _gameData!.Zones.Count)
-                {
-                    LoadZone(obj.Argument);
-                    return;
-                }
+                case ZoneObjectType.DoorEntrance:
+                case ZoneObjectType.DoorExit:
+                case ZoneObjectType.VehicleToSecondary:
+                case ZoneObjectType.VehicleToPrimary:
+                case ZoneObjectType.XWingFromDagobah:
+                case ZoneObjectType.XWingToDagobah:
+                case ZoneObjectType.Teleporter:
+                    // Handle return doors (65535 means go back)
+                    int destZoneId = obj.Argument;
+                    if (destZoneId == 65535 || destZoneId == 0xFFFF)
+                    {
+                        // Return to parent zone (for rooms)
+                        if (_worldGenerator?.CurrentWorld != null &&
+                            _worldGenerator.CurrentWorld.RoomParents.TryGetValue(_state.CurrentZoneId, out var parentId))
+                        {
+                            destZoneId = parentId;
+                        }
+                        else if (_state.PreviousZoneId >= 0)
+                        {
+                            destZoneId = _state.PreviousZoneId;
+                        }
+                        else
+                        {
+                            _messages.ShowMessage("Can't go back", MessageType.Info);
+                            return;
+                        }
+                    }
+
+                    if (destZoneId > 0 && destZoneId < _gameData!.Zones.Count)
+                    {
+                        Console.WriteLine($"Door transition: {obj.Type} from zone {_state.CurrentZoneId} to zone {destZoneId}");
+
+                        // Always track previous zone for return doors
+                        var oldZoneId = _state.CurrentZoneId;
+                        _state.PreviousZoneId = oldZoneId;
+
+                        // Find spawn point in destination zone
+                        var destZone = _gameData.Zones[destZoneId];
+                        int? spawnX = null, spawnY = null;
+
+                        // First, look for a door/spawn that leads back to where we came from
+                        foreach (var destObj in destZone.Objects)
+                        {
+                            // For rooms entered via DoorEntrance, look for DoorExit (return door)
+                            // For outdoor zones, look for SpawnLocation first
+                            if (destObj.Type == ZoneObjectType.SpawnLocation)
+                            {
+                                spawnX = destObj.X;
+                                spawnY = destObj.Y;
+                                Console.WriteLine($"  Spawning at spawn point ({spawnX},{spawnY})");
+                                break;
+                            }
+
+                            if ((destObj.Type == ZoneObjectType.DoorEntrance ||
+                                 destObj.Type == ZoneObjectType.DoorExit) &&
+                                (destObj.Argument == oldZoneId || destObj.Argument == 65535))
+                            {
+                                // Spawn near this door, offset based on door position
+                                spawnX = destObj.X;
+                                spawnY = destObj.Y;
+
+                                // Offset away from the door (usually doors are at edges)
+                                if (destObj.Y == 0) spawnY = 1;  // Door at top, spawn below
+                                else if (destObj.Y >= destZone.Height - 1) spawnY = destZone.Height - 2;  // Door at bottom
+                                else if (destObj.X == 0) spawnX = 1;  // Door at left
+                                else if (destObj.X >= destZone.Width - 1) spawnX = destZone.Width - 2;  // Door at right
+                                else spawnY = Math.Min(spawnY.Value + 1, destZone.Height - 2);  // Default: below door
+
+                                Console.WriteLine($"  Spawning near door at ({spawnX},{spawnY})");
+                                break;
+                            }
+                        }
+
+                        // Fallback: look for spawn location
+                        if (!spawnX.HasValue)
+                        {
+                            foreach (var destObj in destZone.Objects)
+                            {
+                                if (destObj.Type == ZoneObjectType.SpawnLocation)
+                                {
+                                    spawnX = destObj.X;
+                                    spawnY = destObj.Y;
+                                    Console.WriteLine($"  Spawning at spawn location ({spawnX},{spawnY})");
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Default spawn position
+                        if (!spawnX.HasValue)
+                        {
+                            spawnX = destZone.Width / 2;
+                            spawnY = destZone.Height / 2;
+                            Console.WriteLine($"  Spawning at center ({spawnX},{spawnY})");
+                        }
+
+                        LoadZone(destZoneId, spawnX, spawnY);
+                        return;
+                    }
+                    break;
             }
         }
 
-        // TODO: Handle world map transitions
+        // Check for edge transition using world generator connections
+        if (_worldGenerator != null)
+        {
+            var direction = (dx, dy) switch
+            {
+                (-1, 0) => Direction.Left,
+                (1, 0) => Direction.Right,
+                (0, -1) => Direction.Up,
+                (0, 1) => Direction.Down,
+                _ => Direction.Down
+            };
+
+            var connectedZoneId = _worldGenerator.GetConnectedZone(_state.CurrentZoneId, direction);
+            Console.WriteLine($"Edge transition {direction}: connected zone = {connectedZoneId}");
+
+            if (connectedZoneId.HasValue && connectedZoneId.Value < _gameData!.Zones.Count)
+            {
+                var destZone = _gameData.Zones[connectedZoneId.Value];
+
+                // Spawn on opposite edge
+                int spawnX, spawnY;
+                if (dx < 0) { spawnX = destZone.Width - 2; spawnY = Math.Clamp(_state.PlayerY, 1, destZone.Height - 2); }
+                else if (dx > 0) { spawnX = 1; spawnY = Math.Clamp(_state.PlayerY, 1, destZone.Height - 2); }
+                else if (dy < 0) { spawnX = Math.Clamp(_state.PlayerX, 1, destZone.Width - 2); spawnY = destZone.Height - 2; }
+                else { spawnX = Math.Clamp(_state.PlayerX, 1, destZone.Width - 2); spawnY = 1; }
+
+                _state.PreviousZoneId = _state.CurrentZoneId;
+                LoadZone(connectedZoneId.Value, spawnX, spawnY);
+                return;
+            }
+        }
+
+        // Edge of zone with no transition
+        _messages.ShowMessage("Can't go that way", MessageType.Info);
     }
 
     private void CheckZoneObjects()
@@ -406,27 +1063,58 @@ public class GameEngine : IDisposable
                     // Pick up weapon (if not already collected)
                     if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
                     {
+                        // Add to weapons list if not already owned
+                        if (!_state.Weapons.Contains(obj.Argument))
+                        {
+                            _state.Weapons.Add(obj.Argument);
+                        }
+                        // Auto-equip the new weapon
+                        _state.CurrentWeaponIndex = _state.Weapons.IndexOf(obj.Argument);
                         _state.SelectedWeapon = obj.Argument;
                         _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
-                        var weaponName = GetTileName(obj.Argument) ?? $"Weapon #{obj.Argument}";
+                        var weaponName = GetTileName(obj.Argument) ?? $"Weapon";
                         _messages.ShowPickup(weaponName);
+                        _messages.ShowMessage("Press Tab to switch weapons", MessageType.Info);
                         _sounds?.PlaySound(SoundManager.SoundPickup);
                     }
                     break;
 
+                case ZoneObjectType.Teleporter:
+                case ZoneObjectType.VehicleToSecondary:
+                case ZoneObjectType.VehicleToPrimary:
+                case ZoneObjectType.XWingFromDagobah:
+                case ZoneObjectType.XWingToDagobah:
                 case ZoneObjectType.DoorEntrance:
                 case ZoneObjectType.DoorExit:
-                    if (obj.Argument > 0 && obj.Argument < _gameData!.Zones.Count)
+                    // Handle 65535 (0xFFFF) as "return to previous zone"
+                    int destZoneId = obj.Argument;
+                    if (destZoneId == 65535 || destZoneId == -1)
                     {
+                        destZoneId = _state.PreviousZoneId;
+                        Console.WriteLine($"Return door: going back to zone {destZoneId}");
+                    }
+
+                    if (destZoneId > 0 && destZoneId < _gameData!.Zones.Count)
+                    {
+                        Console.WriteLine($"Door transition: zone {destZoneId}");
+
+                        // Track previous zone only when entering through a DoorEntrance (not returning)
+                        if (obj.Type == ZoneObjectType.DoorEntrance && obj.Argument != 65535)
+                        {
+                            _state.PreviousZoneId = _state.CurrentZoneId;
+                            Console.WriteLine($"  Set return zone to {_state.PreviousZoneId}");
+                        }
+
                         // Find spawn point in destination zone
-                        var destZone = _gameData.Zones[obj.Argument];
+                        var destZone = _gameData.Zones[destZoneId];
                         int? spawnX = null, spawnY = null;
 
                         // Look for a door that leads back to current zone, or a spawn point
                         foreach (var destObj in destZone.Objects)
                         {
+                            // Check for door leading back, or door with 65535 (return door)
                             if ((destObj.Type == ZoneObjectType.DoorEntrance || destObj.Type == ZoneObjectType.DoorExit) &&
-                                destObj.Argument == _state.CurrentZoneId)
+                                (destObj.Argument == _state.CurrentZoneId || destObj.Argument == 65535))
                             {
                                 spawnX = destObj.X;
                                 spawnY = destObj.Y;
@@ -439,12 +1127,8 @@ public class GameEngine : IDisposable
                             }
                         }
 
-                        LoadZone(obj.Argument, spawnX, spawnY);
+                        LoadZone(destZoneId, spawnX, spawnY);
                     }
-                    break;
-
-                case ZoneObjectType.Teleporter:
-                    Console.WriteLine("Teleporter activated!");
                     break;
 
                 case ZoneObjectType.Trigger:
@@ -465,17 +1149,217 @@ public class GameEngine : IDisposable
 
         if (_state.SelectedItem.HasValue)
         {
+            var usedItemId = _state.SelectedItem.Value;
+
+            // Set the placed item context for action conditions
+            if (_actionExecutor != null)
+            {
+                _actionExecutor.PlacedItemId = usedItemId;
+
+                // Also set NPC context if there's a nearby friendly NPC
+                var nearbyNpc = FindNearbyNPC(friendlyOnly: true);
+                if (nearbyNpc != null)
+                {
+                    _actionExecutor.InteractingNpcId = nearbyNpc.CharacterId;
+                    Console.WriteLine($"UseItem: Set InteractingNpcId to {nearbyNpc.CharacterId} for nearby NPC");
+
+                    // Check if this advances the mission
+                    TryAdvanceMission(usedItemId, nearbyNpc);
+                }
+            }
+
             _actionExecutor?.ExecuteZoneActions(ActionTrigger.UseItem);
+
+            // Clear the context after execution
+            if (_actionExecutor != null)
+            {
+                _actionExecutor.PlacedItemId = null;
+                _actionExecutor.InteractingNpcId = null;
+            }
         }
         else
         {
             // Check for friendly NPC interaction first
             if (!TryInteractWithNPC())
             {
-                // Attack in facing direction
-                PerformAttack();
+                // Check for items/objects to interact with
+                if (!TryInteractWithObject())
+                {
+                    // Attack in facing direction
+                    PerformAttack();
+                }
             }
         }
+    }
+
+    /// <summary>
+    /// Checks if using an item with an NPC advances the mission.
+    /// </summary>
+    private void TryAdvanceMission(int itemId, NPC npc)
+    {
+        if (_worldGenerator?.CurrentWorld == null)
+            return;
+
+        var world = _worldGenerator.CurrentWorld;
+        var mission = world.Mission;
+        if (mission == null || mission.IsCompleted)
+            return;
+
+        var currentStep = mission.CurrentPuzzleStep;
+        if (currentStep == null)
+            return;
+
+        // Check if the used item matches what's needed for the current step
+        if (currentStep.RequiredItemId == itemId)
+        {
+            Console.WriteLine($"Mission: Used correct item {itemId} for step {mission.CurrentStep + 1}");
+
+            // Remove the used item from inventory
+            _state.RemoveItem(itemId);
+            var usedItemName = GetTileName(itemId) ?? "item";
+
+            // Give the reward item if any
+            if (currentStep.RewardItemId > 0)
+            {
+                _state.AddItem(currentStep.RewardItemId);
+                var rewardName = GetTileName(currentStep.RewardItemId) ?? "item";
+                _messages.ShowMessage($"Traded {usedItemName} for {rewardName}!", MessageType.Pickup);
+                _sounds?.PlaySound(SoundManager.SoundPickup);
+
+                // Auto-select the new item
+                _state.SelectedItem = currentStep.RewardItemId;
+            }
+            else
+            {
+                _messages.ShowMessage($"Used {usedItemName} successfully!", MessageType.Info);
+            }
+
+            // Advance the mission
+            bool missionComplete = world.AdvanceMission();
+
+            if (missionComplete)
+            {
+                _messages.ShowMessage("MISSION COMPLETE!", MessageType.System);
+                _messages.ShowMessage("Return to Yoda on Dagobah.", MessageType.Info);
+                _sounds?.PlaySound(SoundManager.SoundPickup);
+            }
+            else
+            {
+                // Show next objective
+                var nextStep = mission.CurrentPuzzleStep;
+                if (nextStep != null && !string.IsNullOrEmpty(nextStep.Hint))
+                {
+                    _messages.ShowMessage($"Next: {nextStep.Hint}", MessageType.Info);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Finds a nearby NPC (adjacent to player).
+    /// </summary>
+    private NPC? FindNearbyNPC(bool friendlyOnly = false)
+    {
+        // Get position in front of player
+        int targetX = _state.PlayerX;
+        int targetY = _state.PlayerY;
+
+        switch (_state.PlayerDirection)
+        {
+            case Direction.Up: targetY--; break;
+            case Direction.Down: targetY++; break;
+            case Direction.Left: targetX--; break;
+            case Direction.Right: targetX++; break;
+        }
+
+        // Check for NPC at target position or adjacent to player
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (!npc.IsEnabled || !npc.IsAlive)
+                continue;
+
+            if (friendlyOnly && npc.IsHostile)
+                continue;
+
+            // Check if NPC is at the target position OR adjacent to player
+            bool atTarget = (npc.X == targetX && npc.Y == targetY);
+            bool adjacent = Math.Abs(npc.X - _state.PlayerX) <= 1 &&
+                           Math.Abs(npc.Y - _state.PlayerY) <= 1 &&
+                           !(npc.X == _state.PlayerX && npc.Y == _state.PlayerY);
+
+            if (atTarget || adjacent)
+            {
+                return npc;
+            }
+        }
+
+        return null;
+    }
+
+    private bool TryInteractWithObject()
+    {
+        // Get position in front of player
+        int targetX = _state.PlayerX;
+        int targetY = _state.PlayerY;
+
+        switch (_state.PlayerDirection)
+        {
+            case Direction.Up: targetY--; break;
+            case Direction.Down: targetY++; break;
+            case Direction.Left: targetX--; break;
+            case Direction.Right: targetX++; break;
+        }
+
+        // Check bounds
+        if (targetX < 0 || targetX >= _state.CurrentZone!.Width ||
+            targetY < 0 || targetY >= _state.CurrentZone.Height)
+            return false;
+
+        // Check for items at target position
+        foreach (var obj in _state.CurrentZone.Objects)
+        {
+            if (obj.X != targetX || obj.Y != targetY)
+                continue;
+
+            switch (obj.Type)
+            {
+                case ZoneObjectType.CrateItem:
+                    if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                    {
+                        _state.AddItem(obj.Argument);
+                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        var itemName = GetTileName(obj.Argument) ?? $"Item";
+                        _messages.ShowPickup(itemName);
+                        _sounds?.PlaySound(SoundManager.SoundPickup);
+                        return true;
+                    }
+                    break;
+
+                case ZoneObjectType.CrateWeapon:
+                    if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                    {
+                        if (!_state.Weapons.Contains(obj.Argument))
+                        {
+                            _state.Weapons.Add(obj.Argument);
+                        }
+                        _state.CurrentWeaponIndex = _state.Weapons.IndexOf(obj.Argument);
+                        _state.SelectedWeapon = obj.Argument;
+                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        var weaponName = GetTileName(obj.Argument) ?? $"Weapon";
+                        _messages.ShowPickup(weaponName);
+                        _messages.ShowMessage("Press Tab to switch weapons", MessageType.Info);
+                        _sounds?.PlaySound(SoundManager.SoundPickup);
+                        return true;
+                    }
+                    break;
+
+                case ZoneObjectType.LocatorItem:
+                    _messages.ShowMessage("Locator found!", MessageType.Pickup);
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     private bool TryInteractWithNPC()
@@ -492,34 +1376,155 @@ public class GameEngine : IDisposable
             case Direction.Right: targetX++; break;
         }
 
-        // Check for NPC at target position
+        // Check for NPC at target position or adjacent to player
+        Console.WriteLine($"TryInteractWithNPC: player at ({_state.PlayerX},{_state.PlayerY}) facing {_state.PlayerDirection}, target ({targetX},{targetY}), {_state.ZoneNPCs.Count} NPCs");
+
         foreach (var npc in _state.ZoneNPCs)
         {
             if (!npc.IsEnabled || !npc.IsAlive)
                 continue;
 
-            if (npc.X == targetX && npc.Y == targetY && !npc.IsHostile)
+            // Check if NPC is at the target position OR adjacent to player
+            bool atTarget = (npc.X == targetX && npc.Y == targetY);
+            bool adjacent = Math.Abs(npc.X - _state.PlayerX) <= 1 &&
+                           Math.Abs(npc.Y - _state.PlayerY) <= 1 &&
+                           !(npc.X == _state.PlayerX && npc.Y == _state.PlayerY);
+
+            Console.WriteLine($"  NPC at ({npc.X},{npc.Y}): atTarget={atTarget}, adjacent={adjacent}");
+
+            if (atTarget || adjacent)
             {
-                // Friendly NPC interaction
-                var npcName = GetCharacterName(npc.CharacterId) ?? "Stranger";
+                // Hostile NPCs can't be talked to - let the attack handle them
+                if (npc.IsHostile)
+                {
+                    return false;  // Fall through to attack
+                }
+
+                // Get NPC name
+                string npcName;
+                if (npc.CharacterId >= 0 && npc.CharacterId < _gameData!.Characters.Count)
+                {
+                    var character = _gameData.Characters[npc.CharacterId];
+                    npcName = string.IsNullOrEmpty(character.Name) ? "Stranger" : character.Name;
+                }
+                else
+                {
+                    // NPC is a tile-based entity
+                    npcName = "Stranger";
+                }
 
                 // Make NPC face the player
                 npc.Direction = GetDirectionToward(npc.X, npc.Y, _state.PlayerX, _state.PlayerY);
 
-                // Show dialogue
-                var dialogues = new[]
+                // Store NPC position for action checks
+                _state.SetVariable(1, npc.X);
+                _state.SetVariable(2, npc.Y);
+                _state.SetVariable(3, npc.CharacterId);
+
+                // Set action executor context
+                if (_actionExecutor != null)
                 {
-                    "Hello there, traveler!",
-                    "May the Force be with you.",
-                    "I have nothing to trade right now.",
-                    "Be careful out there!",
-                    "The Empire has been causing trouble...",
-                    "Have you seen any droids around?",
-                    "This is a peaceful place.",
-                    "Good luck on your journey!"
-                };
-                var dialogue = dialogues[_random.Next(dialogues.Length)];
-                _messages.ShowDialogue(npcName, dialogue);
+                    _actionExecutor.InteractingNpcId = npc.CharacterId;
+                }
+
+                // Try to execute any NPC-related actions first
+                // (This may trigger scripted dialogue via OnDialogue event)
+                var hadDialogueBefore = _messages.HasDialogue;
+                _actionExecutor?.ExecuteZoneActions(ActionTrigger.NpcTalk);
+
+                // Clear the context after execution
+                if (_actionExecutor != null)
+                {
+                    _actionExecutor.InteractingNpcId = null;
+                }
+
+                // If no scripted dialogue was shown, use fallback dialogue
+                if (!_messages.HasDialogue || hadDialogueBefore == _messages.HasDialogue)
+                {
+                    // Special dialogue for Yoda (check for Yoda tile 780)
+                    const int YODA_TILE_ID = 780;
+                    bool isYoda = npc.CharacterId == YODA_TILE_ID;
+
+                    if (isYoda && _worldGenerator?.CurrentWorld != null)
+                    {
+                        var mission = _worldGenerator.CurrentWorld.Mission;
+                        var world = _worldGenerator.CurrentWorld;
+
+                        // Check if mission is complete
+                        if (mission != null && mission.IsCompleted)
+                        {
+                            // Mission complete! Congratulate the player
+                            _state.GamesWon++;
+                            _state.IsGameWon = true;
+                            _messages.ShowDialogue("Yoda", $"Completed the mission, you have! Strong with the Force, you are. {_state.GamesWon} missions completed.");
+                            _messages.ShowMessage("YOU WIN! Press R to start a new mission.", MessageType.System);
+                            _sounds?.PlaySound(SoundManager.SoundPickup);
+                        }
+                        // Give the starting item if player doesn't have it yet
+                        else if (world.StartingItemId.HasValue && !_state.HasItem(world.StartingItemId.Value))
+                        {
+                            _state.AddItem(world.StartingItemId.Value);
+                            var itemName = GetTileName(world.StartingItemId.Value) ?? "an item";
+
+                            // Show mission briefing
+                            var briefing = mission != null
+                                ? $"A mission for you, I have. {mission.Name}. Take this {itemName}. To {mission.Planet}, you must go. Find your X-Wing nearby."
+                                : $"Take this {itemName}. Your journey begins. Find your X-Wing nearby.";
+                            _messages.ShowDialogue("Yoda", briefing);
+                            _messages.ShowMessage($"Received: {itemName}", MessageType.Pickup);
+                            _sounds?.PlaySound(SoundManager.SoundPickup);
+
+                            // Show first objective hint
+                            if (mission?.CurrentPuzzleStep != null && !string.IsNullOrEmpty(mission.CurrentPuzzleStep.Hint))
+                            {
+                                _messages.ShowMessage($"Hint: {mission.CurrentPuzzleStep.Hint}", MessageType.Info);
+                            }
+                        }
+                        else if (mission != null)
+                        {
+                            // Show current mission status
+                            var objective = world.GetCurrentObjective();
+                            _messages.ShowDialogue("Yoda", $"To {mission.Planet}, you must go. {objective}. May the Force be with you.");
+                        }
+                        else
+                        {
+                            _messages.ShowDialogue("Yoda", "Strong in the Force, you are.");
+                        }
+                    }
+                    // Check if NPC has an item to give (from IZAX data)
+                    else if (npc.CarriedItemId.HasValue && !npc.HasGivenItem)
+                    {
+                        var itemId = npc.CarriedItemId.Value;
+                        var itemName = GetTileName(itemId) ?? $"an item";
+
+                        // Give the item to the player
+                        _state.AddItem(itemId);
+                        npc.HasGivenItem = true;
+
+                        _messages.ShowDialogue(npcName, $"Here, take this {itemName}. You may need it.");
+                        _messages.ShowMessage($"Received: {itemName}", MessageType.Pickup);
+                        _sounds?.PlaySound(SoundManager.SoundPickup);
+
+                        Console.WriteLine($"NPC {npcName} gave item {itemId} ({itemName}) to player");
+                    }
+                    else
+                    {
+                        var dialogues = new[]
+                        {
+                            "Hello there, traveler!",
+                            "May the Force be with you.",
+                            "I have nothing to trade right now.",
+                            "Be careful out there!",
+                            "The Empire has been causing trouble...",
+                            "Have you seen any droids around?",
+                            "This is a peaceful place.",
+                            "Good luck on your journey!"
+                        };
+                        var dialogue = dialogues[_random.Next(dialogues.Length)];
+                        _messages.ShowDialogue(npcName, dialogue);
+                    }
+                }
+                _sounds?.PlaySound(SoundManager.SoundTalk);
                 return true;
             }
         }
@@ -529,6 +1534,68 @@ public class GameEngine : IDisposable
 
     private void PerformAttack()
     {
+        // Determine weapon type
+        bool isRangedWeapon = false;
+        if (_state.SelectedWeapon.HasValue && _state.SelectedWeapon.Value > 0 &&
+            _state.SelectedWeapon.Value < _gameData!.Tiles.Count)
+        {
+            var weaponTile = _gameData.Tiles[_state.SelectedWeapon.Value];
+            isRangedWeapon = (weaponTile.Flags & (TileFlags.WeaponLightBlaster | TileFlags.WeaponHeavyBlaster)) != 0;
+        }
+
+        if (isRangedWeapon)
+        {
+            // Ranged attack - spawn projectile
+            PerformRangedAttack();
+        }
+        else
+        {
+            // Melee attack
+            PerformMeleeAttack();
+        }
+    }
+
+    private void PerformRangedAttack()
+    {
+        // Trigger attack animation
+        _state.IsAttacking = true;
+        _state.AttackTimer = 0.15;  // Shorter for shooting
+
+        // Calculate projectile direction
+        double velX = 0, velY = 0;
+        const double projectileSpeed = 12.0;  // Tiles per second
+
+        switch (_state.PlayerDirection)
+        {
+            case Direction.Up: velY = -projectileSpeed; break;
+            case Direction.Down: velY = projectileSpeed; break;
+            case Direction.Left: velX = -projectileSpeed; break;
+            case Direction.Right: velX = projectileSpeed; break;
+        }
+
+        // Spawn projectile
+        var projectile = new Projectile
+        {
+            X = _state.PlayerX + (velX > 0 ? 0.5 : velX < 0 ? -0.5 : 0),
+            Y = _state.PlayerY + (velY > 0 ? 0.5 : velY < 0 ? -0.5 : 0),
+            VelocityX = velX,
+            VelocityY = velY,
+            Damage = 50,
+            LifeTime = 2.0,
+            Type = ProjectileType.Blaster
+        };
+        _state.Projectiles.Add(projectile);
+
+        _sounds?.PlaySound(SoundManager.SoundAttack);
+        _messages.ShowMessage("*pew*", MessageType.Combat);
+    }
+
+    private void PerformMeleeAttack()
+    {
+        // Trigger attack animation
+        _state.IsAttacking = true;
+        _state.AttackTimer = 0.3;
+
         // Calculate attack position based on facing direction
         int targetX = _state.PlayerX;
         int targetY = _state.PlayerY;
@@ -541,46 +1608,53 @@ public class GameEngine : IDisposable
             case Direction.Right: targetX++; break;
         }
 
-        // Check for NPC at target position
+        Console.WriteLine($"Melee attack at ({targetX},{targetY}), {_state.ZoneNPCs.Count} NPCs in zone");
+
+        // Check for NPC at or near target position (melee has some range)
         foreach (var npc in _state.ZoneNPCs)
         {
             if (!npc.IsEnabled || !npc.IsAlive)
                 continue;
 
-            if (npc.X == targetX && npc.Y == targetY)
+            // Calculate distance to NPC
+            var distX = Math.Abs(npc.X - targetX);
+            var distY = Math.Abs(npc.Y - targetY);
+            var dist = distX + distY;
+
+            Console.WriteLine($"  NPC at ({npc.X},{npc.Y}), dist={dist}");
+
+            // Hit if within melee range (1 tile from target, 2 tiles from player)
+            if (dist <= 1)
             {
-                // Calculate damage (base damage + weapon bonus)
-                int damage = 25;
-                if (_state.SelectedWeapon.HasValue)
-                {
-                    damage = 50;  // Weapon does more damage
-                }
+                // Calculate damage
+                int damage = _state.SelectedWeapon.HasValue ? 50 : 25;
 
                 bool killed = npc.TakeDamage(damage);
-                _state.AttackFlashTimer = 0.5;  // Trigger attack flash
+                _state.AttackFlashTimer = 0.5;
                 _sounds?.PlaySound(SoundManager.SoundAttack);
 
                 // Get NPC name for message
-                var npcName = GetCharacterName(npc.CharacterId) ?? "Enemy";
+                var npcName = GetCharacterName(npc.CharacterId) ?? $"Target";
 
                 if (killed)
                 {
                     _messages.ShowCombat($"{npcName} defeated!");
                     _sounds?.PlaySound(SoundManager.SoundDeath);
+                    Console.WriteLine($"  Killed NPC!");
                 }
                 else
                 {
-                    _messages.ShowCombat($"Hit {npcName}! ({npc.Health} HP left)");
+                    _messages.ShowCombat($"Hit! {npc.Health} HP left");
+                    Console.WriteLine($"  Hit NPC for {damage} damage, {npc.Health} HP left");
                 }
 
-                // Trigger attack action
                 _actionExecutor?.ExecuteZoneActions(ActionTrigger.Attack);
                 return;
             }
         }
 
         // No NPC found - show swing/miss feedback
-        _state.AttackFlashTimer = 0.2;  // Brief flash for swing
+        _state.AttackFlashTimer = 0.2;
         _messages.ShowMessage("*swing*", MessageType.Combat);
     }
 
@@ -619,7 +1693,7 @@ public class GameEngine : IDisposable
     }
 
     /// <summary>
-    /// Initializes NPCs from zone objects.
+    /// Initializes NPCs from zone objects and IZAX entity data.
     /// </summary>
     private void InitializeZoneNPCs()
     {
@@ -628,44 +1702,46 @@ public class GameEngine : IDisposable
         if (_state.CurrentZone == null)
             return;
 
+        // 1. Spawn NPCs from zone objects (PuzzleNPC)
         foreach (var obj in _state.CurrentZone.Objects)
         {
             if (obj.Type == ZoneObjectType.PuzzleNPC)
             {
                 var npc = NPC.FromZoneObject(obj);
+                ConfigureNPCFromCharacter(npc);
+                _state.ZoneNPCs.Add(npc);
+            }
+        }
 
-                // Set NPC properties based on character type if it's a valid character
-                if (npc.CharacterId < _gameData!.Characters.Count)
+        // 2. Spawn NPCs from IZAX entity data
+        if (_state.CurrentZone.AuxData?.Entities != null)
+        {
+            foreach (var entity in _state.CurrentZone.AuxData.Entities)
+            {
+                // Skip invalid entries
+                if (entity.CharacterId == 0xFFFF)
+                    continue;
+
+                var npc = new NPC
                 {
-                    var character = _gameData.Characters[npc.CharacterId];
+                    CharacterId = entity.CharacterId,
+                    X = entity.X,
+                    Y = entity.Y,
+                    StartX = entity.X,
+                    StartY = entity.Y,
+                    Direction = Direction.Down,
+                    IsEnabled = true,
+                    // Store the item this NPC will give when interacted with
+                    CarriedItemId = entity.ItemTileId > 0 && entity.ItemTileId != 0xFFFF ? entity.ItemTileId : null,
+                    CarriedItemQuantity = entity.ItemQuantity
+                };
 
-                    // Enemy characters are hostile and chase the player
-                    if (character.Type == CharacterType.Enemy)
-                    {
-                        npc.IsHostile = true;
-                        npc.Behavior = NPCBehavior.Chasing;
-                        npc.MoveCooldown = 0.4;  // Enemies move faster
-                    }
-                    // Friendly NPCs just wander
-                    else if (character.Type == CharacterType.Friendly)
-                    {
-                        npc.Behavior = NPCBehavior.Wandering;
-                        npc.MoveCooldown = 0.8;  // Friendlies move slower
-                    }
+                ConfigureNPCFromCharacter(npc);
 
-                    // Apply character aux data for damage
-                    if (character.AuxData != null)
-                    {
-                        npc.Damage = character.AuxData.Damage;
-                    }
-
-                    // Apply character weapon data for health
-                    if (character.Weapon != null)
-                    {
-                        npc.MaxHealth = character.Weapon.Health;
-                        npc.Health = character.Weapon.Health;
-                    }
-                }
+                // Log IZAX NPC spawn
+                var npcName = GetCharacterName(npc.CharacterId) ?? $"TileID #{npc.CharacterId}";
+                var itemInfo = npc.CarriedItemId.HasValue ? $", carries item {npc.CarriedItemId}" : "";
+                Console.WriteLine($"  IZAX NPC: {npcName} at ({npc.X},{npc.Y}){itemInfo}");
 
                 _state.ZoneNPCs.Add(npc);
             }
@@ -694,6 +1770,266 @@ public class GameEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Configures an NPC based on character data.
+    /// </summary>
+    private void ConfigureNPCFromCharacter(NPC npc)
+    {
+        // Set NPC properties based on character type if it's a valid character
+        if (npc.CharacterId < _gameData!.Characters.Count)
+        {
+            var character = _gameData.Characters[npc.CharacterId];
+            var charName = string.IsNullOrEmpty(character.Name) ? $"Character #{npc.CharacterId}" : character.Name;
+
+            // Enemy characters are hostile and chase the player
+            if (character.Type == CharacterType.Enemy)
+            {
+                npc.IsHostile = true;
+                npc.Behavior = NPCBehavior.Chasing;
+                npc.MoveCooldown = 0.4;  // Enemies move faster
+                Console.WriteLine($"  NPC: {charName} (Enemy) at ({npc.X},{npc.Y})");
+            }
+            // Friendly NPCs just wander
+            else if (character.Type == CharacterType.Friendly)
+            {
+                npc.Behavior = NPCBehavior.Wandering;
+                npc.MoveCooldown = 0.8;  // Friendlies move slower
+                Console.WriteLine($"  NPC: {charName} (Friendly) at ({npc.X},{npc.Y})");
+            }
+            else
+            {
+                Console.WriteLine($"  NPC: {charName} ({character.Type}) at ({npc.X},{npc.Y})");
+            }
+
+            // Apply character aux data for damage
+            if (character.AuxData != null)
+            {
+                npc.Damage = character.AuxData.Damage;
+            }
+
+            // Apply character weapon data for health
+            if (character.Weapon != null)
+            {
+                npc.MaxHealth = character.Weapon.Health;
+                npc.Health = character.Weapon.Health;
+            }
+        }
+        else
+        {
+            // CharacterId is actually a tile ID, not a character reference
+            // Check if it's a friendly character tile (flag 0x40000)
+            if (npc.CharacterId < _gameData.Tiles.Count)
+            {
+                var tile = _gameData.Tiles[npc.CharacterId];
+                if (tile.IsCharacter)
+                {
+                    // Check character type flags in tile
+                    var flags = (int)tile.Flags;
+                    if ((flags & 0x40000) != 0)  // CharFriendly
+                    {
+                        npc.IsHostile = false;
+                        npc.Behavior = NPCBehavior.Stationary;
+                        Console.WriteLine($"  NPC: Friendly TileID #{npc.CharacterId} at ({npc.X},{npc.Y})");
+                    }
+                    else if ((flags & 0x20000) != 0)  // CharEnemy
+                    {
+                        npc.IsHostile = true;
+                        npc.Behavior = NPCBehavior.Chasing;
+                        Console.WriteLine($"  NPC: Enemy TileID #{npc.CharacterId} at ({npc.X},{npc.Y})");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  NPC: TileID #{npc.CharacterId} at ({npc.X},{npc.Y})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Spawns Yoda as an NPC in Dagobah zones.
+    /// </summary>
+    private void SpawnYodaIfNeeded(int zoneId)
+    {
+        if (_worldGenerator?.CurrentWorld == null) return;
+
+        // Check if this is a Dagobah zone (Yoda's home)
+        if (_worldGenerator.CurrentWorld.DagobahZones.Contains(zoneId))
+        {
+            // Mark that this is Dagobah
+            _state.SetVariable(998, 1);
+            Console.WriteLine($"  Dagobah zone - checking for Yoda");
+
+            // Spawn Yoda if this is the designated Yoda zone
+            if (zoneId == _worldGenerator.CurrentWorld.YodaZoneId)
+            {
+                var yodaPos = _worldGenerator.CurrentWorld.YodaPosition;
+
+                // Find a walkable position near the intended spawn point
+                var zone = _state.CurrentZone;
+                if (zone != null)
+                {
+                    // Try to find a walkable spot near spawn location
+                    var (finalX, finalY) = FindWalkablePosition(zone, yodaPos.x, yodaPos.y);
+                    Console.WriteLine($"  Spawning Yoda at ({finalX}, {finalY}) (intended: {yodaPos.x}, {yodaPos.y})");
+
+                    // Create Yoda as a friendly NPC
+                    // Yoda uses tile 780 - a FRIENDLY character tile not in the CHAR list
+                    // (Found by searching for Character tiles with CharFriendly flag 0x40000)
+                    const ushort YODA_TILE_ID = 780;
+
+                    var yoda = new NPC
+                    {
+                        CharacterId = YODA_TILE_ID,
+                        X = finalX,
+                        Y = finalY,
+                        StartX = finalX,
+                        StartY = finalY,
+                        Direction = Direction.Down,
+                        Health = 999,
+                        MaxHealth = 999,
+                        IsEnabled = true,
+                        IsHostile = false,
+                        Behavior = NPCBehavior.Stationary,
+                        Damage = 0
+                    };
+                    _state.ZoneNPCs.Add(yoda);
+                }
+            }
+        }
+        else
+        {
+            _state.SetVariable(998, 0);
+        }
+    }
+
+    /// <summary>
+    /// Finds a walkable position near the target coordinates.
+    /// </summary>
+    private (int x, int y) FindWalkablePosition(Zone zone, int targetX, int targetY)
+    {
+        // Check if target is walkable
+        if (IsPositionWalkable(zone, targetX, targetY))
+            return (targetX, targetY);
+
+        // Search in expanding squares around target
+        for (int radius = 1; radius <= 5; radius++)
+        {
+            for (int dx = -radius; dx <= radius; dx++)
+            {
+                for (int dy = -radius; dy <= radius; dy++)
+                {
+                    if (Math.Abs(dx) != radius && Math.Abs(dy) != radius)
+                        continue; // Only check perimeter
+
+                    int x = targetX + dx;
+                    int y = targetY + dy;
+
+                    if (IsPositionWalkable(zone, x, y))
+                        return (x, y);
+                }
+            }
+        }
+
+        // Fallback: use spawn location from zone
+        foreach (var obj in zone.Objects)
+        {
+            if (obj.Type == ZoneObjectType.SpawnLocation)
+                return (obj.X, obj.Y);
+        }
+
+        return (targetX, targetY); // Last resort
+    }
+
+    private bool IsPositionWalkable(Zone zone, int x, int y)
+    {
+        if (x < 1 || x >= zone.Width - 1 || y < 1 || y >= zone.Height - 1)
+            return false;
+
+        var middleTile = zone.GetTile(x, y, 1);
+        if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
+        {
+            var tile = _gameData.Tiles[middleTile];
+            if (tile.IsObject && !tile.IsFloor)
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Checks for X-Wing and spawns it as a visible object.
+    /// </summary>
+    private void CheckForXWing(int zoneId)
+    {
+        if (_worldGenerator?.CurrentWorld == null) return;
+
+        // X-Wing is available in all Dagobah zones
+        if (_worldGenerator.CurrentWorld.DagobahZones.Contains(zoneId))
+        {
+            _state.SetVariable(999, 1);  // X-Wing available
+            Console.WriteLine($"  X-Wing available (press X anywhere to travel)");
+
+            // Spawn X-Wing as an NPC so it renders like other characters
+            if (_state.CurrentZone != null)
+            {
+                foreach (var obj in _state.CurrentZone.Objects)
+                {
+                    if (obj.Type == ZoneObjectType.XWingFromDagobah)
+                    {
+                        Console.WriteLine($"  X-Wing location at ({obj.X}, {obj.Y})");
+                        // Store X-Wing position for rendering
+                        _state.XWingPosition = (obj.X, obj.Y);
+                        break;
+                    }
+                }
+            }
+        }
+        else
+        {
+            _state.SetVariable(999, 0);
+        }
+    }
+
+    /// <summary>
+    /// Handles X-Wing travel to the planet.
+    /// </summary>
+    private void TravelToPlanet()
+    {
+        if (_worldGenerator?.CurrentWorld == null) return;
+
+        // Check if X-Wing is available (in Dagobah)
+        if (_state.GetVariable(999) != 1)
+        {
+            _messages.ShowMessage("You need to return to Dagobah first.", MessageType.Info);
+            return;
+        }
+
+        // Travel to landing zone
+        var landingZoneId = _worldGenerator.CurrentWorld.LandingZoneId;
+        if (landingZoneId > 0 && landingZoneId < _gameData!.Zones.Count)
+        {
+            var destZone = _gameData.Zones[landingZoneId];
+            _messages.ShowMessage($"Traveling to {_worldGenerator.CurrentWorld.Planet}...", MessageType.System);
+            _sounds?.PlaySound(SoundManager.SoundDoor);
+
+            // Find spawn point
+            int spawnX = destZone.Width / 2;
+            int spawnY = destZone.Height / 2;
+            foreach (var obj in destZone.Objects)
+            {
+                if (obj.Type == ZoneObjectType.SpawnLocation)
+                {
+                    spawnX = obj.X;
+                    spawnY = obj.Y;
+                    break;
+                }
+            }
+
+            LoadZone(landingZoneId, spawnX, spawnY);
+        }
+    }
+
     private void Update(double deltaTime)
     {
         if (_state.IsPaused)
@@ -716,11 +2052,25 @@ public class GameEngine : IDisposable
         // Update NPC AI
         UpdateNPCs(deltaTime);
 
+        // Update projectiles
+        UpdateProjectiles(deltaTime);
+
         // Decay visual effect timers
         if (_state.DamageFlashTimer > 0)
             _state.DamageFlashTimer = Math.Max(0, _state.DamageFlashTimer - deltaTime * 4);
         if (_state.AttackFlashTimer > 0)
             _state.AttackFlashTimer = Math.Max(0, _state.AttackFlashTimer - deltaTime * 6);
+
+        // Update attack animation timer
+        if (_state.IsAttacking)
+        {
+            _state.AttackTimer -= deltaTime;
+            if (_state.AttackTimer <= 0)
+            {
+                _state.IsAttacking = false;
+                _state.AttackTimer = 0;
+            }
+        }
 
         // Update messages
         _messages.Update(deltaTime);
@@ -792,6 +2142,72 @@ public class GameEngine : IDisposable
                         _messages.ShowCombat($"{attackerName} hits you! (-{npc.Damage} HP)");
                     }
                 }
+            }
+        }
+    }
+
+    private void UpdateProjectiles(double deltaTime)
+    {
+        for (int i = _state.Projectiles.Count - 1; i >= 0; i--)
+        {
+            var projectile = _state.Projectiles[i];
+            projectile.Update(deltaTime);
+
+            // Check if out of bounds
+            var (tileX, tileY) = projectile.TilePosition;
+            if (tileX < 0 || tileX >= _state.CurrentZone!.Width ||
+                tileY < 0 || tileY >= _state.CurrentZone.Height)
+            {
+                projectile.IsActive = false;
+            }
+
+            // Check for wall collision
+            if (projectile.IsActive)
+            {
+                var middleTile = _state.CurrentZone.GetTile(tileX, tileY, 1);
+                if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
+                {
+                    var tile = _gameData.Tiles[middleTile];
+                    if (tile.IsObject && !tile.IsDraggable)
+                    {
+                        projectile.IsActive = false;
+                    }
+                }
+            }
+
+            // Check for NPC collision
+            if (projectile.IsActive)
+            {
+                foreach (var npc in _state.ZoneNPCs)
+                {
+                    if (!npc.IsEnabled || !npc.IsAlive)
+                        continue;
+
+                    if (npc.X == tileX && npc.Y == tileY)
+                    {
+                        bool killed = npc.TakeDamage(projectile.Damage);
+                        projectile.IsActive = false;
+                        _state.AttackFlashTimer = 0.3;
+
+                        var npcName = GetCharacterName(npc.CharacterId) ?? "Target";
+                        if (killed)
+                        {
+                            _messages.ShowCombat($"{npcName} defeated!");
+                            _sounds?.PlaySound(SoundManager.SoundDeath);
+                        }
+                        else
+                        {
+                            _messages.ShowCombat($"Hit! {npc.Health} HP left");
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Remove inactive projectiles
+            if (!projectile.IsActive)
+            {
+                _state.Projectiles.RemoveAt(i);
             }
         }
     }
@@ -928,6 +2344,9 @@ public class GameEngine : IDisposable
         // Render zone
         _renderer.RenderZone(_state.CurrentZone, _state.CameraX, _state.CameraY);
 
+        // Render X-Wing if in Dagobah zone
+        RenderXWing();
+
         // Render zone items (crates, weapons on ground)
         RenderZoneItems();
 
@@ -936,6 +2355,21 @@ public class GameEngine : IDisposable
 
         // Render player character
         RenderPlayer();
+
+        // Render attack animation if attacking
+        if (_state.IsAttacking)
+        {
+            var playerScreenX = (_state.PlayerX - _state.CameraX) * Data.Tile.Width * GameRenderer.Scale;
+            var playerScreenY = (_state.PlayerY - _state.CameraY) * Data.Tile.Height * GameRenderer.Scale;
+            var direction = (int)_state.PlayerDirection;
+            var progress = _state.AttackTimer / 0.3;  // Normalized progress
+
+            // Don't render weapon tile for melee - render a slash effect instead
+            _renderer.RenderMeleeSlash(playerScreenX, playerScreenY, direction, progress);
+        }
+
+        // Render projectiles
+        RenderProjectiles();
 
         // Render HUD
         _renderer.RenderHUD(_state.Health, _state.MaxHealth, _state.Inventory, _state.SelectedWeapon, _state.SelectedItem);
@@ -958,6 +2392,28 @@ public class GameEngine : IDisposable
 
         // Present frame
         _renderer.Present();
+    }
+
+    /// <summary>
+    /// Renders the X-Wing at its position in Dagobah zones.
+    /// </summary>
+    private void RenderXWing()
+    {
+        if (_renderer == null || _state.XWingPosition == null)
+            return;
+
+        var (xwingX, xwingY) = _state.XWingPosition.Value;
+
+        // Check if X-Wing is within viewport
+        if (xwingX < _state.CameraX - 2 || xwingX >= _state.CameraX + GameRenderer.ViewportTilesX + 2 ||
+            xwingY < _state.CameraY - 2 || xwingY >= _state.CameraY + GameRenderer.ViewportTilesY + 2)
+            return;
+
+        // X-Wing as 2x2 grid: 948, 949 on top row, 950, 951 on bottom row
+        _renderer.RenderSprite(948, xwingX, xwingY, _state.CameraX, _state.CameraY);
+        _renderer.RenderSprite(949, xwingX + 1, xwingY, _state.CameraX, _state.CameraY);
+        _renderer.RenderSprite(950, xwingX, xwingY + 1, _state.CameraX, _state.CameraY);
+        _renderer.RenderSprite(951, xwingX + 1, xwingY + 1, _state.CameraX, _state.CameraY);
     }
 
     private void RenderZoneItems()
@@ -1027,6 +2483,27 @@ public class GameEngine : IDisposable
             {
                 _renderer!.RenderSprite(npc.CharacterId, npc.X, npc.Y, _state.CameraX, _state.CameraY);
             }
+        }
+    }
+
+    private void RenderProjectiles()
+    {
+        foreach (var projectile in _state.Projectiles)
+        {
+            if (!projectile.IsActive)
+                continue;
+
+            var (tileX, tileY) = projectile.TilePosition;
+
+            // Check if within viewport
+            if (tileX < _state.CameraX || tileX >= _state.CameraX + GameRenderer.ViewportTilesX ||
+                tileY < _state.CameraY || tileY >= _state.CameraY + GameRenderer.ViewportTilesY)
+                continue;
+
+            // Render projectile
+            var screenX = (int)((projectile.X - _state.CameraX) * Data.Tile.Width * GameRenderer.Scale);
+            var screenY = (int)((projectile.Y - _state.CameraY) * Data.Tile.Height * GameRenderer.Scale);
+            _renderer!.RenderProjectile(screenX, screenY, projectile.Type);
         }
     }
 
@@ -1108,6 +2585,13 @@ public class GameEngine : IDisposable
 
     public void Dispose()
     {
+        // Clean up controller
+        if (_controller != null)
+        {
+            SDL.GameControllerClose(_controller);
+            _controller = null;
+        }
+
         _sounds?.Dispose();
         _renderer?.Dispose();
     }

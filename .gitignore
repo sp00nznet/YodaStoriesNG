@@ -19,6 +19,10 @@ AUTORUN.INF
 Yodaplay.exe
 setup.exe
 
+# Indiana Jones Desktop Adventures data
+ida/
+INDYDESK/
+
 # Temporary scripts
 *.ps1
 
@@ -28,3 +32,11 @@ setup.exe
 # OS files
 Thumbs.db
 .DS_Store
+nul
+
+# Temporary/debug files
+*.bmp
+output.txt
+
+# Python scripts (dev tools)
+*.py

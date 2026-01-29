@@ -20,6 +20,7 @@ public unsafe class SoundManager : IDisposable
     public const int SoundDeath = 3;
     public const int SoundDoor = 4;
     public const int SoundSuccess = 5;
+    public const int SoundTalk = 6;
 
     public SoundManager(string soundPath)
     {

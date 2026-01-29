@@ -47,14 +47,22 @@ class Program
         Console.WriteLine();
 
         Console.WriteLine("Controls:");
-        Console.WriteLine("  Arrow keys / WASD - Move");
+        Console.WriteLine("  Arrow keys / WASD - Move (push blocks)");
+        Console.WriteLine("  Shift + Move - Pull blocks");
         Console.WriteLine("  Space - Attack / Talk / Dismiss dialogue");
+        Console.WriteLine("  Tab - Toggle weapon");
         Console.WriteLine("  1-8 - Select inventory item");
+        Console.WriteLine("  F - Find zone with NPCs/items");
+        Console.WriteLine("  X - Travel (use X-Wing)");
         Console.WriteLine("  M - Toggle sound mute");
         Console.WriteLine("  N/P - Next/Previous zone (debug)");
         Console.WriteLine("  R - Restart game");
         Console.WriteLine("  ESC - Quit");
         Console.WriteLine();
+
+        // Check for diagnostic mode
+        bool diagnosticOnly = args.Contains("--diag") || args.Contains("-d");
+        bool exportTiles = args.Contains("--export-tiles");
 
         try
         {
@@ -64,6 +72,12 @@ class Program
             {
                 Console.WriteLine("Failed to initialize game engine.");
                 return 1;
+            }
+
+            if (diagnosticOnly)
+            {
+                Console.WriteLine("\n=== Diagnostic mode - exiting without starting game ===");
+                return 0;
             }
 
             Console.WriteLine("Starting game...");

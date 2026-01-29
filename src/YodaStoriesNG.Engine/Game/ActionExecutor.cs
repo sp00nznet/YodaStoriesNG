@@ -1,4 +1,5 @@
 using YodaStoriesNG.Engine.Data;
+using YodaStoriesNG.Engine.UI;
 
 namespace YodaStoriesNG.Engine.Game;
 
@@ -14,6 +15,18 @@ public class ActionExecutor
     // Action execution context
     private int _lastRandomValue;
     private Zone? _currentZone;
+
+    // Current interaction context
+    public int? PlacedItemId { get; set; }
+    public int? DroppedItemId { get; set; }
+    public int? InteractingNpcId { get; set; }
+    public int BumpX { get; set; }
+    public int BumpY { get; set; }
+
+    // Event for displaying dialogue
+    public event Action<string, string>? OnDialogue;
+    public event Action<string>? OnMessage;
+    public event Action<int>? OnPlaySound;
 
     public ActionExecutor(GameData gameData, GameState state)
     {
@@ -50,6 +63,21 @@ public class ActionExecutor
     }
 
     private bool EvaluateCondition(Condition condition, ActionTrigger trigger)
+    {
+        var result = EvaluateConditionInternal(condition, trigger);
+
+        // Debug: Log NpcIs condition evaluations (most relevant for R2D2 interaction)
+        if (condition.Opcode == ConditionOpcode.NpcIs)
+        {
+            var args = condition.Arguments;
+            var expectedNpc = args.Count > 0 ? args[0] : -1;
+            Console.WriteLine($"  Condition NpcIs: expected={expectedNpc}, actual={InteractingNpcId}, result={result}");
+        }
+
+        return result;
+    }
+
+    private bool EvaluateConditionInternal(Condition condition, ActionTrigger trigger)
     {
         var args = condition.Arguments;
 
@@ -142,6 +170,56 @@ public class ActionExecutor
                     return false;
                 return _state.GamesWon == args[0];
 
+            case ConditionOpcode.PlacedItemIs:
+                if (args.Count < 1)
+                    return false;
+                return PlacedItemId == args[0];
+
+            case ConditionOpcode.NoItemPlaced:
+                return !PlacedItemId.HasValue;
+
+            case ConditionOpcode.ItemIsPlaced:
+                return PlacedItemId.HasValue;
+
+            case ConditionOpcode.DroppedItemIs:
+                if (args.Count < 1)
+                    return false;
+                return DroppedItemId == args[0];
+
+            case ConditionOpcode.NpcIs:
+                if (args.Count < 1)
+                    return false;
+                return InteractingNpcId == args[0];
+
+            case ConditionOpcode.HasNpc:
+                return InteractingNpcId.HasValue;
+
+            case ConditionOpcode.MonsterIsDead:
+                // Check if specific monster is dead (by index in zone NPCs)
+                if (args.Count < 1)
+                    return false;
+                var npcIndex = args[0];
+                if (npcIndex >= 0 && npcIndex < _state.ZoneNPCs.Count)
+                    return _state.ZoneNPCs[npcIndex].Health <= 0;
+                return true; // If NPC doesn't exist, consider it "dead"
+
+            case ConditionOpcode.HasNoActiveMonsters:
+                // Check if all hostile NPCs in zone are dead
+                return _state.ZoneNPCs.All(n => !n.IsHostile || n.Health <= 0);
+
+            case ConditionOpcode.RequiredItemIs:
+                // Check if zone's required item matches
+                if (args.Count < 1 || _currentZone == null)
+                    return false;
+                // This typically checks puzzle items - for now just check if we have the item
+                return _state.HasItem(args[0]);
+
+            case ConditionOpcode.FindItemIs:
+                // Similar to RequiredItemIs
+                if (args.Count < 1)
+                    return false;
+                return _state.HasItem(args[0]);
+
             default:
                 // Unknown condition - assume true to allow script to continue
                 return true;
@@ -150,6 +228,11 @@ public class ActionExecutor
 
     private void ExecuteInstructions(List<Instruction> instructions)
     {
+        if (instructions.Count > 0)
+        {
+            Console.WriteLine($"  Executing {instructions.Count} instructions");
+        }
+
         foreach (var instruction in instructions)
         {
             ExecuteInstruction(instruction);
@@ -256,21 +339,123 @@ public class ActionExecutor
                 break;
 
             case InstructionOpcode.SpeakHero:
+                if (!string.IsNullOrEmpty(instruction.Text))
+                {
+                    OnDialogue?.Invoke("Luke", instruction.Text);
+                }
+                break;
+
             case InstructionOpcode.SpeakNpc:
             case InstructionOpcode.SpeakNpc2:
-                // TODO: Display dialog text
                 if (!string.IsNullOrEmpty(instruction.Text))
-                    Console.WriteLine($"Dialog: {instruction.Text}");
+                {
+                    // Get NPC name from argument if provided
+                    string npcName = "NPC";
+                    if (args.Count >= 1 && args[0] >= 0 && args[0] < _gameData.Characters.Count)
+                    {
+                        var character = _gameData.Characters[args[0]];
+                        if (!string.IsNullOrEmpty(character.Name))
+                            npcName = character.Name;
+                    }
+                    OnDialogue?.Invoke(npcName, instruction.Text);
+                }
                 break;
 
             case InstructionOpcode.PlaySound:
-                // TODO: Play sound effect
                 if (args.Count >= 1)
-                    Console.WriteLine($"Play sound: {args[0]}");
+                {
+                    OnPlaySound?.Invoke(args[0]);
+                }
                 break;
 
             case InstructionOpcode.Wait:
                 // TODO: Implement wait/delay
+                break;
+
+            case InstructionOpcode.DropItem:
+                // Drop an item at specified location
+                if (args.Count >= 3 && _currentZone != null)
+                {
+                    int x = args[0];
+                    int y = args[1];
+                    int tileId = args[2];
+                    // Place the item tile on layer 1 (object layer)
+                    _currentZone.SetTile(x, y, 1, (ushort)tileId);
+                    Console.WriteLine($"Dropped item {tileId} at ({x},{y})");
+                }
+                break;
+
+            case InstructionOpcode.EnableMonster:
+                if (args.Count >= 1)
+                {
+                    int npcIdx = args[0];
+                    if (npcIdx >= 0 && npcIdx < _state.ZoneNPCs.Count)
+                        _state.ZoneNPCs[npcIdx].IsEnabled = true;
+                }
+                break;
+
+            case InstructionOpcode.DisableMonster:
+                if (args.Count >= 1)
+                {
+                    int npcIdx = args[0];
+                    if (npcIdx >= 0 && npcIdx < _state.ZoneNPCs.Count)
+                        _state.ZoneNPCs[npcIdx].IsEnabled = false;
+                }
+                break;
+
+            case InstructionOpcode.EnableAllMonsters:
+                foreach (var npc in _state.ZoneNPCs)
+                    npc.IsEnabled = true;
+                break;
+
+            case InstructionOpcode.DisableAllMonsters:
+                foreach (var npc in _state.ZoneNPCs)
+                    npc.IsEnabled = false;
+                break;
+
+            case InstructionOpcode.HideHero:
+                // TODO: Make hero invisible
+                break;
+
+            case InstructionOpcode.ShowHero:
+                // TODO: Make hero visible
+                break;
+
+            case InstructionOpcode.SetZoneType:
+                // Change the zone's type
+                if (args.Count >= 1 && _currentZone != null)
+                    _currentZone.Type = (ZoneType)args[0];
+                break;
+
+            case InstructionOpcode.DisableAction:
+                // This typically disables the current action from running again
+                // Mark with a variable
+                _state.SetVariable(_state.CurrentZoneId + 2000, 1);
+                break;
+
+            case InstructionOpcode.Redraw:
+                // Request a redraw - handled by renderer
+                break;
+
+            case InstructionOpcode.MoveTile:
+                // Move a tile from one position to another
+                if (args.Count >= 5 && _currentZone != null)
+                {
+                    int fromX = args[0];
+                    int fromY = args[1];
+                    int layer = args[2];
+                    int toX = args[3];
+                    int toY = args[4];
+                    var tile = _currentZone.GetTile(fromX, fromY, layer);
+                    _currentZone.SetTile(fromX, fromY, layer, 0xFFFF);
+                    _currentZone.SetTile(toX, toY, layer, tile);
+                }
+                break;
+
+            case InstructionOpcode.DrawTile:
+                // Draw a tile at position (same as PlaceTile for us)
+                if (args.Count >= 4 && _currentZone != null)
+                    _currentZone.SetTile(args[0], args[1], args[2], (ushort)args[3]);
                 break;
 
             default:
@@ -289,4 +474,5 @@ public enum ActionTrigger
     Walk,
     UseItem,
     Attack,
+    NpcTalk,
 }
