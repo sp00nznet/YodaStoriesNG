@@ -220,18 +220,19 @@ public class WorldGenerator
 
     /// <summary>
     /// Parses and dumps IZAX entity data.
-    /// IZAX format: 2 bytes count, then for each entity: charId(2), x(2), y(2), itemTile(2), itemQuantity(2), data(6)
+    /// IZAX format: 4 bytes header, 2 bytes count, then for each entity: charId(2), x(2), y(2), itemTile(2), itemQuantity(2), data(6)
     /// </summary>
     private void DumpIzaxEntities(byte[] izaxData)
     {
-        if (izaxData.Length < 2) return;
+        if (izaxData.Length < 6) return;
 
         using var ms = new MemoryStream(izaxData);
         using var reader = new BinaryReader(ms);
 
         try
         {
-            // IZAX starts with entity count (2 bytes)
+            // Skip 4-byte header, then read entity count (2 bytes)
+            reader.ReadUInt32();
             var entityCount = reader.ReadUInt16();
             Console.WriteLine($"    Entity count: {entityCount}");
 
@@ -542,14 +543,11 @@ public class WorldGenerator
         CurrentWorld.StartingZoneId = dagobahZones[0];  // Should be 93
         CurrentWorld.XWingZoneId = CurrentWorld.StartingZoneId;
 
-        // Randomly pick one of 4 positions for Yoda to appear
-        // (Yoda can appear in any of the 4 Dagobah outdoor zones)
-        var yodaZoneIndex = _random.Next(Math.Min(4, dagobahZones.Count));
-        CurrentWorld.YodaZoneId = dagobahZones[yodaZoneIndex];
+        // Yoda always appears in the starting zone for easy access
+        CurrentWorld.YodaZoneId = CurrentWorld.StartingZoneId;
 
-        // Random position within the zone for Yoda (4 possible positions)
-        var yodaPositions = new[] { (5, 5), (12, 5), (5, 12), (12, 12) };
-        CurrentWorld.YodaPosition = yodaPositions[_random.Next(yodaPositions.Length)];
+        // Yoda spawns near the player (player starts around 13,4, Yoda at 11,4)
+        CurrentWorld.YodaPosition = (11, 4);
 
         Console.WriteLine($"Yoda will appear in zone {CurrentWorld.YodaZoneId} at position {CurrentWorld.YodaPosition}");
 

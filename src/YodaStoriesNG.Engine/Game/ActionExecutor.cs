@@ -15,6 +15,12 @@ public class ActionExecutor
     // Action execution context
     private int _lastRandomValue;
     private Zone? _currentZone;
+    private ActionTrigger _currentTrigger;
+
+    /// <summary>
+    /// When true, dialogue instructions are suppressed.
+    /// </summary>
+    public bool SuppressDialogue { get; set; }
 
     // Current interaction context
     public int? PlacedItemId { get; set; }
@@ -40,6 +46,7 @@ public class ActionExecutor
     public void ExecuteZoneActions(ActionTrigger trigger)
     {
         _currentZone = _state.CurrentZone;
+        _currentTrigger = trigger;
         if (_currentZone == null)
             return;
 
@@ -50,6 +57,16 @@ public class ActionExecutor
                 ExecuteInstructions(action.Instructions);
             }
         }
+    }
+
+    /// <summary>
+    /// Returns true if the current trigger is player-initiated (NpcTalk, UseItem).
+    /// Dialogue should only show for these triggers, not for ZoneEnter, Walk, Bump, etc.
+    /// </summary>
+    private bool IsPlayerInitiatedTrigger()
+    {
+        return _currentTrigger == ActionTrigger.NpcTalk ||
+               _currentTrigger == ActionTrigger.UseItem;
     }
 
     private bool EvaluateConditions(List<Condition> conditions, ActionTrigger trigger)
@@ -339,7 +356,8 @@ public class ActionExecutor
                 break;
 
             case InstructionOpcode.SpeakHero:
-                if (!string.IsNullOrEmpty(instruction.Text))
+                // Only show dialogue if not suppressed AND trigger is player-initiated
+                if (!string.IsNullOrEmpty(instruction.Text) && !SuppressDialogue && IsPlayerInitiatedTrigger())
                 {
                     OnDialogue?.Invoke("Luke", instruction.Text);
                 }
@@ -347,7 +365,8 @@ public class ActionExecutor
 
             case InstructionOpcode.SpeakNpc:
             case InstructionOpcode.SpeakNpc2:
-                if (!string.IsNullOrEmpty(instruction.Text))
+                // Only show dialogue if not suppressed AND trigger is player-initiated
+                if (!string.IsNullOrEmpty(instruction.Text) && !SuppressDialogue && IsPlayerInitiatedTrigger())
                 {
                     // Get NPC name from argument if provided
                     string npcName = "NPC";

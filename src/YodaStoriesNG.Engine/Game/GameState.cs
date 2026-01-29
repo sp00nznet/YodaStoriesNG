@@ -36,6 +36,7 @@ public class GameState
     public bool IsGameOver { get; set; }
     public bool IsGameWon { get; set; }
     public bool IsPaused { get; set; }
+    public bool HasLocator { get; set; }  // Has picked up R2D2/locator droid
 
     // Animation state
     public int AnimationFrame { get; set; }
@@ -89,6 +90,7 @@ public class GameState
         IsGameOver = false;
         IsGameWon = false;
         IsPaused = false;
+        HasLocator = false;
         AnimationFrame = 0;
         AnimationTimer = 0;
         CameraX = 0;

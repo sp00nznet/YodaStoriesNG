@@ -32,6 +32,9 @@ public class MissionBot
     // Random for exploration
     private readonly Random _random = new();
 
+    // Track NPCs we can't reach (to avoid retrying forever)
+    private readonly HashSet<(int, int)> _unreachableNpcs = new();
+
     // Events
     public event Action<BotActionType, int, int, Direction>? OnActionRequested;
 
@@ -95,6 +98,7 @@ public class MissionBot
         _stuckTimer = 0;
         _explorationAttempts = 0;
         _lastPosition = (_state.PlayerX, _state.PlayerY, _state.CurrentZoneId);
+        _unreachableNpcs.Clear();
 
         Console.WriteLine("[BOT] Started");
         LogMissionState();
@@ -344,12 +348,20 @@ public class MissionBot
 
         // Check if there's anything useful in current zone first
         var friendlyNpc = _solver.FindNearestFriendlyNpc();
-        if (friendlyNpc != null)
+        if (friendlyNpc != null && !_unreachableNpcs.Contains((friendlyNpc.X, friendlyNpc.Y)))
         {
             Console.WriteLine($"[BOT] Found friendly NPC at ({friendlyNpc.X},{friendlyNpc.Y})");
-            _actions.TalkToNpc(friendlyNpc);
-            _currentState = BotState.ExecutingObjective;
-            return;
+            if (_actions.TalkToNpc(friendlyNpc))
+            {
+                _currentState = BotState.ExecutingObjective;
+                return;
+            }
+            else
+            {
+                // Couldn't find path to this NPC, mark as unreachable
+                Console.WriteLine($"[BOT] Marking NPC at ({friendlyNpc.X},{friendlyNpc.Y}) as unreachable");
+                _unreachableNpcs.Add((friendlyNpc.X, friendlyNpc.Y));
+            }
         }
 
         // Look for unexplored doors
@@ -489,6 +501,14 @@ public class MissionBot
     private void UpdateStuckDetection(double deltaTime)
     {
         var currentPos = (_state.PlayerX, _state.PlayerY, _state.CurrentZoneId);
+
+        // Clear unreachable NPCs when zone changes
+        if (currentPos.CurrentZoneId != _lastPosition.ZoneId)
+        {
+            Console.WriteLine($"[BOT] Zone changed to {currentPos.CurrentZoneId}, clearing unreachable NPCs");
+            _unreachableNpcs.Clear();
+            _explorationAttempts = 0;
+        }
 
         if (currentPos == _lastPosition)
         {

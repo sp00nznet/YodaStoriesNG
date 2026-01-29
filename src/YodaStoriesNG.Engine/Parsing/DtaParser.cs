@@ -458,20 +458,23 @@ public class DtaParser
 
     /// <summary>
     /// Parses IZAX entity data from raw bytes.
-    /// IZAX format: 2 bytes count, then for each entity: charId(2), x(2), y(2), itemTile(2), itemQty(2), data(6)
+    /// IZAX format: 4 bytes header, 2 bytes count, then for each entity: charId(2), x(2), y(2), itemTile(2), itemQty(2), data(6)
     /// </summary>
     private ZoneAuxData ParseIZAXData(byte[] data)
     {
         var auxData = new ZoneAuxData { RawData = data };
 
         // Parse entity data from raw bytes
-        if (data.Length >= 2)
+        // IZAX has a 4-byte header before the entity count
+        if (data.Length >= 6)
         {
             using var ms = new MemoryStream(data);
             using var entityReader = new BinaryReader(ms);
 
             try
             {
+                // Skip 4-byte header
+                entityReader.ReadUInt32();
                 var entityCount = entityReader.ReadUInt16();
 
                 // Each entity is 16 bytes: charId(2) + x(2) + y(2) + itemTile(2) + itemQty(2) + data(6)

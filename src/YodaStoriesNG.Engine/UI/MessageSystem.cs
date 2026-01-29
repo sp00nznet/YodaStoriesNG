@@ -163,4 +163,13 @@ public class MessageSystem
         _messageQueue.Clear();
         _currentDialogue = null;
     }
+
+    /// <summary>
+    /// Clears only dialogue (the left-side box), keeping other messages.
+    /// </summary>
+    public void ClearDialogue()
+    {
+        _messageQueue.Clear();
+        _currentDialogue = null;
+    }
 }
