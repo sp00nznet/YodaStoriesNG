@@ -618,6 +618,13 @@ public class DtaParser
         // Ensure we're at the end of the section
         _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
         Console.WriteLine($"Loaded {_data.Characters.Count} characters");
+
+        // Debug: Print first few characters
+        for (int i = 0; i < Math.Min(3, _data.Characters.Count); i++)
+        {
+            var c = _data.Characters[i];
+            Console.WriteLine($"  Char {i}: '{c.Name}' type={c.Type} frames: down={c.Frames.WalkDown[0]}");
+        }
     }
 
     private Character ParseCharacterData(int index, byte[] data)

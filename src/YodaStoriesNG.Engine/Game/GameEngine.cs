@@ -88,7 +88,7 @@ public class GameEngine : IDisposable
     /// <summary>
     /// Loads a zone by ID.
     /// </summary>
-    public void LoadZone(int zoneId)
+    public void LoadZone(int zoneId, int? spawnX = null, int? spawnY = null)
     {
         if (zoneId < 0 || zoneId >= _gameData!.Zones.Count)
         {
@@ -96,23 +96,46 @@ public class GameEngine : IDisposable
             return;
         }
 
-        _state.CurrentZoneId = zoneId;
-        _state.CurrentZone = _gameData.Zones[zoneId];
-
-        Console.WriteLine($"Loaded zone {zoneId}: {_state.CurrentZone.Width}x{_state.CurrentZone.Height}, planet: {_state.CurrentZone.Planet}");
-
-        // Debug: Print first few tile IDs
-        Console.WriteLine("Sample tile IDs from zone grid:");
-        for (int y = 0; y < Math.Min(3, _state.CurrentZone.Height); y++)
+        var zone = _gameData.Zones[zoneId];
+        if (zone.Width == 0 || zone.Height == 0)
         {
-            for (int x = 0; x < Math.Min(3, _state.CurrentZone.Width); x++)
+            Console.WriteLine($"Zone {zoneId} is empty, skipping");
+            return;
+        }
+
+        _state.CurrentZoneId = zoneId;
+        _state.CurrentZone = zone;
+
+        // Find spawn location
+        if (spawnX.HasValue && spawnY.HasValue)
+        {
+            _state.PlayerX = spawnX.Value;
+            _state.PlayerY = spawnY.Value;
+        }
+        else
+        {
+            // Look for spawn point in zone objects
+            bool foundSpawn = false;
+            foreach (var obj in zone.Objects)
             {
-                var bg = _state.CurrentZone.GetTile(x, y, 0);
-                var mid = _state.CurrentZone.GetTile(x, y, 1);
-                var fg = _state.CurrentZone.GetTile(x, y, 2);
-                Console.WriteLine($"  [{x},{y}]: bg={bg}, mid={mid}, fg={fg}");
+                if (obj.Type == ZoneObjectType.SpawnLocation)
+                {
+                    _state.PlayerX = obj.X;
+                    _state.PlayerY = obj.Y;
+                    foundSpawn = true;
+                    break;
+                }
+            }
+
+            // Default to center if no spawn found
+            if (!foundSpawn)
+            {
+                _state.PlayerX = zone.Width / 2;
+                _state.PlayerY = zone.Height / 2;
             }
         }
+
+        Console.WriteLine($"Zone {zoneId}: {zone.Width}x{zone.Height}, planet: {zone.Planet}, spawn: ({_state.PlayerX},{_state.PlayerY})");
 
         // Reset camera for zone
         UpdateCamera();
@@ -342,7 +365,28 @@ public class GameEngine : IDisposable
                 case ZoneObjectType.DoorExit:
                     if (obj.Argument > 0 && obj.Argument < _gameData!.Zones.Count)
                     {
-                        LoadZone(obj.Argument);
+                        // Find spawn point in destination zone
+                        var destZone = _gameData.Zones[obj.Argument];
+                        int? spawnX = null, spawnY = null;
+
+                        // Look for a door that leads back to current zone, or a spawn point
+                        foreach (var destObj in destZone.Objects)
+                        {
+                            if ((destObj.Type == ZoneObjectType.DoorEntrance || destObj.Type == ZoneObjectType.DoorExit) &&
+                                destObj.Argument == _state.CurrentZoneId)
+                            {
+                                spawnX = destObj.X;
+                                spawnY = destObj.Y;
+                                break;
+                            }
+                            if (destObj.Type == ZoneObjectType.SpawnLocation && !spawnX.HasValue)
+                            {
+                                spawnX = destObj.X;
+                                spawnY = destObj.Y;
+                            }
+                        }
+
+                        LoadZone(obj.Argument, spawnX, spawnY);
                     }
                     break;
 
@@ -445,7 +489,10 @@ public class GameEngine : IDisposable
     private void RenderPlayer()
     {
         // Find hero character for rendering
+        // In Yoda Stories, the hero (Luke) is typically character 0 or has Hero type
         Character? heroChar = null;
+
+        // First try to find by type
         foreach (var character in _gameData!.Characters)
         {
             if (character.Type == CharacterType.Hero)
@@ -453,6 +500,12 @@ public class GameEngine : IDisposable
                 heroChar = character;
                 break;
             }
+        }
+
+        // Fallback to first character (usually the hero in Yoda Stories)
+        if (heroChar == null && _gameData.Characters.Count > 0)
+        {
+            heroChar = _gameData.Characters[0];
         }
 
         if (heroChar != null)
@@ -467,17 +520,19 @@ public class GameEngine : IDisposable
                 _ => heroChar.Frames.WalkDown
             };
 
-            if (frames.Length > 0)
+            if (frames != null && frames.Length > 0 && frames[0] != 0)
             {
                 var frameIndex = Math.Min(_state.AnimationFrame, frames.Length - 1);
                 var tileId = frames[frameIndex];
-                _renderer!.RenderSprite(tileId, _state.PlayerX, _state.PlayerY, _state.CameraX, _state.CameraY);
-                return;
+                if (tileId < _gameData.Tiles.Count)
+                {
+                    _renderer!.RenderSprite(tileId, _state.PlayerX, _state.PlayerY, _state.CameraX, _state.CameraY);
+                    return;
+                }
             }
         }
 
-        // Fallback: render a placeholder
-        // Use first character tile if available
+        // Fallback: render a placeholder tile
         if (_gameData.Tiles.Count > 800)
         {
             _renderer!.RenderSprite(800, _state.PlayerX, _state.PlayerY, _state.CameraX, _state.CameraY);
