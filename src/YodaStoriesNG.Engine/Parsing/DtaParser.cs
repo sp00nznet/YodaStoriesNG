@@ -86,16 +86,16 @@ public class DtaParser
                 ParsePuzzlesSection(length);
                 break;
             case "CHAR":
-                ParseCharactersSection();
+                ParseCharactersSection(length);
                 break;
             case "CHWP":
-                ParseCharacterWeaponsSection();
+                ParseCharacterWeaponsSection(length);
                 break;
             case "CAUX":
-                ParseCharacterAuxSection();
+                ParseCharacterAuxSection(length);
                 break;
             case "TNAM":
-                ParseTileNamesSection();
+                ParseTileNamesSection(length);
                 break;
             case "ENDF":
                 // End of file marker
@@ -592,90 +592,81 @@ public class DtaParser
         Console.WriteLine($"Loaded {_data.Puzzles.Count} puzzles");
     }
 
-    private void ParseCharactersSection()
+    private void ParseCharactersSection(uint length)
     {
-        var charCount = _reader.ReadUInt16();
+        var startPos = _reader.BaseStream.Position;
+        var endPos = startPos + length;
+
+        // Characters are stored in fixed 84-byte chunks
+        // The number of characters is determined by section length, not a count field
+        const int CharacterSize = 84;
+
+        // Calculate number of characters from section length
+        var charCount = (int)(length / CharacterSize);
+        Console.WriteLine($"Character section: {length} bytes = {charCount} characters");
 
         for (int i = 0; i < charCount; i++)
         {
-            var character = ParseSingleCharacter(i);
+            if (_reader.BaseStream.Position + CharacterSize > endPos)
+                break;
+
+            var charData = _reader.ReadBytes(CharacterSize);
+            var character = ParseCharacterData(i, charData);
             _data.Characters.Add(character);
         }
 
+        // Ensure we're at the end of the section
+        _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
         Console.WriteLine($"Loaded {_data.Characters.Count} characters");
     }
 
-    private Character ParseSingleCharacter(int charId)
+    private Character ParseCharacterData(int index, byte[] data)
     {
-        var character = new Character { Id = charId };
+        var character = new Character { Id = index };
 
-        // Read ICHA marker
-        var ichaTag = System.Text.Encoding.ASCII.GetString(_reader.ReadBytes(4));
-        if (ichaTag != "ICHA")
-        {
-            Console.WriteLine($"Expected ICHA, got {ichaTag} at character {charId}");
-            return character;
-        }
+        // Character ID at bytes 0-1
+        var charId = BitConverter.ToUInt16(data, 0);
 
-        var length = _reader.ReadUInt32();
-        var endPos = _reader.BaseStream.Position + length;
+        // Name starts at byte 10, null-terminated
+        var nameEnd = 10;
+        while (nameEnd < 36 && data[nameEnd] != 0)
+            nameEnd++;
+        if (nameEnd > 10)
+            character.Name = System.Text.Encoding.ASCII.GetString(data, 10, nameEnd - 10);
 
-        // Read character name (null-terminated with length prefix)
-        var nameLength = _reader.ReadUInt16();
-        if (nameLength > 0)
-        {
-            var nameBytes = _reader.ReadBytes(nameLength);
-            character.Name = System.Text.Encoding.ASCII.GetString(nameBytes).TrimEnd('\0');
-        }
+        // Character type at byte 4
+        character.Type = (CharacterType)data[4];
 
-        // Read character type
-        character.Type = (CharacterType)_reader.ReadUInt16();
-
-        // Read movement type
-        var movementType = _reader.ReadUInt16();
-
-        // Read frame count
-        var frameCount = _reader.ReadUInt16();
-
-        // Read animation frames
+        // Directional tile IDs at bytes 36-47 (6 directions x 2 bytes)
         var frames = new CharacterFrames();
-        if (frameCount >= 4)
-        {
-            // Read directional frames (up, down, left, right)
-            for (int dir = 0; dir < 4; dir++)
-            {
-                var dirFrames = new List<ushort>();
-                for (int f = 0; f < 3; f++)
-                {
-                    dirFrames.Add(_reader.ReadUInt16());
-                }
 
-                switch (dir)
-                {
-                    case 0: frames.WalkUp = dirFrames.ToArray(); break;
-                    case 1: frames.WalkDown = dirFrames.ToArray(); break;
-                    case 2: frames.WalkLeft = dirFrames.ToArray(); break;
-                    case 3: frames.WalkRight = dirFrames.ToArray(); break;
-                }
-            }
-        }
+        // The tile IDs for different directions
+        var tileUp = BitConverter.ToUInt16(data, 36);
+        var tileUpRight = BitConverter.ToUInt16(data, 38);
+        var tileRight = BitConverter.ToUInt16(data, 40);
+        var tileDownRight = BitConverter.ToUInt16(data, 42);
+        var tileDown = BitConverter.ToUInt16(data, 44);
+        var tileDownLeft = BitConverter.ToUInt16(data, 46);
+
+        // Map to our 4-direction system
+        frames.WalkUp = new ushort[] { tileUp, tileUp, tileUp };
+        frames.WalkDown = new ushort[] { tileDown, tileDown, tileDown };
+        frames.WalkLeft = new ushort[] { tileDownLeft, tileDownLeft, tileDownLeft };
+        frames.WalkRight = new ushort[] { tileRight, tileRight, tileRight };
 
         character.Frames = frames;
-
-        // Seek to end of character data
-        if (_reader.BaseStream.Position != endPos)
-        {
-            _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
-        }
 
         return character;
     }
 
-    private void ParseCharacterWeaponsSection()
+    private void ParseCharacterWeaponsSection(uint length)
     {
-        var count = _reader.ReadUInt16();
+        var endPos = _reader.BaseStream.Position + length;
 
-        for (int i = 0; i < count; i++)
+        // Each entry is 4 bytes (2 for reference, 2 for health)
+        var count = (int)(length / 4);
+
+        for (int i = 0; i < count && _reader.BaseStream.Position + 4 <= endPos; i++)
         {
             var reference = _reader.ReadUInt16();
             var health = _reader.ReadUInt16();
@@ -689,13 +680,18 @@ public class DtaParser
                 };
             }
         }
+
+        _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
     }
 
-    private void ParseCharacterAuxSection()
+    private void ParseCharacterAuxSection(uint length)
     {
-        var count = _reader.ReadUInt16();
+        var endPos = _reader.BaseStream.Position + length;
 
-        for (int i = 0; i < count; i++)
+        // Each entry is 2 bytes (damage)
+        var count = (int)(length / 2);
+
+        for (int i = 0; i < count && _reader.BaseStream.Position + 2 <= endPos; i++)
         {
             var damage = _reader.ReadUInt16();
 
@@ -707,25 +703,34 @@ public class DtaParser
                 };
             }
         }
+
+        _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
     }
 
-    private void ParseTileNamesSection()
+    private void ParseTileNamesSection(uint length)
     {
-        var count = _reader.ReadUInt16();
+        var startPos = _reader.BaseStream.Position;
+        var endPos = startPos + length;
 
-        for (int i = 0; i < count; i++)
+        while (_reader.BaseStream.Position + 4 <= endPos)
         {
             var tileId = _reader.ReadUInt16();
             var nameLength = _reader.ReadUInt16();
 
-            if (nameLength > 0)
+            if (nameLength > 0 && nameLength < 256 && _reader.BaseStream.Position + nameLength <= endPos)
             {
                 var nameBytes = _reader.ReadBytes(nameLength);
                 var name = System.Text.Encoding.ASCII.GetString(nameBytes).TrimEnd('\0');
                 _data.TileNames[tileId] = name;
             }
+            else if (nameLength >= 256)
+            {
+                // Invalid length, stop parsing
+                break;
+            }
         }
 
+        _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
         Console.WriteLine($"Loaded {_data.TileNames.Count} tile names");
     }
 }
