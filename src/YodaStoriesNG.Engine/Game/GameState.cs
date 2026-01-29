@@ -47,6 +47,9 @@ public class GameState
     // NPCs in current zone
     public List<NPC> ZoneNPCs { get; set; } = new();
 
+    // Track collected objects by zone (key = "zoneId_x_y")
+    public HashSet<string> CollectedObjects { get; set; } = new();
+
     /// <summary>
     /// Resets the game state for a new game.
     /// </summary>
@@ -72,6 +75,7 @@ public class GameState
         CameraX = 0;
         CameraY = 0;
         ZoneNPCs.Clear();
+        CollectedObjects.Clear();
     }
 
     /// <summary>
@@ -139,6 +143,18 @@ public class GameState
     /// </summary>
     public bool IsZoneSolved(int zoneId) =>
         SolvedZones.Contains(zoneId);
+
+    /// <summary>
+    /// Marks an object at a position as collected.
+    /// </summary>
+    public void MarkObjectCollected(int zoneId, int x, int y) =>
+        CollectedObjects.Add($"{zoneId}_{x}_{y}");
+
+    /// <summary>
+    /// Checks if an object at a position has been collected.
+    /// </summary>
+    public bool IsObjectCollected(int zoneId, int x, int y) =>
+        CollectedObjects.Contains($"{zoneId}_{x}_{y}");
 }
 
 public enum Direction

@@ -347,19 +347,21 @@ public class GameEngine : IDisposable
             switch (obj.Type)
             {
                 case ZoneObjectType.CrateItem:
-                    // Pick up item
-                    if (obj.Argument > 0)
+                    // Pick up item (if not already collected)
+                    if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
                     {
                         _state.AddItem(obj.Argument);
+                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
                         Console.WriteLine($"Picked up item: {obj.Argument}");
                     }
                     break;
 
                 case ZoneObjectType.CrateWeapon:
-                    // Pick up weapon
-                    if (obj.Argument > 0)
+                    // Pick up weapon (if not already collected)
+                    if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
                     {
                         _state.SelectedWeapon = obj.Argument;
+                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
                         Console.WriteLine($"Picked up weapon: {obj.Argument}");
                     }
                     break;
@@ -769,6 +771,9 @@ public class GameEngine : IDisposable
         // Render zone
         _renderer.RenderZone(_state.CurrentZone, _state.CameraX, _state.CameraY);
 
+        // Render zone items (crates, weapons on ground)
+        RenderZoneItems();
+
         // Render NPCs
         RenderNPCs();
 
@@ -776,10 +781,35 @@ public class GameEngine : IDisposable
         RenderPlayer();
 
         // Render HUD
-        _renderer.RenderHUD(_state.Health, _state.MaxHealth, _state.Inventory, _state.SelectedWeapon);
+        _renderer.RenderHUD(_state.Health, _state.MaxHealth, _state.Inventory, _state.SelectedWeapon, _state.SelectedItem);
 
         // Present frame
         _renderer.Present();
+    }
+
+    private void RenderZoneItems()
+    {
+        foreach (var obj in _state.CurrentZone!.Objects)
+        {
+            // Only render item crates that haven't been picked up
+            if (obj.Type != ZoneObjectType.CrateItem && obj.Type != ZoneObjectType.CrateWeapon)
+                continue;
+
+            // Check if already picked up (stored in zone state)
+            if (_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                continue;
+
+            // Check if within viewport
+            if (obj.X < _state.CameraX || obj.X >= _state.CameraX + GameRenderer.ViewportTilesX ||
+                obj.Y < _state.CameraY || obj.Y >= _state.CameraY + GameRenderer.ViewportTilesY)
+                continue;
+
+            // Render the item tile
+            if (obj.Argument > 0 && obj.Argument < _gameData!.Tiles.Count)
+            {
+                _renderer!.RenderSprite(obj.Argument, obj.X, obj.Y, _state.CameraX, _state.CameraY);
+            }
+        }
     }
 
     private void RenderNPCs()

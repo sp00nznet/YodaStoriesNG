@@ -230,7 +230,7 @@ public unsafe class GameRenderer : IDisposable
     /// <summary>
     /// Renders the HUD (health, inventory, etc.).
     /// </summary>
-    public void RenderHUD(int health, int maxHealth, List<int> inventory, int? selectedWeapon)
+    public void RenderHUD(int health, int maxHealth, List<int> inventory, int? selectedWeapon, int? selectedItem = null)
     {
         var hudY = ViewportTilesY * Tile.Height * Scale;
 
@@ -239,7 +239,12 @@ public unsafe class GameRenderer : IDisposable
         var hudRect = new SDLRect { X = 0, Y = hudY, W = WindowWidth, H = 100 * Scale };
         SDL.RenderFillRect(_renderer, &hudRect);
 
-        // Health bar
+        // Health bar background
+        SDL.SetRenderDrawColor(_renderer, 80, 0, 0, 255);
+        var healthBg = new SDLRect { X = 10, Y = hudY + 10, W = 150, H = 20 };
+        SDL.RenderFillRect(_renderer, &healthBg);
+
+        // Health bar fill
         var healthWidth = (int)((float)health / maxHealth * 150);
         SDL.SetRenderDrawColor(_renderer, 200, 0, 0, 255);
         var healthRect = new SDLRect { X = 10, Y = hudY + 10, W = healthWidth, H = 20 };
@@ -250,22 +255,55 @@ public unsafe class GameRenderer : IDisposable
         var healthBorder = new SDLRect { X = 10, Y = hudY + 10, W = 150, H = 20 };
         SDL.RenderDrawRect(_renderer, &healthBorder);
 
-        // Inventory slots
-        for (int i = 0; i < Math.Min(inventory.Count, 8); i++)
+        // Weapon slot (on left side)
+        var weaponSlotX = 10;
+        var weaponSlotY = hudY + 40;
+
+        // Weapon slot background
+        SDL.SetRenderDrawColor(_renderer, 80, 80, 40, 255);
+        var weaponSlotRect = new SDLRect { X = weaponSlotX, Y = weaponSlotY, W = Tile.Width * Scale, H = Tile.Height * Scale };
+        SDL.RenderFillRect(_renderer, &weaponSlotRect);
+
+        // Weapon slot border
+        SDL.SetRenderDrawColor(_renderer, 255, 200, 0, 255);
+        SDL.RenderDrawRect(_renderer, &weaponSlotRect);
+
+        // Weapon tile
+        if (selectedWeapon.HasValue && selectedWeapon.Value > 0 && selectedWeapon.Value < _gameData.Tiles.Count)
         {
-            var slotX = 180 + i * (Tile.Width + 4);
-            var slotY = hudY + 5;
+            RenderTile(selectedWeapon.Value, weaponSlotX, weaponSlotY);
+        }
+
+        // Inventory slots (8 slots)
+        for (int i = 0; i < 8; i++)
+        {
+            var slotX = 90 + i * (Tile.Width * Scale + 8);
+            var slotY = hudY + 40;
 
             // Slot background
             SDL.SetRenderDrawColor(_renderer, 60, 60, 60, 255);
-            var slotRect = new SDLRect { X = slotX, Y = slotY, W = Tile.Width, H = Tile.Height };
+            var slotRect = new SDLRect { X = slotX, Y = slotY, W = Tile.Width * Scale, H = Tile.Height * Scale };
             SDL.RenderFillRect(_renderer, &slotRect);
 
-            // Item tile
-            if (inventory[i] > 0)
+            // Highlight selected item
+            if (selectedItem.HasValue && i < inventory.Count && inventory[i] == selectedItem.Value)
             {
-                RenderTileUnscaled(inventory[i], slotX, slotY);
+                SDL.SetRenderDrawColor(_renderer, 0, 255, 0, 255);
             }
+            else
+            {
+                SDL.SetRenderDrawColor(_renderer, 100, 100, 100, 255);
+            }
+            SDL.RenderDrawRect(_renderer, &slotRect);
+
+            // Item tile
+            if (i < inventory.Count && inventory[i] > 0 && inventory[i] < _gameData.Tiles.Count)
+            {
+                RenderTile(inventory[i], slotX, slotY);
+            }
+
+            // Slot number (keys 1-8)
+            // Note: Text rendering would require TTF font, using simple indicators for now
         }
     }
 
