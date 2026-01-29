@@ -54,7 +54,7 @@ public class DtaParser
                 break;
 
             var length = _reader.ReadUInt32();
-            Console.WriteLine($"Section '{tag}' at position {_reader.BaseStream.Position - 8}, length: {length}");
+            // Console.WriteLine($"Section '{tag}' at position {_reader.BaseStream.Position - 8}, length: {length}");
             ParseSection(tag, length);
         }
 
@@ -121,18 +121,15 @@ public class DtaParser
 
     private void ParseStartupSection(uint length)
     {
-        Console.WriteLine($"Reading {length} bytes for STUP section");
         _data.StartupScreen = _reader.ReadBytes((int)length);
-        Console.WriteLine($"After STUP, position: {_reader.BaseStream.Position}");
     }
 
     private void ParseSoundsSection(uint length)
     {
         var endPos = _reader.BaseStream.Position + length;
 
-        // Skip the first 2 bytes (negative offset or header marker)
+        // Skip the first 2 bytes (header marker)
         var header = _reader.ReadInt16();
-        Console.WriteLine($"SNDS header: {header} (0x{header:X4})");
 
         int soundId = 0;
         while (_reader.BaseStream.Position < endPos - 1)
@@ -146,10 +143,7 @@ public class DtaParser
 
             // Sanity check
             if (nameLength > 256)
-            {
-                Console.WriteLine($"Invalid sound name length: {nameLength}, breaking");
                 break;
-            }
 
             // Read filename (null-terminated)
             var nameBytes = _reader.ReadBytes(nameLength);
@@ -190,13 +184,9 @@ public class DtaParser
 
     private void ParseZonesSection()
     {
-        // Zone count is 2 bytes
-        var zoneCount = _reader.ReadUInt16();
-        Console.WriteLine($"Zone count header: {zoneCount}");
-
-        // The format appears to have 2 bytes padding after zone count, then zones start with IZON
-        // Skip 2 bytes padding
+        // Zone count is 2 bytes (not accurate, just skip it)
         _reader.ReadUInt16();
+        _reader.ReadUInt16(); // padding
 
         int zonesLoaded = 0;
         int zoneId = 0;
@@ -351,10 +341,7 @@ public class DtaParser
         var zone = new Zone { Id = zoneId };
 
         if (zoneData.Length < 22)
-        {
-            Console.WriteLine($"Zone {zoneId}: data too short ({zoneData.Length} bytes)");
             return zone;
-        }
 
         using var ms = new MemoryStream(zoneData);
         using var reader = new BinaryReader(ms);
@@ -375,10 +362,7 @@ public class DtaParser
         var izonTag = System.Text.Encoding.ASCII.GetString(reader.ReadBytes(4));
 
         if (izonTag != "IZON")
-        {
-            Console.WriteLine($"Zone {zoneId}: Expected IZON, got '{izonTag}'");
             return zone;
-        }
 
         var sizeInfo = reader.ReadUInt32();
         zone.Width = reader.ReadUInt16();
@@ -613,7 +597,6 @@ public class DtaParser
 
         // Calculate number of characters from section length
         var charCount = (int)(length / CharacterSize);
-        Console.WriteLine($"Character section: {length} bytes = {charCount} characters");
 
         for (int i = 0; i < charCount; i++)
         {
@@ -627,14 +610,6 @@ public class DtaParser
 
         // Ensure we're at the end of the section
         _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
-        Console.WriteLine($"Loaded {_data.Characters.Count} characters");
-
-        // Debug: Print first few characters
-        for (int i = 0; i < Math.Min(3, _data.Characters.Count); i++)
-        {
-            var c = _data.Characters[i];
-            Console.WriteLine($"  Char {i}: '{c.Name}' type={c.Type} frames: down={c.Frames.WalkDown[0]}");
-        }
     }
 
     private Character ParseCharacterData(int index, byte[] data)
