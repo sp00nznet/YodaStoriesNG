@@ -1,5 +1,6 @@
 using Hexa.NET.SDL2;
 using YodaStoriesNG.Engine.Audio;
+using YodaStoriesNG.Engine.Bot;
 using YodaStoriesNG.Engine.Data;
 using YodaStoriesNG.Engine.Parsing;
 using YodaStoriesNG.Engine.Rendering;
@@ -19,6 +20,7 @@ public unsafe class GameEngine : IDisposable
     private WorldGenerator? _worldGenerator;
     private MessageSystem _messages = new();
     private SoundManager? _sounds;
+    private MissionBot? _bot;
 
     private bool _isRunning;
     private readonly string _dataPath;
@@ -32,6 +34,11 @@ public unsafe class GameEngine : IDisposable
     private const double TargetFrameTime = 1.0 / 60.0; // 60 FPS
     private const double AnimationFrameTime = 0.15; // 150ms per animation frame
     private double _controllerMoveTimer = 0;  // Rate limit controller movement
+
+    /// <summary>
+    /// Whether the bot is currently running.
+    /// </summary>
+    public bool IsBotRunning => _bot?.IsRunning ?? false;
 
     public GameEngine(string dataPath)
     {
@@ -71,8 +78,7 @@ public unsafe class GameEngine : IDisposable
         // Initialize action executor
         _actionExecutor = new ActionExecutor(_gameData, _state);
 
-        // Wire up action executor events
-        _actionExecutor.OnDialogue += (speaker, text) => _messages.ShowDialogue(speaker, text);
+        // Wire up action executor events (OnDialogue wired later, after init)
         _actionExecutor.OnMessage += (text) => _messages.ShowMessage(text, MessageType.Info);
         _actionExecutor.OnPlaySound += (soundId) => _sounds?.PlaySound(soundId);
 
@@ -141,25 +147,23 @@ public unsafe class GameEngine : IDisposable
         _state.Reset();
         _messages.Clear();
 
-        // Give player starting weapon - just fists until they find a weapon
-        _state.Weapons.Add(0);    // Fists (no tile, bare hands)
+        // Suppress dialogue during initialization
+        if (_actionExecutor != null)
+            _actionExecutor.SuppressDialogue = true;
+
+        // Give player starting weapon - lightsaber is always available at game start
+        const int LIGHTSABER_TILE = 510;  // Lightsaber tile at atlas position 1291x338
+        _state.Weapons.Add(LIGHTSABER_TILE);
         _state.CurrentWeaponIndex = 0;
-        _state.SelectedWeapon = null;  // No weapon equipped initially
+        _state.SelectedWeapon = LIGHTSABER_TILE;
 
         // Generate the world
         _worldGenerator = new WorldGenerator(_gameData!);
         _worldGenerator.DumpDagobahInfo();  // Debug: print Dagobah zone analysis
         var world = _worldGenerator.GenerateWorld();
 
-        // Welcome message - show mission info
+        // Welcome message - minimal startup hints (mission given by Yoda)
         _messages.ShowMessage("Find Yoda to receive your mission.", MessageType.System);
-        _messages.ShowMessage("Tab=Toggle weapon, Space=Talk, O=Objective", MessageType.Info);
-
-        // Show mission name if available
-        if (world.Mission != null)
-        {
-            _messages.ShowMessage($"Mission: {world.Mission.Name}", MessageType.System);
-        }
 
         // Load the starting zone (from Dagobah or landing zone)
         var startZoneId = world.StartingZoneId;
@@ -179,6 +183,86 @@ public unsafe class GameEngine : IDisposable
                     break;
                 }
             }
+        }
+
+        // Re-enable dialogue now that initialization is complete
+        if (_actionExecutor != null)
+        {
+            _actionExecutor.SuppressDialogue = false;
+            // Wire up dialogue event NOW, after init, so no dialogue appears during zone loading
+            _actionExecutor.OnDialogue += (speaker, text) => _messages.ShowDialogue(speaker, text);
+        }
+
+        // Initialize bot (but don't start it)
+        if (_worldGenerator != null)
+        {
+            _bot = new MissionBot(_state, _gameData!, _worldGenerator);
+            _bot.OnActionRequested += HandleBotAction;
+        }
+    }
+
+    /// <summary>
+    /// Enables the automated mission bot.
+    /// </summary>
+    public void EnableBot()
+    {
+        if (_bot == null && _worldGenerator != null)
+        {
+            _bot = new MissionBot(_state, _gameData!, _worldGenerator);
+            _bot.OnActionRequested += HandleBotAction;
+        }
+        _bot?.Start();
+        _messages.ShowMessage("Bot ENABLED - Press B to disable", MessageType.System);
+    }
+
+    /// <summary>
+    /// Disables the automated mission bot.
+    /// </summary>
+    public void DisableBot()
+    {
+        _bot?.Stop();
+        _messages.ShowMessage("Bot DISABLED", MessageType.System);
+    }
+
+    /// <summary>
+    /// Handles action requests from the bot.
+    /// </summary>
+    private void HandleBotAction(BotActionType type, int x, int y, Direction dir)
+    {
+        switch (type)
+        {
+            case BotActionType.Move:
+                // Calculate dx/dy from current position to target
+                int dx = Math.Sign(x - _state.PlayerX);
+                int dy = Math.Sign(y - _state.PlayerY);
+                if (dx == 0 && dy == 0)
+                {
+                    // Use direction to determine movement
+                    switch (dir)
+                    {
+                        case Direction.Up: dy = -1; break;
+                        case Direction.Down: dy = 1; break;
+                        case Direction.Left: dx = -1; break;
+                        case Direction.Right: dx = 1; break;
+                    }
+                }
+                TryMovePlayer(dx, dy, dir, false);
+                break;
+
+            case BotActionType.Attack:
+                _state.PlayerDirection = dir;
+                PerformAttack();
+                break;
+
+            case BotActionType.Talk:
+            case BotActionType.UseItem:
+                _state.PlayerDirection = dir;
+                UseItem();
+                break;
+
+            case BotActionType.UseXWing:
+                TravelToPlanet();
+                break;
         }
     }
 
@@ -244,8 +328,7 @@ public unsafe class GameEngine : IDisposable
             }
         }
 
-        // Show zone entry message
-        _messages.ShowMessage($"Entering {zone.Planet} zone", MessageType.Info);
+        // Play zone entry sound (but don't spam messages)
         _sounds?.PlaySound(SoundManager.SoundDoor);
 
         // Debug: Show action count for zones with scripts
@@ -267,8 +350,13 @@ public unsafe class GameEngine : IDisposable
         // Reset camera for zone
         UpdateCamera();
 
-        // Execute zone entry actions
-        _actionExecutor?.ExecuteZoneActions(ActionTrigger.ZoneEnter);
+        // Execute zone entry actions (suppress dialogue - it should only show from player interaction)
+        if (_actionExecutor != null)
+        {
+            _actionExecutor.SuppressDialogue = true;
+            _actionExecutor.ExecuteZoneActions(ActionTrigger.ZoneEnter);
+            _actionExecutor.SuppressDialogue = false;
+        }
 
         // Mark zone as initialized
         _state.SetVariable(_state.CurrentZoneId + 1000, 1);
@@ -490,6 +578,7 @@ public unsafe class GameEngine : IDisposable
         const int SDLK_8 = 56;
         const int SDLK_TAB = 9;
         const int SDLK_a = 97;
+        const int SDLK_b = 98;
         const int SDLK_d = 100;
         const int SDLK_f = 102;
         const int SDLK_m = 109;
@@ -582,6 +671,14 @@ public unsafe class GameEngine : IDisposable
 
             case SDLK_o:  // O key - show current objective
                 ShowMissionObjective();
+                break;
+
+            case SDLK_b:  // B key - toggle bot
+                if (IsBotRunning)
+                    DisableBot();
+                else
+                    EnableBot();
+                Console.WriteLine($"Bot: {(IsBotRunning ? "ENABLED" : "DISABLED")}");
                 break;
 
             case SDLK_TAB:  // Tab - toggle weapon
@@ -839,12 +936,32 @@ public unsafe class GameEngine : IDisposable
         // Check for zone objects at new position
         CheckZoneObjects();
 
-        // Debug: check what's at player position
+        // Check for Item tiles on layer 1 that can be picked up
         var objTile = _state.CurrentZone.GetTile(newX, newY, 1);
         if (objTile != 0xFFFF && objTile < _gameData!.Tiles.Count)
         {
             var tile = _gameData.Tiles[objTile];
-            Console.WriteLine($"Standing on tile {objTile}: floor={tile.IsFloor}, obj={tile.IsObject}, drag={tile.IsDraggable}");
+            Console.WriteLine($"Standing on tile {objTile}: floor={tile.IsFloor}, obj={tile.IsObject}, item={tile.IsItem}, char={tile.IsCharacter}");
+
+            // Auto-pickup Item tiles (not Objects that block movement)
+            if (tile.IsItem && !tile.IsObject)
+            {
+                var key = $"{_state.CurrentZoneId}_{newX}_{newY}_tile";
+                if (!_state.CollectedObjects.Contains(key))
+                {
+                    // Pick up the item
+                    _state.AddItem(objTile);
+                    _state.CollectedObjects.Add(key);
+
+                    // Remove the tile from the map
+                    _state.CurrentZone.SetTile(newX, newY, 1, 0xFFFF);
+
+                    var itemName = GetTileName(objTile) ?? $"Item";
+                    _messages.ShowPickup(itemName);
+                    _sounds?.PlaySound(SoundManager.SoundPickup);
+                    Console.WriteLine($"Auto-picked up tile item {objTile} ({itemName}) at ({newX},{newY})");
+                }
+            }
         }
 
         // Check for nearby friendly NPCs
@@ -1079,6 +1196,24 @@ public unsafe class GameEngine : IDisposable
                     }
                     break;
 
+                case ZoneObjectType.LocatorItem:
+                    // Pick up locator/R2D2 (if not already collected)
+                    if (!_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                    {
+                        // The locator is an item that gives hints - add it to inventory
+                        if (obj.Argument > 0)
+                        {
+                            _state.AddItem(obj.Argument);
+                        }
+                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        _state.HasLocator = true;
+                        var itemName = GetTileName(obj.Argument) ?? "Locator Droid";
+                        _messages.ShowPickup(itemName);
+                        _messages.ShowMessage("Use the locator from your inventory for hints!", MessageType.Info);
+                        _sounds?.PlaySound(SoundManager.SoundPickup);
+                    }
+                    break;
+
                 case ZoneObjectType.Teleporter:
                 case ZoneObjectType.VehicleToSecondary:
                 case ZoneObjectType.VehicleToPrimary:
@@ -1150,6 +1285,17 @@ public unsafe class GameEngine : IDisposable
         if (_state.SelectedItem.HasValue)
         {
             var usedItemId = _state.SelectedItem.Value;
+
+            // Check if this is a locator/R2D2 item - these give hints
+            if (usedItemId < _gameData!.Tiles.Count)
+            {
+                var itemTile = _gameData.Tiles[usedItemId];
+                if ((itemTile.Flags & TileFlags.ItemLocator) != 0 || _state.HasLocator && IsLocatorTile(usedItemId))
+                {
+                    ShowLocatorHint();
+                    return;
+                }
+            }
 
             // Set the placed item context for action conditions
             if (_actionExecutor != null)
@@ -1354,8 +1500,22 @@ public unsafe class GameEngine : IDisposable
                     break;
 
                 case ZoneObjectType.LocatorItem:
-                    _messages.ShowMessage("Locator found!", MessageType.Pickup);
-                    return true;
+                    // Pick up locator/R2D2 (if not already collected)
+                    if (!_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                    {
+                        if (obj.Argument > 0)
+                        {
+                            _state.AddItem(obj.Argument);
+                        }
+                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        _state.HasLocator = true;
+                        var locatorName = GetTileName(obj.Argument) ?? "Locator Droid";
+                        _messages.ShowPickup(locatorName);
+                        _messages.ShowMessage("Use the locator from your inventory for hints!", MessageType.Info);
+                        _sounds?.PlaySound(SoundManager.SoundPickup);
+                        return true;
+                    }
+                    break;
             }
         }
 
@@ -1450,6 +1610,8 @@ public unsafe class GameEngine : IDisposable
                         var mission = _worldGenerator.CurrentWorld.Mission;
                         var world = _worldGenerator.CurrentWorld;
 
+                        Console.WriteLine($"Yoda interaction: StartingItemId={world.StartingItemId}, HasItem={world.StartingItemId.HasValue && _state.HasItem(world.StartingItemId.Value)}, MissionComplete={mission?.IsCompleted}");
+
                         // Check if mission is complete
                         if (mission != null && mission.IsCompleted)
                         {
@@ -1463,6 +1625,7 @@ public unsafe class GameEngine : IDisposable
                         // Give the starting item if player doesn't have it yet
                         else if (world.StartingItemId.HasValue && !_state.HasItem(world.StartingItemId.Value))
                         {
+                            Console.WriteLine($"Yoda giving item: {world.StartingItemId.Value}");
                             _state.AddItem(world.StartingItemId.Value);
                             var itemName = GetTileName(world.StartingItemId.Value) ?? "an item";
 
@@ -1992,41 +2155,76 @@ public unsafe class GameEngine : IDisposable
     }
 
     /// <summary>
-    /// Handles X-Wing travel to the planet.
+    /// Handles X-Wing travel between Dagobah and mission planet.
     /// </summary>
     private void TravelToPlanet()
     {
         if (_worldGenerator?.CurrentWorld == null) return;
 
-        // Check if X-Wing is available (in Dagobah)
-        if (_state.GetVariable(999) != 1)
-        {
-            _messages.ShowMessage("You need to return to Dagobah first.", MessageType.Info);
-            return;
-        }
+        var world = _worldGenerator.CurrentWorld;
+        bool onDagobah = world.DagobahZones.Contains(_state.CurrentZoneId);
 
-        // Travel to landing zone
-        var landingZoneId = _worldGenerator.CurrentWorld.LandingZoneId;
-        if (landingZoneId > 0 && landingZoneId < _gameData!.Zones.Count)
+        if (onDagobah)
         {
-            var destZone = _gameData.Zones[landingZoneId];
-            _messages.ShowMessage($"Traveling to {_worldGenerator.CurrentWorld.Planet}...", MessageType.System);
-            _sounds?.PlaySound(SoundManager.SoundDoor);
-
-            // Find spawn point
-            int spawnX = destZone.Width / 2;
-            int spawnY = destZone.Height / 2;
-            foreach (var obj in destZone.Objects)
+            // Travel FROM Dagobah TO mission planet
+            var landingZoneId = world.LandingZoneId;
+            if (landingZoneId > 0 && landingZoneId < _gameData!.Zones.Count)
             {
-                if (obj.Type == ZoneObjectType.SpawnLocation)
-                {
-                    spawnX = obj.X;
-                    spawnY = obj.Y;
-                    break;
-                }
-            }
+                var destZone = _gameData.Zones[landingZoneId];
+                _messages.ShowMessage($"Traveling to {world.Planet}...", MessageType.System);
+                _sounds?.PlaySound(SoundManager.SoundDoor);
 
-            LoadZone(landingZoneId, spawnX, spawnY);
+                // Find spawn point
+                int spawnX = destZone.Width / 2;
+                int spawnY = destZone.Height / 2;
+                foreach (var obj in destZone.Objects)
+                {
+                    if (obj.Type == ZoneObjectType.SpawnLocation ||
+                        obj.Type == ZoneObjectType.XWingToDagobah)
+                    {
+                        spawnX = obj.X;
+                        spawnY = obj.Y;
+                        break;
+                    }
+                }
+
+                LoadZone(landingZoneId, spawnX, spawnY);
+            }
+            else
+            {
+                _messages.ShowMessage("Talk to Yoda first to receive your mission.", MessageType.Info);
+            }
+        }
+        else
+        {
+            // Travel FROM mission planet BACK TO Dagobah
+            var dagobahZoneId = world.StartingZoneId;
+            if (dagobahZoneId > 0 && dagobahZoneId < _gameData!.Zones.Count)
+            {
+                var destZone = _gameData.Zones[dagobahZoneId];
+                _messages.ShowMessage("Returning to Dagobah...", MessageType.System);
+                _sounds?.PlaySound(SoundManager.SoundDoor);
+
+                // Find spawn point near X-Wing
+                int spawnX = destZone.Width / 2;
+                int spawnY = destZone.Height / 2;
+                foreach (var obj in destZone.Objects)
+                {
+                    if (obj.Type == ZoneObjectType.XWingFromDagobah)
+                    {
+                        spawnX = obj.X;
+                        spawnY = obj.Y + 1;  // Spawn below X-Wing
+                        break;
+                    }
+                    if (obj.Type == ZoneObjectType.SpawnLocation)
+                    {
+                        spawnX = obj.X;
+                        spawnY = obj.Y;
+                    }
+                }
+
+                LoadZone(dagobahZoneId, spawnX, spawnY);
+            }
         }
     }
 
@@ -2054,6 +2252,10 @@ public unsafe class GameEngine : IDisposable
 
         // Update projectiles
         UpdateProjectiles(deltaTime);
+
+        // Update bot AI
+        if (_bot?.IsRunning == true)
+            _bot.Update(deltaTime);
 
         // Decay visual effect timers
         if (_state.DamageFlashTimer > 0)
@@ -2357,15 +2559,33 @@ public unsafe class GameEngine : IDisposable
         RenderPlayer();
 
         // Render attack animation if attacking
-        if (_state.IsAttacking)
+        if (_state.IsAttacking && _state.SelectedWeapon.HasValue)
         {
             var playerScreenX = (_state.PlayerX - _state.CameraX) * Data.Tile.Width * GameRenderer.Scale;
             var playerScreenY = (_state.PlayerY - _state.CameraY) * Data.Tile.Height * GameRenderer.Scale;
             var direction = (int)_state.PlayerDirection;
             var progress = _state.AttackTimer / 0.3;  // Normalized progress
 
-            // Don't render weapon tile for melee - render a slash effect instead
-            _renderer.RenderMeleeSlash(playerScreenX, playerScreenY, direction, progress);
+            // Get weapon animation tile based on weapon and direction
+            // Light Saber is Character 14, other weapons are Characters 9-13
+            int weaponCharIndex = GetWeaponCharacterIndex(_state.SelectedWeapon.Value);
+            int weaponTile = GetWeaponTileForDirection(weaponCharIndex, _state.PlayerDirection);
+
+            if (weaponTile > 0)
+            {
+                _renderer.RenderWeaponAttack(weaponTile, playerScreenX, playerScreenY, direction, progress);
+            }
+            else
+            {
+                _renderer.RenderMeleeSlash(playerScreenX, playerScreenY, direction, progress);
+            }
+        }
+        else if (_state.IsAttacking)
+        {
+            // Unarmed attack
+            var playerScreenX = (_state.PlayerX - _state.CameraX) * Data.Tile.Width * GameRenderer.Scale;
+            var playerScreenY = (_state.PlayerY - _state.CameraY) * Data.Tile.Height * GameRenderer.Scale;
+            _renderer.RenderMeleeSlash(playerScreenX, playerScreenY, (int)_state.PlayerDirection, _state.AttackTimer / 0.3);
         }
 
         // Render projectiles
@@ -2381,6 +2601,12 @@ public unsafe class GameEngine : IDisposable
             _state.CurrentZone.Width,
             _state.CurrentZone.Height);
 
+        // Render bot status if running
+        if (_bot?.IsRunning == true)
+        {
+            _renderer.RenderBotStatus(_bot.CurrentTask);
+        }
+
         // Render visual feedback overlays
         if (_state.DamageFlashTimer > 0)
             _renderer.RenderDamageOverlay(_state.DamageFlashTimer);
@@ -2395,11 +2621,15 @@ public unsafe class GameEngine : IDisposable
     }
 
     /// <summary>
-    /// Renders the X-Wing at its position in Dagobah zones.
+    /// Renders the X-Wing at its position in the starting zone only.
     /// </summary>
     private void RenderXWing()
     {
-        if (_renderer == null || _state.XWingPosition == null)
+        if (_renderer == null || _state.XWingPosition == null || _worldGenerator == null)
+            return;
+
+        // Only render X-Wing in the starting zone
+        if (_state.CurrentZoneId != _worldGenerator.CurrentWorld.XWingZoneId)
             return;
 
         var (xwingX, xwingY) = _state.XWingPosition.Value;
@@ -2568,6 +2798,103 @@ public unsafe class GameEngine : IDisposable
         if (_gameData!.TileNames.TryGetValue(tileId, out var name))
             return name;
         return null;
+    }
+
+    /// <summary>
+    /// Checks if a tile is a locator/R2D2 item.
+    /// </summary>
+    private bool IsLocatorTile(int tileId)
+    {
+        // Check by tile name
+        var name = GetTileName(tileId);
+        if (name != null)
+        {
+            var nameLower = name.ToLowerInvariant();
+            if (nameLower.Contains("r2") || nameLower.Contains("locator") || nameLower.Contains("droid"))
+                return true;
+        }
+        // Check by flags
+        if (tileId < _gameData!.Tiles.Count)
+        {
+            var tile = _gameData.Tiles[tileId];
+            if ((tile.Flags & TileFlags.ItemLocator) != 0)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Shows a hint from the locator/R2D2.
+    /// </summary>
+    private void ShowLocatorHint()
+    {
+        if (_worldGenerator?.CurrentWorld == null)
+        {
+            _messages.ShowDialogue("R2-D2", "*beep boop* No mission data available.");
+            _sounds?.PlaySound(SoundManager.SoundTalk);
+            return;
+        }
+
+        var mission = _worldGenerator.CurrentWorld.Mission;
+        if (mission == null)
+        {
+            _messages.ShowDialogue("R2-D2", "*beep boop* Explore the area to find clues.");
+            _sounds?.PlaySound(SoundManager.SoundTalk);
+            return;
+        }
+
+        if (mission.IsCompleted)
+        {
+            _messages.ShowDialogue("R2-D2", "*happy beeps* Mission complete! Return to Yoda on Dagobah.");
+            _sounds?.PlaySound(SoundManager.SoundTalk);
+            return;
+        }
+
+        // Get current objective hint
+        var step = mission.CurrentPuzzleStep;
+        if (step != null && !string.IsNullOrEmpty(step.Hint))
+        {
+            _messages.ShowDialogue("R2-D2", $"*beep boop* {step.Hint}");
+        }
+        else
+        {
+            var objective = _worldGenerator.CurrentWorld.GetCurrentObjective();
+            _messages.ShowDialogue("R2-D2", $"*beep boop* {objective}");
+        }
+        _sounds?.PlaySound(SoundManager.SoundTalk);
+    }
+
+    /// <summary>
+    /// Gets the character index for a weapon tile.
+    /// </summary>
+    private int GetWeaponCharacterIndex(int weaponTileId)
+    {
+        // Map weapon tile IDs to character indices
+        // These are approximate - weapons are stored as characters 9-14
+        if (weaponTileId == 510) return 14;  // Lightsaber -> Character 14 "Light Saber"
+        return -1;
+    }
+
+    /// <summary>
+    /// Gets the weapon attack tile for a direction.
+    /// Luke's lightsaber attack frames at atlas 241x1472 = tile 2122+
+    /// </summary>
+    private int GetWeaponTileForDirection(int weaponCharIndex, Direction direction)
+    {
+        if (weaponCharIndex == 14)  // Lightsaber
+        {
+            // Luke's lightsaber attack tiles from atlas 241x1472 = tile 2122
+            // Sequential tiles: 2122, 2123 for up/down and left/right
+            return direction switch
+            {
+                Direction.Up => 2122,
+                Direction.Down => 2123,
+                Direction.Right => 2124,
+                Direction.Left => 2125,
+                _ => 2122
+            };
+        }
+        return -1;
     }
 
     /// <summary>

@@ -52,6 +52,7 @@ class Program
         Console.WriteLine("  Space - Attack / Talk / Dismiss dialogue");
         Console.WriteLine("  Tab - Toggle weapon");
         Console.WriteLine("  1-8 - Select inventory item");
+        Console.WriteLine("  B - Toggle Bot (auto-play)");
         Console.WriteLine("  F - Find zone with NPCs/items");
         Console.WriteLine("  X - Travel (use X-Wing)");
         Console.WriteLine("  M - Toggle sound mute");

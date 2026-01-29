@@ -400,6 +400,29 @@ public unsafe class GameRenderer : IDisposable
     }
 
     /// <summary>
+    /// Renders the bot status indicator.
+    /// </summary>
+    public void RenderBotStatus(string currentTask)
+    {
+        // Bot status bar below zone info
+        SDL.SetRenderDrawColor(_renderer, 0, 80, 0, 200);
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+        var botRect = new SDLRect { X = 0, Y = 22, W = GameAreaWidth, H = 18 };
+        SDL.RenderFillRect(_renderer, &botRect);
+
+        // Draw bot indicator
+        SDL.SetRenderDrawColor(_renderer, 0, 255, 0, 255);
+        var indicatorRect = new SDLRect { X = 5, Y = 26, W = 8, H = 8 };
+        SDL.RenderFillRect(_renderer, &indicatorRect);
+
+        // Draw bot status text
+        string statusText = $"BOT: {currentTask}";
+        if (statusText.Length > 50)
+            statusText = statusText.Substring(0, 50) + "...";
+        _font.RenderText(_renderer, statusText, 18, 24, 1, 0, 255, 100, 255);
+    }
+
+    /// <summary>
     /// Renders a screen overlay for damage/attack feedback.
     /// </summary>
     public void RenderDamageOverlay(double intensity)
@@ -498,6 +521,76 @@ public unsafe class GameRenderer : IDisposable
     }
 
     /// <summary>
+    /// Renders a weapon attack animation using the weapon's tile sprite.
+    /// </summary>
+    public void RenderWeaponAttack(int weaponTileId, int playerScreenX, int playerScreenY, int direction, double progress)
+    {
+        if (weaponTileId <= 0 || weaponTileId >= _gameData.Tiles.Count)
+        {
+            // Fallback to melee slash for invalid weapon
+            RenderMeleeSlash(playerScreenX, playerScreenY, direction, progress);
+            return;
+        }
+
+        // Calculate weapon position based on direction and progress
+        int offsetX = 0, offsetY = 0;
+        double angle = 0;
+
+        // Swing animation - weapon moves in an arc
+        var swingProgress = Math.Sin(progress * Math.PI);  // 0 -> 1 -> 0
+
+        // Direction: 0=Up, 1=Down, 2=Left, 3=Right
+        switch (direction)
+        {
+            case 0: // Up
+                offsetY = -(int)(Tile.Height * Scale * (0.5 + swingProgress * 0.5));
+                offsetX = (int)((swingProgress - 0.5) * Tile.Width * Scale);
+                break;
+            case 1: // Down
+                offsetY = (int)(Tile.Height * Scale * (0.5 + swingProgress * 0.5));
+                offsetX = (int)((0.5 - swingProgress) * Tile.Width * Scale);
+                break;
+            case 2: // Left
+                offsetX = -(int)(Tile.Width * Scale * (0.5 + swingProgress * 0.5));
+                offsetY = (int)((swingProgress - 0.5) * Tile.Height * Scale);
+                break;
+            case 3: // Right
+                offsetX = (int)(Tile.Width * Scale * (0.5 + swingProgress * 0.5));
+                offsetY = (int)((0.5 - swingProgress) * Tile.Height * Scale);
+                break;
+        }
+
+        // Render the weapon tile
+        var weaponX = playerScreenX + offsetX;
+        var weaponY = playerScreenY + offsetY;
+
+        // Get tile from atlas
+        int tilesPerRow = (_atlasWidth + Tile.Width - 1) / Tile.Width;
+        int atlasX = (weaponTileId % tilesPerRow) * Tile.Width;
+        int atlasY = (weaponTileId / tilesPerRow) * Tile.Height;
+
+        var srcRect = new SDLRect { X = atlasX, Y = atlasY, W = Tile.Width, H = Tile.Height };
+        var dstRect = new SDLRect { X = weaponX, Y = weaponY, W = Tile.Width * Scale, H = Tile.Height * Scale };
+
+        SDL.RenderCopy(_renderer, _tileAtlas, &srcRect, &dstRect);
+
+        // Add lightsaber glow effect for tile 510 (lightsaber)
+        if (weaponTileId == 510)
+        {
+            SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+            SDL.SetRenderDrawColor(_renderer, 100, 255, 100, (byte)(100 * swingProgress));
+            var glowRect = new SDLRect
+            {
+                X = weaponX - 4,
+                Y = weaponY - 4,
+                W = Tile.Width * Scale + 8,
+                H = Tile.Height * Scale + 8
+            };
+            SDL.RenderDrawRect(_renderer, &glowRect);
+        }
+    }
+
+    /// <summary>
     /// Renders a projectile (blaster bolt).
     /// </summary>
     public void RenderProjectile(int screenX, int screenY, Game.ProjectileType type)
@@ -569,6 +662,23 @@ public unsafe class GameRenderer : IDisposable
         var messageY = 30;
         foreach (var msg in messages)
         {
+            // Skip messages that look like NPC dialogue (leaked from action scripts)
+            // Filter: longer messages with dialogue-like text, or any Dialogue type that ended up here
+            if (msg.Type == MessageType.Dialogue)
+                continue;  // Dialogue messages belong in the dialogue box, not here
+
+            // Also filter Info messages that look like leaked dialogue
+            if (msg.Type == MessageType.Info && msg.Text.Length > 40)
+            {
+                // Contains NPC dialogue patterns
+                if (msg.Text.Contains(":") && (msg.Text.Contains("\"") || msg.Text.Contains("?")))
+                    continue;
+                // Contains mission/Yoda text patterns
+                if (msg.Text.Contains("mission") || msg.Text.Contains("Force") ||
+                    msg.Text.Contains("you must") || msg.Text.Contains("HYPERSPACE"))
+                    continue;
+            }
+
             var alpha = (byte)(Math.Min(1.0, msg.TimeRemaining) * 255);
             RenderMessageBox(msg.Text, GameAreaWidth - 10, messageY, alpha, msg.Type, alignRight: true);
             messageY += 28;

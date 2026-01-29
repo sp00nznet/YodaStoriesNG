@@ -1,0 +1,521 @@
+using YodaStoriesNG.Engine.Data;
+using YodaStoriesNG.Engine.Game;
+
+namespace YodaStoriesNG.Engine.Bot;
+
+/// <summary>
+/// Mission-specific logic and puzzle chain tracking.
+/// Determines what the bot needs to do to complete the current mission.
+/// </summary>
+public class MissionSolver
+{
+    private readonly GameState _state;
+    private readonly GameData _gameData;
+    private readonly WorldGenerator _worldGenerator;
+
+    public MissionSolver(GameState state, GameData gameData, WorldGenerator worldGenerator)
+    {
+        _state = state;
+        _gameData = gameData;
+        _worldGenerator = worldGenerator;
+    }
+
+    /// <summary>
+    /// Gets the current mission phase.
+    /// </summary>
+    public MissionPhase GetCurrentPhase()
+    {
+        var world = _worldGenerator.CurrentWorld;
+        if (world == null)
+            return MissionPhase.Unknown;
+
+        var mission = world.Mission;
+        bool onDagobah = world.DagobahZones.Contains(_state.CurrentZoneId);
+
+        // Check if game is won
+        if (_state.IsGameWon)
+            return MissionPhase.Completed;
+
+        // Check if mission is complete and we need to return
+        if (mission?.IsCompleted == true)
+        {
+            return onDagobah ? MissionPhase.ReturnToYoda : MissionPhase.ReturnToDagobah;
+        }
+
+        // Check if we have the starting item from Yoda
+        if (world.StartingItemId.HasValue && !_state.HasItem(world.StartingItemId.Value))
+        {
+            // Need to talk to Yoda
+            return onDagobah ? MissionPhase.TalkToYoda : MissionPhase.ReturnToDagobah;
+        }
+
+        // Have starting item - need to travel to planet
+        if (onDagobah)
+            return MissionPhase.TravelToPlanet;
+
+        // On planet - solve puzzles
+        return MissionPhase.SolvePuzzles;
+    }
+
+    /// <summary>
+    /// Gets the current objective based on mission state.
+    /// </summary>
+    public BotObjective GetCurrentObjective()
+    {
+        var phase = GetCurrentPhase();
+        var world = _worldGenerator.CurrentWorld;
+
+        switch (phase)
+        {
+            case MissionPhase.TalkToYoda:
+                return CreateTalkToYodaObjective(world);
+
+            case MissionPhase.TravelToPlanet:
+                return new BotObjective
+                {
+                    Type = ObjectiveType.UseXWing,
+                    Description = "Travel to mission planet via X-Wing"
+                };
+
+            case MissionPhase.SolvePuzzles:
+                return CreatePuzzleObjective(world);
+
+            case MissionPhase.ReturnToDagobah:
+                return new BotObjective
+                {
+                    Type = ObjectiveType.UseXWing,
+                    Description = "Return to Dagobah via X-Wing"
+                };
+
+            case MissionPhase.ReturnToYoda:
+                return CreateTalkToYodaObjective(world);
+
+            case MissionPhase.Completed:
+                return new BotObjective
+                {
+                    Type = ObjectiveType.None,
+                    Description = "Mission complete!"
+                };
+
+            default:
+                return new BotObjective
+                {
+                    Type = ObjectiveType.Explore,
+                    Description = "Explore the area"
+                };
+        }
+    }
+
+    private BotObjective CreateTalkToYodaObjective(WorldMap? world)
+    {
+        if (world == null)
+            return new BotObjective { Type = ObjectiveType.None };
+
+        // Find Yoda NPC
+        var yoda = FindYodaNpc();
+        if (yoda != null)
+        {
+            return new BotObjective
+            {
+                Type = ObjectiveType.TalkToNpc,
+                Description = "Talk to Yoda",
+                TargetNpc = yoda,
+                TargetX = yoda.X,
+                TargetY = yoda.Y
+            };
+        }
+
+        // Yoda not in current zone - need to navigate
+        if (world.YodaZoneId.HasValue && _state.CurrentZoneId != world.YodaZoneId.Value)
+        {
+            return new BotObjective
+            {
+                Type = ObjectiveType.ChangeZone,
+                Description = "Go to Yoda's zone",
+                TargetZoneId = world.YodaZoneId.Value
+            };
+        }
+
+        return new BotObjective
+        {
+            Type = ObjectiveType.Explore,
+            Description = "Find Yoda"
+        };
+    }
+
+    private BotObjective CreatePuzzleObjective(WorldMap? world)
+    {
+        if (world?.Mission == null)
+            return new BotObjective { Type = ObjectiveType.Explore };
+
+        var mission = world.Mission;
+        var currentStep = mission.CurrentPuzzleStep;
+
+        if (currentStep == null)
+        {
+            // No more steps - mission complete
+            return new BotObjective
+            {
+                Type = ObjectiveType.UseXWing,
+                Description = "Return to Dagobah"
+            };
+        }
+
+        // Check if we have the required item for this step
+        if (currentStep.RequiredItemId > 0)
+        {
+            if (_state.HasItem(currentStep.RequiredItemId))
+            {
+                // Have the item - find NPC to give it to
+                return CreateFindNpcToTradeObjective(currentStep);
+            }
+            else
+            {
+                // Need to find the item
+                return CreateFindItemObjective(currentStep.RequiredItemId);
+            }
+        }
+
+        // No required item - explore
+        return new BotObjective
+        {
+            Type = ObjectiveType.Explore,
+            Description = "Explore to find next objective"
+        };
+    }
+
+    private BotObjective CreateFindNpcToTradeObjective(PuzzleStep step)
+    {
+        // Look for an NPC that might accept this item
+        // First, check current zone for friendly NPCs
+        var friendlyNpc = _state.ZoneNPCs.FirstOrDefault(n =>
+            n.IsEnabled && n.IsAlive && !n.IsHostile);
+
+        if (friendlyNpc != null)
+        {
+            return new BotObjective
+            {
+                Type = ObjectiveType.UseItemOnNpc,
+                Description = $"Use item on NPC",
+                TargetNpc = friendlyNpc,
+                TargetX = friendlyNpc.X,
+                TargetY = friendlyNpc.Y,
+                RequiredItemId = step.RequiredItemId
+            };
+        }
+
+        // No NPC in current zone - explore to find one
+        return new BotObjective
+        {
+            Type = ObjectiveType.FindNpc,
+            Description = "Find someone to trade with"
+        };
+    }
+
+    private BotObjective CreateFindItemObjective(int itemId)
+    {
+        // First, check current zone for the item
+        var itemObj = FindItemInCurrentZone(itemId);
+        if (itemObj != null)
+        {
+            return new BotObjective
+            {
+                Type = ObjectiveType.PickupItem,
+                Description = $"Pick up item at ({itemObj.X},{itemObj.Y})",
+                TargetX = itemObj.X,
+                TargetY = itemObj.Y,
+                RequiredItemId = itemId
+            };
+        }
+
+        // Check for any collectable items in current zone
+        var anyItem = FindAnyItemInCurrentZone();
+        if (anyItem != null)
+        {
+            return new BotObjective
+            {
+                Type = ObjectiveType.PickupItem,
+                Description = $"Pick up item at ({anyItem.X},{anyItem.Y})",
+                TargetX = anyItem.X,
+                TargetY = anyItem.Y
+            };
+        }
+
+        // Check if any NPC might give us items
+        var npcWithItem = _state.ZoneNPCs.FirstOrDefault(n =>
+            n.IsEnabled && n.IsAlive && !n.IsHostile &&
+            n.CarriedItemId.HasValue && !n.HasGivenItem);
+
+        if (npcWithItem != null)
+        {
+            return new BotObjective
+            {
+                Type = ObjectiveType.TalkToNpc,
+                Description = "Talk to NPC for item",
+                TargetNpc = npcWithItem,
+                TargetX = npcWithItem.X,
+                TargetY = npcWithItem.Y
+            };
+        }
+
+        // No items in current zone - explore
+        return new BotObjective
+        {
+            Type = ObjectiveType.Explore,
+            Description = "Explore to find items"
+        };
+    }
+
+    /// <summary>
+    /// Finds Yoda NPC in current zone.
+    /// </summary>
+    public NPC? FindYodaNpc()
+    {
+        const int YODA_TILE_ID = 780;
+        return _state.ZoneNPCs.FirstOrDefault(n =>
+            n.CharacterId == YODA_TILE_ID && n.IsEnabled && n.IsAlive);
+    }
+
+    /// <summary>
+    /// Finds a specific item in the current zone.
+    /// </summary>
+    private ZoneObject? FindItemInCurrentZone(int itemId)
+    {
+        if (_state.CurrentZone == null) return null;
+
+        foreach (var obj in _state.CurrentZone.Objects)
+        {
+            if ((obj.Type == ZoneObjectType.CrateItem || obj.Type == ZoneObjectType.CrateWeapon) &&
+                obj.Argument == itemId &&
+                !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+            {
+                return obj;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Finds any collectable item in the current zone.
+    /// </summary>
+    private ZoneObject? FindAnyItemInCurrentZone()
+    {
+        if (_state.CurrentZone == null) return null;
+
+        foreach (var obj in _state.CurrentZone.Objects)
+        {
+            if ((obj.Type == ZoneObjectType.CrateItem ||
+                 obj.Type == ZoneObjectType.CrateWeapon ||
+                 obj.Type == ZoneObjectType.LocatorItem) &&
+                !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+            {
+                return obj;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Finds the nearest hostile NPC.
+    /// </summary>
+    public NPC? FindNearestEnemy()
+    {
+        NPC? nearest = null;
+        int nearestDist = int.MaxValue;
+
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (!npc.IsEnabled || !npc.IsAlive || !npc.IsHostile)
+                continue;
+
+            int dist = npc.DistanceTo(_state.PlayerX, _state.PlayerY);
+            if (dist < nearestDist)
+            {
+                nearestDist = dist;
+                nearest = npc;
+            }
+        }
+
+        return nearest;
+    }
+
+    /// <summary>
+    /// Finds the nearest friendly NPC.
+    /// </summary>
+    public NPC? FindNearestFriendlyNpc()
+    {
+        NPC? nearest = null;
+        int nearestDist = int.MaxValue;
+
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (!npc.IsEnabled || !npc.IsAlive || npc.IsHostile)
+                continue;
+
+            // Additional check: skip NPCs that look hostile by name
+            if (IsLikelyHostileByName(npc.CharacterId))
+                continue;
+
+            int dist = npc.DistanceTo(_state.PlayerX, _state.PlayerY);
+            if (dist < nearestDist)
+            {
+                nearestDist = dist;
+                nearest = npc;
+            }
+        }
+
+        return nearest;
+    }
+
+    /// <summary>
+    /// Checks if a character is likely hostile based on their name.
+    /// </summary>
+    private bool IsLikelyHostileByName(int characterId)
+    {
+        if (characterId < 0 || characterId >= _gameData.Characters.Count)
+            return false;
+
+        var character = _gameData.Characters[characterId];
+        if (string.IsNullOrEmpty(character.Name))
+            return false;
+
+        var nameLower = character.Name.ToLowerInvariant();
+
+        // Common hostile character name patterns
+        string[] hostilePatterns = {
+            "trooper", "attack", "hard", "enemy", "patrol",
+            "wampa", "tuscan", "probot", "droid", "vader",
+            "fett", "greedo", "ig88", "scorpion", "bug",
+            "sarlacc", "rancor", "tank", "gurk", "jawa"
+        };
+
+        foreach (var pattern in hostilePatterns)
+        {
+            if (nameLower.Contains(pattern))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Finds a door to an unexplored zone.
+    /// </summary>
+    public ZoneObject? FindUnexploredDoor()
+    {
+        if (_state.CurrentZone == null) return null;
+
+        foreach (var obj in _state.CurrentZone.Objects)
+        {
+            if (obj.Type == ZoneObjectType.DoorEntrance ||
+                obj.Type == ZoneObjectType.DoorExit)
+            {
+                // Check if destination zone is unexplored (not solved)
+                if (obj.Argument < _gameData.Zones.Count && !_state.IsZoneSolved(obj.Argument))
+                {
+                    return obj;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Gets the direction to an adjacent zone (for edge transitions).
+    /// </summary>
+    public Direction? GetDirectionToAdjacentZone(int targetZoneId)
+    {
+        var world = _worldGenerator.CurrentWorld;
+        if (world == null) return null;
+
+        if (!world.Connections.TryGetValue(_state.CurrentZoneId, out var connections))
+            return null;
+
+        if (connections.North == targetZoneId) return Direction.Up;
+        if (connections.South == targetZoneId) return Direction.Down;
+        if (connections.East == targetZoneId) return Direction.Right;
+        if (connections.West == targetZoneId) return Direction.Left;
+
+        return null;
+    }
+
+    /// <summary>
+    /// Gets a list of connected zone IDs that haven't been visited.
+    /// </summary>
+    public List<int> GetUnexploredConnectedZones()
+    {
+        var result = new List<int>();
+        var world = _worldGenerator.CurrentWorld;
+        if (world == null) return result;
+
+        if (!world.Connections.TryGetValue(_state.CurrentZoneId, out var connections))
+            return result;
+
+        if (connections.North.HasValue && !_state.IsZoneSolved(connections.North.Value))
+            result.Add(connections.North.Value);
+        if (connections.South.HasValue && !_state.IsZoneSolved(connections.South.Value))
+            result.Add(connections.South.Value);
+        if (connections.East.HasValue && !_state.IsZoneSolved(connections.East.Value))
+            result.Add(connections.East.Value);
+        if (connections.West.HasValue && !_state.IsZoneSolved(connections.West.Value))
+            result.Add(connections.West.Value);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Checks if the mission is complete.
+    /// </summary>
+    public bool IsMissionComplete()
+    {
+        return _state.IsGameWon || GetCurrentPhase() == MissionPhase.Completed;
+    }
+}
+
+/// <summary>
+/// Mission phases for the bot.
+/// </summary>
+public enum MissionPhase
+{
+    Unknown,
+    TalkToYoda,
+    TravelToPlanet,
+    SolvePuzzles,
+    ReturnToDagobah,
+    ReturnToYoda,
+    Completed
+}
+
+/// <summary>
+/// Types of objectives the bot can pursue.
+/// </summary>
+public enum ObjectiveType
+{
+    None,
+    TalkToNpc,
+    UseItemOnNpc,
+    PickupItem,
+    KillEnemy,
+    ChangeZone,
+    UseXWing,
+    EnterDoor,
+    PushObject,
+    Explore,
+    FindNpc
+}
+
+/// <summary>
+/// Represents a bot objective with details.
+/// </summary>
+public class BotObjective
+{
+    public ObjectiveType Type { get; set; }
+    public string Description { get; set; } = "";
+    public int TargetX { get; set; }
+    public int TargetY { get; set; }
+    public int? TargetZoneId { get; set; }
+    public NPC? TargetNpc { get; set; }
+    public int? RequiredItemId { get; set; }
+    public Direction? Direction { get; set; }
+}
