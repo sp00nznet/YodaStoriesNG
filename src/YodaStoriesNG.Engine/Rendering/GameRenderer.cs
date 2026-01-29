@@ -1,0 +1,327 @@
+using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine.Data;
+
+namespace YodaStoriesNG.Engine.Rendering;
+
+/// <summary>
+/// SDL2-based renderer for the game.
+/// </summary>
+public unsafe class GameRenderer : IDisposable
+{
+    // SDL init flags
+    private const uint SDL_INIT_VIDEO = 0x00000020;
+    private const uint SDL_INIT_AUDIO = 0x00000010;
+    private const int SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
+
+    private SDLWindow* _window;
+    private SDLRenderer* _renderer;
+    private SDLTexture* _tileAtlas;
+    private int _atlasWidth;
+    private int _atlasHeight;
+    private int _tilesPerRow;
+
+    private readonly GameData _gameData;
+    private readonly TileRenderer _tileRenderer;
+
+    // Screen dimensions (9 tiles visible at once)
+    public const int ViewportTilesX = 9;
+    public const int ViewportTilesY = 9;
+    public const int Scale = 2; // 2x scaling for better visibility
+    public const int WindowWidth = ViewportTilesX * Tile.Width * Scale;
+    public const int WindowHeight = ViewportTilesY * Tile.Height * Scale + 100 * Scale; // Extra space for HUD
+
+    public bool IsInitialized => _window != null;
+
+    public GameRenderer(GameData gameData)
+    {
+        _gameData = gameData;
+        _tileRenderer = new TileRenderer();
+    }
+
+    public bool Initialize(string title = "Yoda Stories NG")
+    {
+        if (SDL.Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
+        {
+            Console.WriteLine($"SDL_Init failed: {SDL.GetErrorS()}");
+            return false;
+        }
+
+        _window = SDL.CreateWindow(
+            title,
+            (int)SDL_WINDOWPOS_CENTERED,
+            (int)SDL_WINDOWPOS_CENTERED,
+            WindowWidth,
+            WindowHeight,
+            (uint)SDLWindowFlags.Shown);
+
+        if (_window == null)
+        {
+            Console.WriteLine($"SDL_CreateWindow failed: {SDL.GetErrorS()}");
+            return false;
+        }
+
+        _renderer = SDL.CreateRenderer(_window, -1,
+            (uint)(SDLRendererFlags.Accelerated | SDLRendererFlags.Presentvsync));
+
+        if (_renderer == null)
+        {
+            Console.WriteLine($"SDL_CreateRenderer failed: {SDL.GetErrorS()}");
+            return false;
+        }
+
+        // Create tile atlas texture
+        CreateTileAtlas();
+
+        return true;
+    }
+
+    private void CreateTileAtlas()
+    {
+        if (_gameData.Tiles.Count == 0)
+            return;
+
+        // Calculate atlas dimensions (aim for roughly square)
+        _tilesPerRow = (int)Math.Ceiling(Math.Sqrt(_gameData.Tiles.Count));
+        var (pixels, width, height) = _tileRenderer.CreateTileAtlas(_gameData.Tiles, _tilesPerRow);
+        _atlasWidth = width;
+        _atlasHeight = height;
+
+        // Create SDL texture
+        _tileAtlas = SDL.CreateTexture(
+            _renderer,
+            (uint)SDLPixelFormatEnum.Argb8888,
+            (int)SDLTextureAccess.Static,
+            width,
+            height);
+
+        if (_tileAtlas == null)
+        {
+            Console.WriteLine($"Failed to create tile atlas: {SDL.GetErrorS()}");
+            return;
+        }
+
+        // Enable alpha blending
+        SDL.SetTextureBlendMode(_tileAtlas, SDLBlendMode.Blend);
+
+        // Upload pixel data
+        fixed (uint* pixelPtr = pixels)
+        {
+            SDL.UpdateTexture(_tileAtlas, null, pixelPtr, width * 4);
+        }
+
+        Console.WriteLine($"Created tile atlas: {width}x{height} ({_gameData.Tiles.Count} tiles, {_tilesPerRow} per row)");
+    }
+
+    /// <summary>
+    /// Renders a zone at the specified camera offset.
+    /// </summary>
+    public void RenderZone(Zone zone, int cameraX, int cameraY)
+    {
+        // Clear screen
+        SDL.SetRenderDrawColor(_renderer, 0, 0, 0, 255);
+        SDL.RenderClear(_renderer);
+
+        // Render tile layers
+        for (int layer = 0; layer < 3; layer++)
+        {
+            RenderTileLayer(zone, layer, cameraX, cameraY);
+        }
+    }
+
+    private static bool _debugRendered = false;
+
+    private void RenderTileLayer(Zone zone, int layer, int cameraX, int cameraY)
+    {
+        int tilesRendered = 0;
+        for (int screenY = 0; screenY < ViewportTilesY; screenY++)
+        {
+            for (int screenX = 0; screenX < ViewportTilesX; screenX++)
+            {
+                var worldX = cameraX + screenX;
+                var worldY = cameraY + screenY;
+
+                if (worldX < 0 || worldX >= zone.Width || worldY < 0 || worldY >= zone.Height)
+                    continue;
+
+                var tileId = zone.GetTile(worldX, worldY, layer);
+                if (tileId == 0xFFFF || tileId >= _gameData.Tiles.Count)
+                    continue;
+
+                var tile = _gameData.Tiles[(int)tileId];
+
+                // Skip fully transparent tiles in upper layers
+                if (layer > 0 && !tile.IsTransparent && tile.PixelData[0] == 0)
+                    continue;
+
+                RenderTile(tileId, screenX * Tile.Width * Scale, screenY * Tile.Height * Scale);
+                tilesRendered++;
+            }
+        }
+
+        if (!_debugRendered && layer == 0)
+        {
+            Console.WriteLine($"Layer {layer}: Rendered {tilesRendered} tiles");
+            _debugRendered = true;
+        }
+    }
+
+    private static bool _debugAtlas = false;
+
+    /// <summary>
+    /// Renders a single tile at the specified screen position.
+    /// </summary>
+    public void RenderTile(int tileId, int x, int y)
+    {
+        if (_tileAtlas == null || tileId < 0 || tileId >= _gameData.Tiles.Count)
+        {
+            if (!_debugAtlas)
+            {
+                Console.WriteLine($"RenderTile skipped: atlas={_tileAtlas != null}, tileId={tileId}, tileCount={_gameData.Tiles.Count}");
+                _debugAtlas = true;
+            }
+            return;
+        }
+
+        // Calculate source rectangle in atlas
+        var atlasX = (tileId % _tilesPerRow) * Tile.Width;
+        var atlasY = (tileId / _tilesPerRow) * Tile.Height;
+
+        var srcRect = new SDLRect
+        {
+            X = atlasX,
+            Y = atlasY,
+            W = Tile.Width,
+            H = Tile.Height
+        };
+
+        var dstRect = new SDLRect
+        {
+            X = x,
+            Y = y,
+            W = Tile.Width * Scale,
+            H = Tile.Height * Scale
+        };
+
+        SDL.RenderCopy(_renderer, _tileAtlas, &srcRect, &dstRect);
+    }
+
+    /// <summary>
+    /// Renders a sprite (character/object) at the specified world position.
+    /// </summary>
+    public void RenderSprite(int tileId, int worldX, int worldY, int cameraX, int cameraY)
+    {
+        var screenX = (worldX - cameraX) * Tile.Width * Scale;
+        var screenY = (worldY - cameraY) * Tile.Height * Scale;
+        RenderTile(tileId, screenX, screenY);
+    }
+
+    /// <summary>
+    /// Renders text on screen (placeholder - uses colored rectangles for now).
+    /// </summary>
+    public void RenderText(string text, int x, int y, byte r = 255, byte g = 255, byte b = 255)
+    {
+        // TODO: Implement proper text rendering with TTF
+        // For now, just draw a placeholder rectangle
+        SDL.SetRenderDrawColor(_renderer, r, g, b, 255);
+        var rect = new SDLRect { X = x, Y = y, W = text.Length * 8, H = 16 };
+        SDL.RenderDrawRect(_renderer, &rect);
+    }
+
+    /// <summary>
+    /// Renders the HUD (health, inventory, etc.).
+    /// </summary>
+    public void RenderHUD(int health, int maxHealth, List<int> inventory, int? selectedWeapon)
+    {
+        var hudY = ViewportTilesY * Tile.Height * Scale;
+
+        // Background
+        SDL.SetRenderDrawColor(_renderer, 40, 40, 40, 255);
+        var hudRect = new SDLRect { X = 0, Y = hudY, W = WindowWidth, H = 100 * Scale };
+        SDL.RenderFillRect(_renderer, &hudRect);
+
+        // Health bar
+        var healthWidth = (int)((float)health / maxHealth * 150);
+        SDL.SetRenderDrawColor(_renderer, 200, 0, 0, 255);
+        var healthRect = new SDLRect { X = 10, Y = hudY + 10, W = healthWidth, H = 20 };
+        SDL.RenderFillRect(_renderer, &healthRect);
+
+        // Health bar border
+        SDL.SetRenderDrawColor(_renderer, 255, 255, 255, 255);
+        var healthBorder = new SDLRect { X = 10, Y = hudY + 10, W = 150, H = 20 };
+        SDL.RenderDrawRect(_renderer, &healthBorder);
+
+        // Inventory slots
+        for (int i = 0; i < Math.Min(inventory.Count, 8); i++)
+        {
+            var slotX = 180 + i * (Tile.Width + 4);
+            var slotY = hudY + 5;
+
+            // Slot background
+            SDL.SetRenderDrawColor(_renderer, 60, 60, 60, 255);
+            var slotRect = new SDLRect { X = slotX, Y = slotY, W = Tile.Width, H = Tile.Height };
+            SDL.RenderFillRect(_renderer, &slotRect);
+
+            // Item tile
+            if (inventory[i] > 0)
+            {
+                RenderTileUnscaled(inventory[i], slotX, slotY);
+            }
+        }
+    }
+
+    private void RenderTileUnscaled(int tileId, int x, int y)
+    {
+        if (_tileAtlas == null || tileId < 0 || tileId >= _gameData.Tiles.Count)
+            return;
+
+        var atlasX = (tileId % _tilesPerRow) * Tile.Width;
+        var atlasY = (tileId / _tilesPerRow) * Tile.Height;
+
+        var srcRect = new SDLRect { X = atlasX, Y = atlasY, W = Tile.Width, H = Tile.Height };
+        var dstRect = new SDLRect { X = x, Y = y, W = Tile.Width, H = Tile.Height };
+
+        SDL.RenderCopy(_renderer, _tileAtlas, &srcRect, &dstRect);
+    }
+
+    /// <summary>
+    /// Presents the rendered frame.
+    /// </summary>
+    public void Present()
+    {
+        SDL.RenderPresent(_renderer);
+    }
+
+    /// <summary>
+    /// Polls for SDL events.
+    /// </summary>
+    public bool PollEvent(out SDLEvent evt)
+    {
+        fixed (SDLEvent* evtPtr = &evt)
+        {
+            return SDL.PollEvent(evtPtr) != 0;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_tileAtlas != null)
+        {
+            SDL.DestroyTexture(_tileAtlas);
+            _tileAtlas = null;
+        }
+
+        if (_renderer != null)
+        {
+            SDL.DestroyRenderer(_renderer);
+            _renderer = null;
+        }
+
+        if (_window != null)
+        {
+            SDL.DestroyWindow(_window);
+            _window = null;
+        }
+
+        SDL.Quit();
+    }
+}

@@ -1,0 +1,146 @@
+using YodaStoriesNG.Engine.Data;
+
+namespace YodaStoriesNG.Engine.Game;
+
+/// <summary>
+/// Represents the current state of the game.
+/// </summary>
+public class GameState
+{
+    // Player state
+    public int PlayerX { get; set; }
+    public int PlayerY { get; set; }
+    public Direction PlayerDirection { get; set; } = Direction.Down;
+    public int Health { get; set; } = 100;
+    public int MaxHealth { get; set; } = 100;
+
+    // Current zone
+    public int CurrentZoneId { get; set; }
+    public Zone? CurrentZone { get; set; }
+
+    // Inventory
+    public List<int> Inventory { get; set; } = new();
+    public int? SelectedWeapon { get; set; }
+    public int? SelectedItem { get; set; }
+
+    // Game variables (used by scripts)
+    public Dictionary<int, int> Variables { get; set; } = new();
+    public Dictionary<int, int> Counters { get; set; } = new();
+
+    // Quest state
+    public HashSet<int> SolvedZones { get; set; } = new();
+    public int GamesWon { get; set; }
+
+    // Game flags
+    public bool IsGameOver { get; set; }
+    public bool IsGameWon { get; set; }
+    public bool IsPaused { get; set; }
+
+    // Animation state
+    public int AnimationFrame { get; set; }
+    public double AnimationTimer { get; set; }
+
+    // Camera position (for large zones)
+    public int CameraX { get; set; }
+    public int CameraY { get; set; }
+
+    /// <summary>
+    /// Resets the game state for a new game.
+    /// </summary>
+    public void Reset()
+    {
+        PlayerX = 4;
+        PlayerY = 4;
+        PlayerDirection = Direction.Down;
+        Health = MaxHealth;
+        CurrentZoneId = 0;
+        CurrentZone = null;
+        Inventory.Clear();
+        SelectedWeapon = null;
+        SelectedItem = null;
+        Variables.Clear();
+        Counters.Clear();
+        SolvedZones.Clear();
+        IsGameOver = false;
+        IsGameWon = false;
+        IsPaused = false;
+        AnimationFrame = 0;
+        AnimationTimer = 0;
+        CameraX = 0;
+        CameraY = 0;
+    }
+
+    /// <summary>
+    /// Gets a game variable, returning 0 if not set.
+    /// </summary>
+    public int GetVariable(int id) =>
+        Variables.TryGetValue(id, out var value) ? value : 0;
+
+    /// <summary>
+    /// Sets a game variable.
+    /// </summary>
+    public void SetVariable(int id, int value) =>
+        Variables[id] = value;
+
+    /// <summary>
+    /// Gets a counter, returning 0 if not set.
+    /// </summary>
+    public int GetCounter(int id) =>
+        Counters.TryGetValue(id, out var value) ? value : 0;
+
+    /// <summary>
+    /// Sets a counter.
+    /// </summary>
+    public void SetCounter(int id, int value) =>
+        Counters[id] = value;
+
+    /// <summary>
+    /// Adds to a counter.
+    /// </summary>
+    public void AddToCounter(int id, int amount)
+    {
+        var current = GetCounter(id);
+        Counters[id] = current + amount;
+    }
+
+    /// <summary>
+    /// Checks if the player has an item.
+    /// </summary>
+    public bool HasItem(int itemId) =>
+        Inventory.Contains(itemId);
+
+    /// <summary>
+    /// Adds an item to inventory.
+    /// </summary>
+    public void AddItem(int itemId)
+    {
+        if (!Inventory.Contains(itemId))
+            Inventory.Add(itemId);
+    }
+
+    /// <summary>
+    /// Removes an item from inventory.
+    /// </summary>
+    public void RemoveItem(int itemId) =>
+        Inventory.Remove(itemId);
+
+    /// <summary>
+    /// Marks a zone as solved.
+    /// </summary>
+    public void MarkZoneSolved(int zoneId) =>
+        SolvedZones.Add(zoneId);
+
+    /// <summary>
+    /// Checks if a zone is solved.
+    /// </summary>
+    public bool IsZoneSolved(int zoneId) =>
+        SolvedZones.Contains(zoneId);
+}
+
+public enum Direction
+{
+    Up,
+    Down,
+    Left,
+    Right
+}

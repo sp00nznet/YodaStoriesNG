@@ -1,0 +1,30 @@
+# Build outputs
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Original game files (not part of the project)
+Yoda/
+MAGIC/
+Themes/
+AUTORUN.INF
+Yodaplay.exe
+setup.exe
+
+# Temporary scripts
+*.ps1
+
+# Claude workspace
+.claude/
+
+# OS files
+Thumbs.db
+.DS_Store
