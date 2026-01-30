@@ -2,6 +2,7 @@ using Hexa.NET.SDL2;
 using YodaStoriesNG.Engine.Audio;
 using YodaStoriesNG.Engine.Bot;
 using YodaStoriesNG.Engine.Data;
+using YodaStoriesNG.Engine.Debug;
 using YodaStoriesNG.Engine.Parsing;
 using YodaStoriesNG.Engine.Rendering;
 using YodaStoriesNG.Engine.UI;
@@ -21,6 +22,7 @@ public unsafe class GameEngine : IDisposable
     private MessageSystem _messages = new();
     private SoundManager? _sounds;
     private MissionBot? _bot;
+    private DebugTools? _debugTools;
 
     private bool _isRunning;
     private readonly string _dataPath;
@@ -193,6 +195,9 @@ public unsafe class GameEngine : IDisposable
             _actionExecutor.OnDialogue += (speaker, text) => _messages.ShowDialogue(speaker, text);
         }
 
+        // Initialize debug tools
+        _debugTools = new DebugTools(_gameData!, _state, _worldGenerator);
+
         // Initialize bot and auto-start for debugging
         if (_worldGenerator != null)
         {
@@ -264,6 +269,14 @@ public unsafe class GameEngine : IDisposable
                 break;
 
             case BotActionType.Talk:
+                // For talk action, temporarily clear selected item so UseItem() triggers dialogue
+                _state.PlayerDirection = dir;
+                var savedItem = _state.SelectedItem;
+                _state.SelectedItem = null;
+                UseItem();
+                _state.SelectedItem = savedItem; // Restore item after talking
+                break;
+
             case BotActionType.UseItem:
                 _state.PlayerDirection = dir;
                 UseItem();
@@ -322,6 +335,19 @@ public unsafe class GameEngine : IDisposable
             {
                 _state.PlayerX = zone.Width / 2;
                 _state.PlayerY = zone.Height / 2;
+            }
+        }
+
+        // Validate spawn position - find walkable tile if spawn is blocked
+        if (!IsSpawnPositionWalkable(_state.PlayerX, _state.PlayerY, zone))
+        {
+            Console.WriteLine($"Spawn position ({_state.PlayerX},{_state.PlayerY}) is blocked, searching for walkable tile...");
+            var walkable = FindNearestWalkablePosition(_state.PlayerX, _state.PlayerY, zone);
+            if (walkable.HasValue)
+            {
+                _state.PlayerX = walkable.Value.x;
+                _state.PlayerY = walkable.Value.y;
+                Console.WriteLine($"Found walkable spawn at ({_state.PlayerX},{_state.PlayerY})");
             }
         }
 
@@ -590,6 +616,7 @@ public unsafe class GameEngine : IDisposable
         const int SDLK_b = 98;
         const int SDLK_d = 100;
         const int SDLK_f = 102;
+        const int SDLK_i = 105;
         const int SDLK_m = 109;
         const int SDLK_n = 110;
         const int SDLK_o = 111;
@@ -688,6 +715,11 @@ public unsafe class GameEngine : IDisposable
                 else
                     EnableBot();
                 Console.WriteLine($"Bot: {(IsBotRunning ? "ENABLED" : "DISABLED")}");
+                break;
+
+            case SDLK_i:  // I key - inspect/debug dump
+                _debugTools?.DumpAll();
+                _messages.ShowMessage("Debug info dumped to console", MessageType.System);
                 break;
 
             case SDLK_TAB:  // Tab - toggle weapon
@@ -1006,6 +1038,74 @@ public unsafe class GameEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Checks if a position is walkable (not blocked by walls or objects).
+    /// </summary>
+    private bool IsSpawnPositionWalkable(int x, int y, Zone zone)
+    {
+        // Check bounds
+        if (x < 0 || x >= zone.Width || y < 0 || y >= zone.Height)
+            return false;
+
+        // Check middle layer tile
+        var middleTile = zone.GetTile(x, y, 1);
+        if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
+        {
+            var tile = _gameData.Tiles[middleTile];
+            if (tile.IsObject && !tile.IsDraggable)
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Finds the nearest walkable position to a target position using spiral search.
+    /// </summary>
+    private (int x, int y)? FindNearestWalkablePosition(int startX, int startY, Zone zone)
+    {
+        // Spiral search pattern
+        int maxRadius = Math.Max(zone.Width, zone.Height);
+
+        for (int radius = 1; radius < maxRadius; radius++)
+        {
+            // Search in a square pattern around the start point
+            for (int dy = -radius; dy <= radius; dy++)
+            {
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    // Only check perimeter of the square
+                    if (Math.Abs(dx) != radius && Math.Abs(dy) != radius)
+                        continue;
+
+                    int x = startX + dx;
+                    int y = startY + dy;
+
+                    if (IsSpawnPositionWalkable(x, y, zone))
+                        return (x, y);
+                }
+            }
+        }
+
+        // Fallback: try center of zone
+        int centerX = zone.Width / 2;
+        int centerY = zone.Height / 2;
+        if (IsSpawnPositionWalkable(centerX, centerY, zone))
+            return (centerX, centerY);
+
+        // Last resort: find any walkable position
+        for (int y = 1; y < zone.Height - 1; y++)
+        {
+            for (int x = 1; x < zone.Width - 1; x++)
+            {
+                if (IsSpawnPositionWalkable(x, y, zone))
+                    return (x, y);
+            }
+        }
+
+        return null;
+    }
+
     private void HandleZoneTransition(int dx, int dy)
     {
         // Check for transition objects at player position and edge position
@@ -1182,6 +1282,9 @@ public unsafe class GameEngine : IDisposable
                         var itemName = GetTileName(obj.Argument) ?? $"Item #{obj.Argument}";
                         _messages.ShowPickup(itemName);
                         _sounds?.PlaySound(SoundManager.SoundPickup);
+
+                        // Check if picking up this item advances the mission
+                        TryAdvanceMissionOnPickup(obj.Argument);
                     }
                     break;
 
@@ -1362,12 +1465,36 @@ public unsafe class GameEngine : IDisposable
 
         var currentStep = mission.CurrentPuzzleStep;
         if (currentStep == null)
-            return;
-
-        // Check if the used item matches what's needed for the current step
-        if (currentStep.RequiredItemId == itemId)
         {
-            Console.WriteLine($"Mission: Used correct item {itemId} for step {mission.CurrentStep + 1}");
+            // No more steps - mark mission as complete if not already
+            if (!mission.IsCompleted)
+            {
+                Console.WriteLine($"Mission: All steps done, marking complete");
+                mission.IsCompleted = true;
+                _messages.ShowMessage("MISSION COMPLETE!", MessageType.System);
+                _messages.ShowMessage("Return to Yoda on Dagobah.", MessageType.Info);
+                _sounds?.PlaySound(SoundManager.SoundPickup);
+            }
+            return;
+        }
+
+        // Check if the used item matches what's needed for the current step:
+        // - Exact match: RequiredItemId == itemId
+        // - Any item: RequiredItemId == 0 (step accepts any item)
+        // - Item in chain: Check if it's in any step of the puzzle chain
+        bool itemMatches = (currentStep.RequiredItemId == itemId) ||
+                          (currentStep.RequiredItemId == 0 && itemId > 0);
+
+        // Also accept if this item appears anywhere in the puzzle chain
+        if (!itemMatches)
+        {
+            itemMatches = mission.PuzzleChain.Any(step =>
+                step.RequiredItemId == itemId || step.RewardItemId == itemId);
+        }
+
+        if (itemMatches)
+        {
+            Console.WriteLine($"Mission: Used item {itemId} for step {mission.CurrentStep + 1} (required: {currentStep.RequiredItemId})");
 
             // Remove the used item from inventory
             _state.RemoveItem(itemId);
@@ -1388,6 +1515,50 @@ public unsafe class GameEngine : IDisposable
             {
                 _messages.ShowMessage($"Used {usedItemName} successfully!", MessageType.Info);
             }
+
+            // Advance the mission
+            bool missionComplete = world.AdvanceMission();
+
+            if (missionComplete)
+            {
+                _messages.ShowMessage("MISSION COMPLETE!", MessageType.System);
+                _messages.ShowMessage("Return to Yoda on Dagobah.", MessageType.Info);
+                _sounds?.PlaySound(SoundManager.SoundPickup);
+            }
+            else
+            {
+                // Show next objective
+                var nextStep = mission.CurrentPuzzleStep;
+                if (nextStep != null && !string.IsNullOrEmpty(nextStep.Hint))
+                {
+                    _messages.ShowMessage($"Next: {nextStep.Hint}", MessageType.Info);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks if picking up an item advances the mission (e.g., finding a required item).
+    /// </summary>
+    private void TryAdvanceMissionOnPickup(int itemId)
+    {
+        if (_worldGenerator?.CurrentWorld == null)
+            return;
+
+        var world = _worldGenerator.CurrentWorld;
+        var mission = world.Mission;
+        if (mission == null || mission.IsCompleted)
+            return;
+
+        var currentStep = mission.CurrentPuzzleStep;
+        if (currentStep == null)
+            return;
+
+        // Check if the picked up item is the reward for a "find item" step (RequiredItemId == 0)
+        // Or if it matches the reward of the current step
+        if (currentStep.RequiredItemId == 0 && currentStep.RewardItemId == itemId)
+        {
+            Console.WriteLine($"Mission: Found reward item {itemId} for step {mission.CurrentStep + 1}");
 
             // Advance the mission
             bool missionComplete = world.AdvanceMission();
@@ -2183,18 +2354,28 @@ public unsafe class GameEngine : IDisposable
                 _messages.ShowMessage($"Traveling to {world.Planet}...", MessageType.System);
                 _sounds?.PlaySound(SoundManager.SoundDoor);
 
-                // Find spawn point
+                // Find X-Wing landing spot - Luke must spawn AT the X-Wing
                 int spawnX = destZone.Width / 2;
                 int spawnY = destZone.Height / 2;
-                foreach (var obj in destZone.Objects)
+
+                // First priority: X-Wing landing spot
+                var xwingObj = destZone.Objects.FirstOrDefault(o => o.Type == ZoneObjectType.XWingToDagobah);
+                if (xwingObj != null)
                 {
-                    if (obj.Type == ZoneObjectType.SpawnLocation ||
-                        obj.Type == ZoneObjectType.XWingToDagobah)
+                    spawnX = xwingObj.X;
+                    spawnY = xwingObj.Y + 1; // Spawn below the X-Wing
+                    Console.WriteLine($"Landing at X-Wing position ({xwingObj.X},{xwingObj.Y}), Luke spawns at ({spawnX},{spawnY})");
+                }
+                else
+                {
+                    // Fallback: use spawn location
+                    var spawnObj = destZone.Objects.FirstOrDefault(o => o.Type == ZoneObjectType.SpawnLocation);
+                    if (spawnObj != null)
                     {
-                        spawnX = obj.X;
-                        spawnY = obj.Y;
-                        break;
+                        spawnX = spawnObj.X;
+                        spawnY = spawnObj.Y;
                     }
+                    Console.WriteLine($"WARNING: No X-Wing in landing zone, using fallback spawn ({spawnX},{spawnY})");
                 }
 
                 LoadZone(landingZoneId, spawnX, spawnY);

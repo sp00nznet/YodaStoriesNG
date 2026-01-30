@@ -74,12 +74,13 @@ public class BotActions
             return true;
         }
 
-        // Find path
+        // Find path (pass zoneId for blocklist checking)
         _currentPath = _pathfinder.FindPath(
             _state.CurrentZone,
             _state.PlayerX, _state.PlayerY,
             x, y,
-            _state.ZoneNPCs);
+            _state.ZoneNPCs,
+            _state.CurrentZoneId);
 
         if (_currentPath == null || _currentPath.Count == 0)
         {
@@ -116,7 +117,8 @@ public class BotActions
             _state.CurrentZone,
             _state.PlayerX, _state.PlayerY,
             x, y,
-            _state.ZoneNPCs);
+            _state.ZoneNPCs,
+            _state.CurrentZoneId);
 
         if (result == null || result.Value.Path == null)
         {
@@ -155,9 +157,14 @@ public class BotActions
         // Move adjacent first if needed
         if (!IsAdjacent(_state.PlayerX, _state.PlayerY, npc.X, npc.Y))
         {
-            _actionState = BotActionState.MovingToNpc;
             CurrentActionDescription = $"Walking to NPC at ({npc.X},{npc.Y})";
-            return MoveToAdjacent(npc.X, npc.Y);
+            bool success = MoveToAdjacent(npc.X, npc.Y);
+            // Restore proper state AFTER MoveToAdjacent (which overwrites it)
+            if (success && _actionState != BotActionState.Completed)
+            {
+                _actionState = BotActionState.MovingToNpc;
+            }
+            return success;
         }
 
         // Already adjacent, just interact
@@ -193,9 +200,14 @@ public class BotActions
         // Move adjacent first if needed
         if (!IsAdjacent(_state.PlayerX, _state.PlayerY, npc.X, npc.Y))
         {
-            _actionState = BotActionState.MovingToNpc;
             CurrentActionDescription = $"Walking to NPC with item {itemId}";
-            return MoveToAdjacent(npc.X, npc.Y);
+            bool success = MoveToAdjacent(npc.X, npc.Y);
+            // Restore proper state AFTER MoveToAdjacent (which overwrites it)
+            if (success && _actionState != BotActionState.Completed)
+            {
+                _actionState = BotActionState.MovingToNpc;
+            }
+            return success;
         }
 
         // Already adjacent, use item
@@ -274,15 +286,74 @@ public class BotActions
         return true;
     }
 
+    // Track X-Wing movement
+    private bool _walkingToXWing;
+    private int _xwingX, _xwingY;
+
     /// <summary>
-    /// Triggers X-Wing travel.
+    /// Uses the X-Wing - first walks to it, then travels.
     /// </summary>
-    public void UseXWing()
+    public bool UseXWing()
     {
-        _actionState = BotActionState.UsingXWing;
-        CurrentActionDescription = "Using X-Wing";
-        OnAction?.Invoke(BotActionType.UseXWing, 0, 0, Direction.Down);
-        _actionState = BotActionState.Completed;
+        if (_state.CurrentZone == null)
+        {
+            _actionState = BotActionState.UsingXWing;
+            OnAction?.Invoke(BotActionType.UseXWing, 0, 0, Direction.Down);
+            _actionState = BotActionState.Completed;
+            return true;
+        }
+
+        // Find X-Wing location in current zone
+        ZoneObject? xwing = null;
+        foreach (var obj in _state.CurrentZone.Objects)
+        {
+            if (obj.Type == ZoneObjectType.XWingFromDagobah ||
+                obj.Type == ZoneObjectType.XWingToDagobah)
+            {
+                xwing = obj;
+                break;
+            }
+        }
+
+        if (xwing == null)
+        {
+            // No X-Wing in zone - just travel
+            Console.WriteLine("[BOT] No X-Wing in zone, triggering travel anyway");
+            _actionState = BotActionState.UsingXWing;
+            OnAction?.Invoke(BotActionType.UseXWing, 0, 0, Direction.Down);
+            _actionState = BotActionState.Completed;
+            return true;
+        }
+
+        // Check if we're at or adjacent to X-Wing
+        int dist = Math.Abs(_state.PlayerX - xwing.X) + Math.Abs(_state.PlayerY - xwing.Y);
+        if (dist <= 1)
+        {
+            // At X-Wing - travel!
+            Console.WriteLine($"[BOT] At X-Wing ({xwing.X},{xwing.Y}), taking off!");
+            _actionState = BotActionState.UsingXWing;
+            OnAction?.Invoke(BotActionType.UseXWing, 0, 0, Direction.Down);
+            _actionState = BotActionState.Completed;
+            return true;
+        }
+
+        // Need to walk to X-Wing first
+        Console.WriteLine($"[BOT] Walking to X-Wing at ({xwing.X},{xwing.Y})");
+        _xwingX = xwing.X;
+        _xwingY = xwing.Y;
+        _walkingToXWing = true;
+        CurrentActionDescription = $"Walking to X-Wing at ({xwing.X},{xwing.Y})";
+
+        // Move adjacent to X-Wing - this sets _actionState to Moving
+        bool success = MoveToAdjacent(xwing.X, xwing.Y);
+
+        // Restore proper state AFTER MoveToAdjacent (which overwrites it)
+        if (success && _actionState != BotActionState.Completed)
+        {
+            _actionState = BotActionState.MovingToXWing;
+        }
+
+        return success;
     }
 
     /// <summary>
@@ -321,6 +392,7 @@ public class BotActions
             case BotActionState.MovingToItem:
             case BotActionState.MovingToDoor:
             case BotActionState.MovingToPush:
+            case BotActionState.MovingToXWing:
                 UpdateMovement();
                 break;
 
@@ -375,19 +447,24 @@ public class BotActions
         }
         else
         {
-            // Move was blocked - recalculate path
-            Console.WriteLine($"[BOT] Move blocked at ({nextX},{nextY}), recalculating...");
+            // Move was blocked - mark this position and recalculate path
+            Console.WriteLine($"[BOT] Move blocked at ({nextX},{nextY}), marking as blocked...");
+            _pathfinder.MarkBlocked(_state.CurrentZoneId, nextX, nextY);
+
             if (_state.CurrentZone != null)
             {
-                _currentPath = _pathfinder.FindPath(
+                // Don't call ClearBlockedPositions - we want to keep the blocklist
+                // Use a special overload or pass zoneId=null to skip clearing
+                _currentPath = _pathfinder.FindPathWithoutClearing(
                     _state.CurrentZone,
                     _state.PlayerX, _state.PlayerY,
                     _targetX, _targetY,
-                    _state.ZoneNPCs);
+                    _state.ZoneNPCs,
+                    _state.CurrentZoneId);
 
-                if (_currentPath == null)
+                if (_currentPath == null || _currentPath.Count == 0)
                 {
-                    Console.WriteLine("[BOT] No path found after recalculation");
+                    Console.WriteLine("[BOT] No path found after recalculation, giving up");
                     _actionState = BotActionState.Completed;
                 }
                 else
@@ -411,6 +488,15 @@ public class BotActions
             case BotActionState.MovingToPush:
                 _actionState = BotActionState.Pushing;
                 PerformPush();
+                break;
+
+            case BotActionState.MovingToXWing:
+                // Arrived at X-Wing - take off!
+                Console.WriteLine("[BOT] Reached X-Wing, taking off!");
+                _actionState = BotActionState.UsingXWing;
+                OnAction?.Invoke(BotActionType.UseXWing, 0, 0, Direction.Down);
+                _actionState = BotActionState.Completed;
+                _walkingToXWing = false;
                 break;
 
             default:
@@ -477,6 +563,7 @@ public enum BotActionState
     MovingToItem,
     MovingToDoor,
     MovingToPush,
+    MovingToXWing,
     Attacking,
     Interacting,
     UsingItem,

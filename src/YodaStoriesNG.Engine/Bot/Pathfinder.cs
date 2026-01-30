@@ -10,25 +10,86 @@ public class Pathfinder
 {
     private readonly GameData _gameData;
 
+    // Temporary blocklist for positions that movement failed on (cleared on zone change)
+    private readonly HashSet<(int zoneId, int x, int y)> _blockedPositions = new();
+    // Permanent blocklist for positions like X-Wings (NOT cleared on zone change)
+    private readonly HashSet<(int zoneId, int x, int y)> _permanentBlockedPositions = new();
+    private int _currentZoneId = -1;
+
     public Pathfinder(GameData gameData)
     {
         _gameData = gameData;
     }
 
     /// <summary>
+    /// Marks a position as blocked (movement failed there). Cleared on zone change.
+    /// </summary>
+    public void MarkBlocked(int zoneId, int x, int y)
+    {
+        _blockedPositions.Add((zoneId, x, y));
+    }
+
+    /// <summary>
+    /// Marks a position as permanently blocked (like X-Wing tiles). NOT cleared on zone change.
+    /// </summary>
+    public void MarkPermanentlyBlocked(int zoneId, int x, int y)
+    {
+        _permanentBlockedPositions.Add((zoneId, x, y));
+    }
+
+    /// <summary>
+    /// Clears temporary blocked positions (call when zone changes).
+    /// </summary>
+    public void ClearBlockedPositions(int newZoneId)
+    {
+        if (newZoneId != _currentZoneId)
+        {
+            _blockedPositions.Clear();
+            _currentZoneId = newZoneId;
+        }
+    }
+
+    /// <summary>
+    /// Checks if a position is in the blocklist (temporary OR permanent).
+    /// </summary>
+    public bool IsTemporarilyBlocked(int zoneId, int x, int y)
+    {
+        return _blockedPositions.Contains((zoneId, x, y)) ||
+               _permanentBlockedPositions.Contains((zoneId, x, y));
+    }
+
+    /// <summary>
     /// Finds a path from start to end position within a zone using A* algorithm.
     /// </summary>
     /// <returns>List of positions to follow, or null if no path exists.</returns>
-    public List<(int X, int Y)>? FindPath(Zone zone, int startX, int startY, int endX, int endY, List<NPC>? npcs = null)
+    public List<(int X, int Y)>? FindPath(Zone zone, int startX, int startY, int endX, int endY, List<NPC>? npcs = null, int? zoneId = null)
     {
+        // Clear blocklist if zone changed
+        if (zoneId.HasValue)
+            ClearBlockedPositions(zoneId.Value);
+
+        return FindPathInternal(zone, startX, startY, endX, endY, npcs, zoneId);
+    }
+
+    /// <summary>
+    /// Finds a path without clearing the blocklist. Use when recalculating after a blocked move.
+    /// </summary>
+    public List<(int X, int Y)>? FindPathWithoutClearing(Zone zone, int startX, int startY, int endX, int endY, List<NPC>? npcs = null, int? zoneId = null)
+    {
+        return FindPathInternal(zone, startX, startY, endX, endY, npcs, zoneId);
+    }
+
+    private List<(int X, int Y)>? FindPathInternal(Zone zone, int startX, int startY, int endX, int endY, List<NPC>? npcs, int? zoneId)
+    {
+
         // If already at destination
         if (startX == endX && startY == endY)
             return new List<(int X, int Y)>();
 
         // If target is not walkable, find nearest walkable position
-        if (!IsWalkable(zone, endX, endY, npcs))
+        if (!IsWalkable(zone, endX, endY, npcs, zoneId))
         {
-            var nearestWalkable = FindNearestWalkable(zone, endX, endY, npcs);
+            var nearestWalkable = FindNearestWalkable(zone, endX, endY, npcs, zoneId);
             if (nearestWalkable == null)
                 return null;
             (endX, endY) = nearestWalkable.Value;
@@ -75,7 +136,7 @@ public class Pathfinder
                 if (closedSet.Contains(neighborPos))
                     continue;
 
-                if (!IsWalkable(zone, nx, ny, npcs))
+                if (!IsWalkable(zone, nx, ny, npcs, zoneId))
                     continue;
 
                 int tentativeGScore = gScore[currentPos] + 1;
@@ -96,19 +157,25 @@ public class Pathfinder
     /// <summary>
     /// Checks if a position is walkable (no blocking tiles or NPCs).
     /// </summary>
-    public bool IsWalkable(Zone zone, int x, int y, List<NPC>? npcs = null)
+    public bool IsWalkable(Zone zone, int x, int y, List<NPC>? npcs = null, int? zoneId = null)
     {
         // Bounds check
         if (x < 0 || x >= zone.Width || y < 0 || y >= zone.Height)
             return false;
 
+        // Check temporary blocklist
+        if (zoneId.HasValue && IsTemporarilyBlocked(zoneId.Value, x, y))
+            return false;
+
         // Check middle layer for blocking tiles
+        // This must match TryMovePlayer's collision logic in GameEngine.cs
         var middleTile = zone.GetTile(x, y, 1);
         if (middleTile != 0xFFFF && middleTile < _gameData.Tiles.Count)
         {
             var tile = _gameData.Tiles[middleTile];
-            // Block if it's an object that isn't floor and isn't draggable
-            if (tile.IsObject && !tile.IsFloor && !tile.IsDraggable)
+            // Block if it's an object (matching game engine's IsObject check)
+            // Draggable objects can be pushed, so they're technically passable for pathfinding
+            if (tile.IsObject && !tile.IsDraggable)
                 return false;
         }
 
@@ -122,14 +189,8 @@ public class Pathfinder
             }
         }
 
-        // Also check top layer for blocking tiles
-        var topTile = zone.GetTile(x, y, 2);
-        if (topTile != 0xFFFF && topTile < _gameData.Tiles.Count)
-        {
-            var tile = _gameData.Tiles[topTile];
-            if (tile.IsObject && !tile.IsFloor)
-                return false;
-        }
+        // Note: Top layer (roofs) are non-colliding per TileFlags definition
+        // The game engine only checks middle layer for collision
 
         return true;
     }
@@ -137,9 +198,9 @@ public class Pathfinder
     /// <summary>
     /// Finds the nearest walkable position to the target.
     /// </summary>
-    public (int X, int Y)? FindNearestWalkable(Zone zone, int targetX, int targetY, List<NPC>? npcs = null)
+    public (int X, int Y)? FindNearestWalkable(Zone zone, int targetX, int targetY, List<NPC>? npcs = null, int? zoneId = null)
     {
-        if (IsWalkable(zone, targetX, targetY, npcs))
+        if (IsWalkable(zone, targetX, targetY, npcs, zoneId))
             return (targetX, targetY);
 
         // Search in expanding squares
@@ -155,7 +216,7 @@ public class Pathfinder
                     int x = targetX + dx;
                     int y = targetY + dy;
 
-                    if (IsWalkable(zone, x, y, npcs))
+                    if (IsWalkable(zone, x, y, npcs, zoneId))
                         return (x, y);
                 }
             }
@@ -184,7 +245,7 @@ public class Pathfinder
     /// Finds path to adjacent position next to target (for interaction).
     /// </summary>
     public (List<(int X, int Y)>? Path, (int X, int Y) FinalPos)? FindPathToAdjacent(
-        Zone zone, int startX, int startY, int targetX, int targetY, List<NPC>? npcs = null)
+        Zone zone, int startX, int startY, int targetX, int targetY, List<NPC>? npcs = null, int? zoneId = null)
     {
         // Try all adjacent positions to the target
         var adjacent = new (int dx, int dy)[] { (0, -1), (0, 1), (-1, 0), (1, 0) };
@@ -196,10 +257,10 @@ public class Pathfinder
             int adjX = targetX + dx;
             int adjY = targetY + dy;
 
-            if (!IsWalkable(zone, adjX, adjY, npcs))
+            if (!IsWalkable(zone, adjX, adjY, npcs, zoneId))
                 continue;
 
-            var path = FindPath(zone, startX, startY, adjX, adjY, npcs);
+            var path = FindPath(zone, startX, startY, adjX, adjY, npcs, zoneId);
             if (path != null && (bestPath == null || path.Count < bestPath.Count))
             {
                 bestPath = path;

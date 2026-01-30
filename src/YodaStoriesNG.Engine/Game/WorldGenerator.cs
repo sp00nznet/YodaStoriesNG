@@ -3,6 +3,27 @@ using YodaStoriesNG.Engine.Data;
 namespace YodaStoriesNG.Engine.Game;
 
 /// <summary>
+/// Sector types matching the original game's world generation.
+/// Each cell in the 10x10 grid has a sector type.
+/// </summary>
+public enum SectorType
+{
+    None,           // Unassigned
+    Empty,          // Regular walkable zone
+    Candidate,      // Potential puzzle location
+    Puzzle,         // Contains a puzzle
+    Spaceport,      // Landing zone with X-Wing
+    BlockNorth,     // Blockade requiring item (blocks north exit)
+    BlockSouth,     // Blockade requiring item (blocks south exit)
+    BlockEast,      // Blockade requiring item (blocks east exit)
+    BlockWest,      // Blockade requiring item (blocks west exit)
+    TravelStart,    // Vehicle travel origin
+    TravelEnd,      // Vehicle travel destination (island)
+    Island,         // Isolated area reached by travel
+    KeptFree        // Reserved space (no zone placed)
+}
+
+/// <summary>
 /// Generates a playable world by assembling zones into a connected map.
 /// Based on the Yoda Stories procedural generation system.
 /// </summary>
@@ -307,6 +328,9 @@ public class WorldGenerator
 
         // Set up item chain
         SetupItemChain();
+
+        // Print map visualization for debugging
+        CurrentWorld.PrintMapVisualization();
 
         return CurrentWorld;
     }
@@ -683,8 +707,20 @@ public class WorldGenerator
     {
         if (CurrentWorld == null || CurrentMission == null) return;
 
-        // Initialize grid
+        // Initialize grids
         CurrentWorld.Grid = new int?[GridSize, GridSize];
+        CurrentWorld.TypeMap = new SectorType[GridSize, GridSize];
+        CurrentWorld.OrderMap = new int[GridSize, GridSize];
+
+        // Initialize type map to None and order map to -1
+        for (int y = 0; y < GridSize; y++)
+        {
+            for (int x = 0; x < GridSize; x++)
+            {
+                CurrentWorld.TypeMap[y, x] = SectorType.None;
+                CurrentWorld.OrderMap[y, x] = -1;
+            }
+        }
 
         // Find outdoor zones matching the mission's planet type (18x18 only, not 9x9 rooms)
         var planetZones = _gameData.Zones
@@ -717,13 +753,27 @@ public class WorldGenerator
         int centerX = GridSize / 2 + _random.Next(-1, 1);
         int centerY = GridSize / 2 + _random.Next(-1, 1);
 
-        var landingZone = (townZones.Count > 0 ? townZones : emptyZones)[_random.Next(Math.Min(townZones.Count, emptyZones.Count) > 0 ? (townZones.Count > 0 ? townZones.Count : emptyZones.Count) : 1)];
-        if (townZones.Count > 0)
-            landingZone = townZones[_random.Next(townZones.Count)];
+        // CRITICAL: Only use zones that have an X-Wing landing spot (XWingToDagobah object)
+        // This ensures Luke can land properly with space for the X-Wing
+        var landingZones = planetZones
+            .Where(z => z.Objects.Any(o => o.Type == ZoneObjectType.XWingToDagobah))
+            .ToList();
+
+        Zone landingZone;
+        if (landingZones.Count > 0)
+        {
+            landingZone = landingZones[_random.Next(landingZones.Count)];
+            Console.WriteLine($"Selected landing zone {landingZone.Id} with X-Wing landing spot");
+        }
         else
-            landingZone = emptyZones[_random.Next(emptyZones.Count)];
+        {
+            // Fallback: use town or empty zone (but this shouldn't happen)
+            Console.WriteLine("WARNING: No zones with X-Wing landing spots found! Using fallback.");
+            landingZone = townZones.Count > 0 ? townZones[_random.Next(townZones.Count)] : emptyZones[_random.Next(emptyZones.Count)];
+        }
 
         CurrentWorld.Grid[centerY, centerX] = landingZone.Id;
+        CurrentWorld.TypeMap[centerY, centerX] = SectorType.Spaceport;
         CurrentWorld.LandingZoneId = landingZone.Id;
         CurrentWorld.LandingPosition = (centerX, centerY);
 
@@ -742,6 +792,8 @@ public class WorldGenerator
             } while (Math.Abs(goalX - centerX) + Math.Abs(goalY - centerY) < 2 || CurrentWorld.Grid[goalY, goalX] != null);
 
             CurrentWorld.Grid[goalY, goalX] = goalZone.Id;
+            CurrentWorld.TypeMap[goalY, goalX] = SectorType.Puzzle;  // Goal is a puzzle zone
+            CurrentWorld.OrderMap[goalY, goalX] = 999;  // High order = final goal
             CurrentWorld.ObjectiveZoneId = goalZone.Id;
             CurrentWorld.ObjectivePosition = (goalX, goalY);
             usedZones.Add(goalZone.Id);
@@ -772,6 +824,17 @@ public class WorldGenerator
             var (px, py) = candidates[_random.Next(candidates.Count)];
             var zone = availableZones[_random.Next(availableZones.Count)];
             CurrentWorld.Grid[py, px] = zone.Id;
+
+            // Assign sector type based on zone type
+            var sectorType = zone.Type switch
+            {
+                ZoneType.Trade or ZoneType.Use or ZoneType.Find => SectorType.Puzzle,
+                ZoneType.Town => SectorType.Empty,
+                ZoneType.Goal => SectorType.Puzzle,
+                _ => SectorType.Empty
+            };
+            CurrentWorld.TypeMap[py, px] = sectorType;
+
             usedZones.Add(zone.Id);
             availableZones.Remove(zone);
         }
@@ -1002,6 +1065,12 @@ public class WorldMap
     // Grid of zone IDs (null = empty cell)
     public int?[,]? Grid { get; set; }
 
+    // Type map - sector type for each grid cell
+    public SectorType[,]? TypeMap { get; set; }
+
+    // Order map - puzzle order index for each cell (-1 = no puzzle)
+    public int[,]? OrderMap { get; set; }
+
     // Special zone IDs
     public int StartingZoneId { get; set; }
     public int LandingZoneId { get; set; }
@@ -1072,6 +1141,132 @@ public class WorldMap
             return Mission.Description;
 
         return !string.IsNullOrEmpty(step.Hint) ? step.Hint : $"Find a way to progress.";
+    }
+
+    /// <summary>
+    /// Prints a visual representation of the world map to the console.
+    /// </summary>
+    public void PrintMapVisualization()
+    {
+        Console.WriteLine("\n╔════════════════════════════════════════════════════════════════════╗");
+        Console.WriteLine("║                    WORLD MAP VISUALIZATION                         ║");
+        Console.WriteLine("╠════════════════════════════════════════════════════════════════════╣");
+
+        // Legend
+        Console.WriteLine("║ Legend: · Empty  P Puzzle  S Spaceport  T Travel  I Island        ║");
+        Console.WriteLine("║         B Blockade  # KeptFree  ? None/Candidate  L Landing       ║");
+        Console.WriteLine("╠════════════════════════════════════════════════════════════════════╣");
+
+        if (TypeMap == null || Grid == null)
+        {
+            Console.WriteLine("║ No map data available                                              ║");
+            Console.WriteLine("╚════════════════════════════════════════════════════════════════════╝");
+            return;
+        }
+
+        // Print header row
+        Console.Write("║     ");
+        for (int x = 0; x < 10; x++)
+            Console.Write($"  {x}   ");
+        Console.WriteLine("║");
+        Console.WriteLine("║    ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐║");
+
+        for (int y = 0; y < 10; y++)
+        {
+            Console.Write($"║  {y} │");
+            for (int x = 0; x < 10; x++)
+            {
+                var sectorType = TypeMap[y, x];
+                var zoneId = Grid[y, x];
+                var orderIdx = OrderMap?[y, x] ?? -1;
+
+                // Determine display character and color
+                string cell = GetSectorDisplayString(sectorType, zoneId, orderIdx, x, y);
+                Console.Write(cell);
+                Console.Write("│");
+            }
+            Console.WriteLine("║");
+
+            if (y < 9)
+                Console.WriteLine("║    ├─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┤║");
+        }
+        Console.WriteLine("║    └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘║");
+
+        // Print statistics
+        Console.WriteLine("╠════════════════════════════════════════════════════════════════════╣");
+        var stats = GetMapStatistics();
+        Console.WriteLine($"║ Zones: {stats.TotalZones,3} | Puzzles: {stats.PuzzleCount,2} | Blockades: {stats.BlockadeCount,2} | Travels: {stats.TravelCount,2}   ║");
+        Console.WriteLine($"║ Landing Zone: {LandingZoneId,4} at ({LandingPosition.x},{LandingPosition.y})                               ║");
+        if (ObjectiveZoneId > 0)
+            Console.WriteLine($"║ Objective Zone: {ObjectiveZoneId,4} at ({ObjectivePosition.x},{ObjectivePosition.y})                             ║");
+        Console.WriteLine("╚════════════════════════════════════════════════════════════════════╝\n");
+    }
+
+    private string GetSectorDisplayString(SectorType type, int? zoneId, int orderIdx, int x, int y)
+    {
+        // Check for special positions
+        bool isLanding = (x == LandingPosition.x && y == LandingPosition.y);
+        bool isObjective = (x == ObjectivePosition.x && y == ObjectivePosition.y);
+
+        if (isLanding)
+            return "  L  ";
+        if (isObjective)
+            return " *G* ";
+
+        return type switch
+        {
+            SectorType.None => "     ",
+            SectorType.Empty => zoneId.HasValue ? $" {zoneId.Value,3} " : "  ·  ",
+            SectorType.Candidate => "  ?  ",
+            SectorType.Puzzle => orderIdx >= 0 ? $" P{orderIdx,2} " : " P?? ",
+            SectorType.Spaceport => "  S  ",
+            SectorType.BlockNorth => " B↑  ",
+            SectorType.BlockSouth => " B↓  ",
+            SectorType.BlockEast => " B→  ",
+            SectorType.BlockWest => " B←  ",
+            SectorType.TravelStart => " T→  ",
+            SectorType.TravelEnd => " ←T  ",
+            SectorType.Island => "  I  ",
+            SectorType.KeptFree => "  #  ",
+            _ => "  ?  "
+        };
+    }
+
+    /// <summary>
+    /// Gets statistics about the generated map.
+    /// </summary>
+    public (int TotalZones, int PuzzleCount, int BlockadeCount, int TravelCount) GetMapStatistics()
+    {
+        if (TypeMap == null) return (0, 0, 0, 0);
+
+        int totalZones = 0, puzzles = 0, blockades = 0, travels = 0;
+
+        for (int y = 0; y < 10; y++)
+        {
+            for (int x = 0; x < 10; x++)
+            {
+                var type = TypeMap[y, x];
+                if (Grid?[y, x] != null) totalZones++;
+
+                switch (type)
+                {
+                    case SectorType.Puzzle:
+                        puzzles++;
+                        break;
+                    case SectorType.BlockNorth:
+                    case SectorType.BlockSouth:
+                    case SectorType.BlockEast:
+                    case SectorType.BlockWest:
+                        blockades++;
+                        break;
+                    case SectorType.TravelStart:
+                        travels++;
+                        break;
+                }
+            }
+        }
+
+        return (totalZones, puzzles, blockades, travels);
     }
 }
 

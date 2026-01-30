@@ -808,8 +808,10 @@ public class DtaParser
         if (nameEnd > 10)
             character.Name = System.Text.Encoding.ASCII.GetString(data, 10, nameEnd - 10);
 
-        // Character type at byte 4
-        character.Type = (CharacterType)data[4];
+        // Character type at byte 4 - but this doesn't parse correctly for Yoda Stories
+        // The values are all 72 (0x48) which doesn't match our enum
+        // So we infer type from character name instead
+        character.Type = InferCharacterType(character.Name, index);
 
         // Directional tile IDs at bytes 36-47 (6 directions x 2 bytes)
         var frames = new CharacterFrames();
@@ -831,6 +833,57 @@ public class DtaParser
         character.Frames = frames;
 
         return character;
+    }
+
+    /// <summary>
+    /// Infers character type from name since the data file type field doesn't parse correctly.
+    /// </summary>
+    private CharacterType InferCharacterType(string name, int index)
+    {
+        // Luke Skywalker is the hero (usually character 0)
+        if (index == 0 || name.Contains("Luke", StringComparison.OrdinalIgnoreCase))
+            return CharacterType.Hero;
+
+        var nameLower = name.ToLowerInvariant();
+
+        // Enemy patterns - Stormtroopers, monsters, droids, bounty hunters
+        string[] enemyPatterns = {
+            "trooper", "st-", "wampa", "probot", "fett", "greedo", "tuscan", "tusken",
+            "sarlacc", "rancor", "scorpion", "bug", "beetle", "droid", "mine", "tank",
+            "gurk", "jawa", "enemy", "attack", "hard", "patrol", "generator",
+            "ree yees", "invisi", "boushh", "snowstar", "icebug", "sandworm", "timer"
+        };
+
+        foreach (var pattern in enemyPatterns)
+        {
+            if (nameLower.Contains(pattern))
+                return CharacterType.Enemy;
+        }
+
+        // Friendly patterns
+        string[] friendlyPatterns = {
+            "ewok", "snowman", "blank"
+        };
+
+        foreach (var pattern in friendlyPatterns)
+        {
+            if (nameLower.Contains(pattern))
+                return CharacterType.Friendly;
+        }
+
+        // Weapons/items are not NPCs - treat as friendly (won't be spawned anyway)
+        string[] weaponPatterns = {
+            "blaster", "rifle", "saber", "force", "thermal", "det"
+        };
+
+        foreach (var pattern in weaponPatterns)
+        {
+            if (nameLower.Contains(pattern))
+                return CharacterType.Friendly;
+        }
+
+        // Default to friendly for unknown characters
+        return CharacterType.Friendly;
     }
 
     private void ParseCharacterWeaponsSection(uint length)
