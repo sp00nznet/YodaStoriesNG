@@ -48,11 +48,17 @@ dotnet run --project src/YodaStoriesNG.Engine
 | Key | Action |
 |-----|--------|
 | **WASD** / **Arrow Keys** | Move |
+| **Shift + Move** | Pull blocks |
 | **Space** | Action / Talk / Attack |
 | **1-8** | Select inventory item |
 | **Tab** | Toggle weapon |
 | **O** | Show mission objective |
 | **X** | Travel (X-Wing) |
+| **B** | Toggle Bot (auto-play) |
+| **I** | Inspect (debug dump to console) |
+| **F** | Find zone with NPCs/items |
+| **M** | Toggle sound mute |
+| **N/P** | Next/Previous zone (debug) |
 | **R** | Restart game |
 | **Escape** | Quit |
 
@@ -80,18 +86,26 @@ Place the file in the `data/` folder or run the game from the directory containi
 ```
 YodaStoriesNG/
 ├── src/
-│   └── YodaStoriesNG.Engine/
-│       ├── Audio/           # Sound playback
-│       ├── Data/            # Game data structures
-│       ├── Game/            # Game logic
-│       │   ├── GameEngine.cs
-│       │   ├── GameState.cs
-│       │   ├── WorldGenerator.cs
-│       │   ├── ActionExecutor.cs
-│       │   └── NPC.cs
-│       ├── Parsing/         # DTA file parser
-│       ├── Rendering/       # SDL2 renderer
-│       └── UI/              # Message system
+│   ├── YodaStoriesNG.Engine/
+│   │   ├── Audio/           # Sound playback
+│   │   ├── Bot/             # Automated mission bot
+│   │   │   ├── MissionBot.cs
+│   │   │   ├── BotActions.cs
+│   │   │   ├── MissionSolver.cs
+│   │   │   └── Pathfinder.cs
+│   │   ├── Data/            # Game data structures
+│   │   ├── Debug/           # Debug tools
+│   │   │   └── DebugTools.cs
+│   │   ├── Game/            # Game logic
+│   │   │   ├── GameEngine.cs
+│   │   │   ├── GameState.cs
+│   │   │   ├── WorldGenerator.cs
+│   │   │   ├── ActionExecutor.cs
+│   │   │   └── NPC.cs
+│   │   ├── Parsing/         # DTA file parser
+│   │   ├── Rendering/       # SDL2 renderer
+│   │   └── UI/              # Message system
+│   └── IndyNG.Engine/       # Indiana Jones engine (WIP)
 └── README.md
 ```
 
@@ -105,7 +119,7 @@ YodaStoriesNG/
 - NPC spawning and AI (wandering, chasing)
 - Combat system (melee attacks, health, damage)
 - Inventory management
-- Weapon system
+- Weapon system (lightsaber, blaster, The Force)
 - Zone transitions (doors, edge scrolling)
 - X-Wing travel between Dagobah and planets
 - Action script execution (IACT)
@@ -115,19 +129,42 @@ YodaStoriesNG/
 - IZAX entity parsing (NPC item handoff)
 - Widescreen UI layout
 - Xbox controller support
+- **Automated Mission Bot** - A* pathfinding, auto-combat, item collection
+- **Debug Tools** - IACT script viewer, game state inspector
+- **World Map Visualizer** - Shows 10x10 sector grid with zone types
 
 ### In Progress
 
+- Two-strain puzzle system (matching WebFun)
+- 15 mission progression cycle
 - Full mission chain validation
 - Save/load game state
-- All action script opcodes
 
 ### Planned
 
-- Map editor tool
+- Map editor GUI
 - Mobile/portrait mode UI
 - Additional puzzle types
 - Mod support
+
+## Debug Tools
+
+Press **I** in-game to dump debug information to the console:
+
+- **Game State**: Current zone, player position, health
+- **Zone Info**: All objects, NPCs, tiles at player position
+- **IACT Scripts**: Full dump of zone action scripts with conditions and instructions
+- **Inventory**: Items and weapons with selected/equipped status
+- **Mission Progress**: Puzzle chain status and hints
+
+The **World Map Visualizer** is printed on startup showing the 10x10 sector grid:
+```
+╔════════════════════════════════════════════════════════════════════╗
+║                    WORLD MAP VISUALIZATION                         ║
+║ Legend: · Empty  P Puzzle  S Spaceport  T Travel  I Island        ║
+╠════════════════════════════════════════════════════════════════════╣
+║     │  0   │  1   │  2   │  3   │  4   │  5   │  6   │  7   │...
+```
 
 ## Technical Details
 
