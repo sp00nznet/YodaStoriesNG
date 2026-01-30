@@ -281,7 +281,7 @@ public class WorldGenerator
     /// </summary>
     public WorldMap GenerateWorld()
     {
-        // Pick a random mission (goal puzzle)
+        // Pick a random mission (goal puzzle) - but don't build puzzle chain yet
         CurrentMission = SelectRandomMission();
         Console.WriteLine($"Selected mission: {CurrentMission.Name} on {CurrentMission.Planet}");
 
@@ -298,10 +298,39 @@ public class WorldGenerator
         // Generate the main planet grid
         GeneratePlanetGrid();
 
+        // NOW build the puzzle chain - after grid is generated so we know which zones exist
+        if (CurrentMission.GoalPuzzle != null)
+        {
+            BuildPuzzleChain(CurrentMission, CurrentMission.GoalPuzzle);
+            LogMissionDetails(CurrentMission);
+        }
+
         // Set up item chain
         SetupItemChain();
 
         return CurrentWorld;
+    }
+
+    /// <summary>
+    /// Logs mission details to console.
+    /// </summary>
+    private void LogMissionDetails(Mission mission)
+    {
+        Console.WriteLine($"\n=== MISSION: {mission.Name} ===");
+        Console.WriteLine($"Planet: {mission.Planet}");
+        Console.WriteLine($"Goal: {mission.Description}");
+        Console.WriteLine($"Puzzle chain ({mission.PuzzleChain.Count} steps):");
+        for (int i = 0; i < mission.PuzzleChain.Count; i++)
+        {
+            var step = mission.PuzzleChain[i];
+            var reqItem = GetItemName(step.RequiredItemId);
+            var rewItem = GetItemName(step.RewardItemId);
+            var zoneInfo = step.ZoneId.HasValue ? $" [Zone {step.ZoneId}]" : "";
+            Console.WriteLine($"  {i + 1}. [{step.Puzzle.Type}] Need: {reqItem} -> Get: {rewItem}{zoneInfo}");
+            if (!string.IsNullOrEmpty(step.Hint))
+                Console.WriteLine($"     Hint: {step.Hint}");
+        }
+        Console.WriteLine();
     }
 
     /// <summary>
@@ -335,24 +364,7 @@ public class WorldGenerator
             GoalPuzzle = goalPuzzle
         };
 
-        // Build the puzzle chain leading to the goal
-        BuildPuzzleChain(mission, goalPuzzle);
-
-        // Log mission details
-        Console.WriteLine($"\n=== MISSION: {mission.Name} ===");
-        Console.WriteLine($"Planet: {mission.Planet}");
-        Console.WriteLine($"Goal: {mission.Description}");
-        Console.WriteLine($"Puzzle chain ({mission.PuzzleChain.Count} steps):");
-        for (int i = 0; i < mission.PuzzleChain.Count; i++)
-        {
-            var step = mission.PuzzleChain[i];
-            var reqItem = GetItemName(step.RequiredItemId);
-            var rewItem = GetItemName(step.RewardItemId);
-            Console.WriteLine($"  {i + 1}. [{step.Puzzle.Type}] Need: {reqItem} -> Get: {rewItem}");
-            if (!string.IsNullOrEmpty(step.Hint))
-                Console.WriteLine($"     Hint: {step.Hint}");
-        }
-        Console.WriteLine();
+        // NOTE: Puzzle chain will be built later in GenerateWorld() after grid is generated
 
         return mission;
     }
@@ -407,80 +419,136 @@ public class WorldGenerator
     }
 
     /// <summary>
-    /// Builds the puzzle chain for a mission based on the goal puzzle.
+    /// Builds the puzzle chain for a mission based on zone objects.
+    /// Since puzzle data parsing is unreliable, we scan zones for items and NPCs.
+    /// Each step includes the specific zone where the item/NPC can be found.
+    /// Only uses zones that are in the generated world grid.
     /// </summary>
     private void BuildPuzzleChain(Mission mission, Puzzle goalPuzzle)
     {
-        // Get all non-goal puzzles that can be used in the chain
-        var tradePuzzles = _gameData.Puzzles.Where(p => p.Type == PuzzleType.Trade).ToList();
-        var usePuzzles = _gameData.Puzzles.Where(p => p.Type == PuzzleType.Use).ToList();
-        var questPuzzles = _gameData.Puzzles.Where(p => p.Type == PuzzleType.Quest).ToList();
-
-        // The goal puzzle defines what item is needed to complete the mission
-        var goalItemId = goalPuzzle.Item1;
-
-        // Work backwards from the goal to build the chain
-        var currentNeededItem = goalItemId;
-        var usedPuzzles = new HashSet<int>();
         var chainSteps = new List<PuzzleStep>();
 
-        // Add the final goal step
-        chainSteps.Add(new PuzzleStep
+        // Get the set of zone IDs that are actually in our generated world
+        var worldZoneIds = new HashSet<int>();
+        if (CurrentWorld?.Grid != null)
         {
-            Puzzle = goalPuzzle,
-            RequiredItemId = goalItemId,
-            RewardItemId = 0,  // Mission complete!
-            Hint = goalPuzzle.Strings.Count > 1 ? goalPuzzle.Strings[1] : "Complete the mission."
-        });
-
-        // Try to find puzzles that give us what we need (working backwards)
-        int maxSteps = 5;  // Limit chain length
-        for (int i = 0; i < maxSteps && currentNeededItem > 0; i++)
-        {
-            // Look for a puzzle that rewards the item we need
-            Puzzle? sourcePuzzle = null;
-
-            // First try trade puzzles (item2 is reward)
-            sourcePuzzle = tradePuzzles
-                .Where(p => p.Item2 == currentNeededItem && !usedPuzzles.Contains(p.Id))
-                .OrderBy(_ => _random.Next())
-                .FirstOrDefault();
-
-            // Then try use puzzles
-            if (sourcePuzzle == null)
+            for (int y = 0; y < GridSize; y++)
             {
-                sourcePuzzle = usePuzzles
-                    .Where(p => p.Item2 == currentNeededItem && !usedPuzzles.Contains(p.Id))
-                    .OrderBy(_ => _random.Next())
-                    .FirstOrDefault();
-            }
-
-            // Then try quest puzzles
-            if (sourcePuzzle == null)
-            {
-                sourcePuzzle = questPuzzles
-                    .Where(p => p.Item2 == currentNeededItem && !usedPuzzles.Contains(p.Id))
-                    .OrderBy(_ => _random.Next())
-                    .FirstOrDefault();
-            }
-
-            if (sourcePuzzle != null)
-            {
-                usedPuzzles.Add(sourcePuzzle.Id);
-                chainSteps.Insert(0, new PuzzleStep
+                for (int x = 0; x < GridSize; x++)
                 {
-                    Puzzle = sourcePuzzle,
-                    RequiredItemId = sourcePuzzle.Item1,
-                    RewardItemId = sourcePuzzle.Item2,
-                    Hint = sourcePuzzle.Strings.FirstOrDefault() ?? ""
-                });
-                currentNeededItem = sourcePuzzle.Item1;
+                    if (CurrentWorld.Grid[y, x].HasValue)
+                        worldZoneIds.Add(CurrentWorld.Grid[y, x]!.Value);
+                }
             }
-            else
+        }
+
+        // Find item-bearing objects ONLY in zones that are in the world grid
+        var planetZones = _gameData.Zones
+            .Where(z => z.Planet == mission.Planet && z.Width > 0 && worldZoneIds.Contains(z.Id))
+            .ToList();
+
+        Console.WriteLine($"BuildPuzzleChain: {worldZoneIds.Count} zones in world, {planetZones.Count} planet zones to scan");
+
+        // Collect items with their zone locations
+        var itemLocations = new List<(int ItemId, int ZoneId, int X, int Y)>();
+        var npcZones = new List<(int ZoneId, int CharacterId, int X, int Y)>();
+
+        foreach (var zone in planetZones)
+        {
+            foreach (var obj in zone.Objects)
             {
-                // No more puzzles in the chain, this is where Yoda gives the starting item
-                break;
+                if (obj.Type == ZoneObjectType.CrateItem || obj.Type == ZoneObjectType.LocatorItem)
+                {
+                    if (obj.Argument > 0 && obj.Argument < _gameData.Tiles.Count)
+                    {
+                        itemLocations.Add((obj.Argument, zone.Id, obj.X, obj.Y));
+                    }
+                }
+                else if (obj.Type == ZoneObjectType.PuzzleNPC)
+                {
+                    npcZones.Add((zone.Id, obj.Argument, obj.X, obj.Y));
+                }
             }
+
+            // Also check IZAX entity data for NPCs with items
+            if (zone.AuxData?.Entities != null)
+            {
+                foreach (var entity in zone.AuxData.Entities)
+                {
+                    if (entity.ItemTileId > 0 && entity.ItemTileId != 0xFFFF)
+                    {
+                        itemLocations.Add((entity.ItemTileId, zone.Id, entity.X, entity.Y));
+                    }
+                    if (entity.CharacterId > 0 && entity.CharacterId != 0xFFFF)
+                    {
+                        npcZones.Add((zone.Id, entity.CharacterId, entity.X, entity.Y));
+                    }
+                }
+            }
+        }
+
+        // Shuffle and take a subset
+        itemLocations = itemLocations.OrderBy(_ => _random.Next()).Take(5).ToList();
+        npcZones = npcZones.OrderBy(_ => _random.Next()).ToList();
+
+        // Build a puzzle chain with specific zone locations
+        if (itemLocations.Count >= 2)
+        {
+            // Step 1: Find first item at a specific location
+            var firstItem = itemLocations[0];
+            chainSteps.Add(new PuzzleStep
+            {
+                Puzzle = new Puzzle { Type = PuzzleType.Quest, Strings = { "Find an item" } },
+                RequiredItemId = 0,  // No item required - just find it
+                RewardItemId = firstItem.ItemId,
+                ZoneId = firstItem.ZoneId,
+                TargetX = firstItem.X,
+                TargetY = firstItem.Y,
+                Hint = $"Search zone {firstItem.ZoneId} for useful items."
+            });
+
+            // Steps 2-N: Trade items with NPCs at specific zones
+            for (int i = 0; i < itemLocations.Count - 1; i++)
+            {
+                var npcZone = npcZones.Count > i ? npcZones[i] : (ZoneId: itemLocations[i + 1].ZoneId, CharacterId: 0, X: 0, Y: 0);
+                var nextItem = itemLocations[i + 1];
+
+                chainSteps.Add(new PuzzleStep
+                {
+                    Puzzle = new Puzzle { Type = PuzzleType.Trade, Strings = { "Trade with someone" } },
+                    RequiredItemId = itemLocations[i].ItemId,
+                    RewardItemId = nextItem.ItemId,
+                    ZoneId = npcZone.ZoneId,
+                    TargetX = npcZone.X,
+                    TargetY = npcZone.Y,
+                    Hint = $"Find someone in zone {npcZone.ZoneId} who needs this item."
+                });
+            }
+
+            // Final step: Complete goal
+            var goalZone = npcZones.Count > 0 ? npcZones[^1] : (ZoneId: itemLocations[^1].ZoneId, CharacterId: 0, X: 0, Y: 0);
+            chainSteps.Add(new PuzzleStep
+            {
+                Puzzle = goalPuzzle,
+                RequiredItemId = itemLocations[^1].ItemId,
+                RewardItemId = 0,  // Mission complete!
+                ZoneId = goalZone.ZoneId,
+                TargetX = goalZone.X,
+                TargetY = goalZone.Y,
+                Hint = goalPuzzle.Strings.Count > 1 ? goalPuzzle.Strings[1] : "Complete your mission."
+            });
+        }
+        else
+        {
+            // Fallback: simple exploration mission
+            chainSteps.Add(new PuzzleStep
+            {
+                Puzzle = goalPuzzle,
+                RequiredItemId = 0,
+                RewardItemId = 0,
+                ZoneId = CurrentWorld?.LandingZoneId,
+                Hint = "Explore the planet and find what you need."
+            });
         }
 
         mission.PuzzleChain = chainSteps;
@@ -1023,6 +1091,8 @@ public class PuzzleStep
     public int RequiredItemId { get; set; }  // Item needed to complete this step
     public int RewardItemId { get; set; }    // Item received upon completion
     public int? ZoneId { get; set; }         // Zone where this puzzle is solved
+    public int TargetX { get; set; }         // X position in the zone
+    public int TargetY { get; set; }         // Y position in the zone
     public string Hint { get; set; } = "";   // Hint text for the player
     public bool IsCompleted { get; set; } = false;
 }

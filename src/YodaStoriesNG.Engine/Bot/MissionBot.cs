@@ -274,12 +274,40 @@ public class MissionBot
         if (_actions.IsCompleted)
         {
             _actions.Reset();
+
+            // Check if we have a pending zone exit direction - if so, try to walk off the edge
+            if (_pendingZoneExitDirection.HasValue && _state.CurrentZone != null)
+            {
+                var dir = _pendingZoneExitDirection.Value;
+                // Use same threshold as MoveToZoneEdge (<=2 from edge)
+                bool atEdge = dir switch
+                {
+                    Direction.Up => _state.PlayerY <= 2,
+                    Direction.Down => _state.PlayerY >= _state.CurrentZone.Height - 3,
+                    Direction.Left => _state.PlayerX <= 2,
+                    Direction.Right => _state.PlayerX >= _state.CurrentZone.Width - 3,
+                    _ => false
+                };
+
+                if (atEdge)
+                {
+                    // Check if there's a connected zone in this direction
+                    var connected = _worldGenerator.GetConnectedZone(_state.CurrentZoneId, dir);
+                    Console.WriteLine($"[BOT] At edge, walking {dir}. Connected zone: {connected?.ToString() ?? "none"}");
+                    OnActionRequested?.Invoke(BotActionType.Move, 0, 0, dir);
+                    _pendingZoneExitDirection = null;
+                    return; // Stay in executing state for zone transition
+                }
+            }
+
+            _pendingZoneExitDirection = null;
             _currentState = BotState.ThinkingAboutObjective;
             _explorationAttempts = 0;
         }
         else if (!_actions.IsBusy)
         {
             // Action finished without completing - go back to thinking
+            _pendingZoneExitDirection = null;
             _currentState = BotState.ThinkingAboutObjective;
         }
     }
@@ -467,34 +495,69 @@ public class MissionBot
         TryChangeZone();
     }
 
+    // Track the direction we're trying to exit
+    private Direction? _pendingZoneExitDirection;
+
     private void MoveToZoneEdge(Direction dir)
     {
         if (_state.CurrentZone == null) return;
 
         int targetX = _state.PlayerX;
         int targetY = _state.PlayerY;
+        int edgeY = 0, edgeX = 0;
 
         switch (dir)
         {
             case Direction.Up:
-                targetY = 0;
+                targetY = 1;  // Move to Y=1 first (Y=0 might be blocked)
+                edgeY = 0;
+                edgeX = _state.PlayerX;
                 break;
             case Direction.Down:
-                targetY = _state.CurrentZone.Height - 1;
+                targetY = _state.CurrentZone.Height - 2;  // Y=height-2
+                edgeY = _state.CurrentZone.Height - 1;
+                edgeX = _state.PlayerX;
                 break;
             case Direction.Left:
-                targetX = 0;
+                targetX = 1;  // X=1
+                edgeX = 0;
+                edgeY = _state.PlayerY;
                 break;
             case Direction.Right:
-                targetX = _state.CurrentZone.Width - 1;
+                targetX = _state.CurrentZone.Width - 2;  // X=width-2
+                edgeX = _state.CurrentZone.Width - 1;
+                edgeY = _state.PlayerY;
                 break;
         }
 
-        // Find nearest walkable position at edge
-        var nearest = _pathfinder.FindNearestWalkable(_state.CurrentZone, targetX, targetY, _state.ZoneNPCs);
-        if (nearest.HasValue)
+        // Store the direction for when we reach the edge
+        _pendingZoneExitDirection = dir;
+
+        // Check if we're already near the edge
+        bool nearEdge = dir switch
         {
-            _actions.MoveTo(nearest.Value.X, nearest.Value.Y);
+            Direction.Up => _state.PlayerY <= 2,
+            Direction.Down => _state.PlayerY >= _state.CurrentZone.Height - 3,
+            Direction.Left => _state.PlayerX <= 2,
+            Direction.Right => _state.PlayerX >= _state.CurrentZone.Width - 3,
+            _ => false
+        };
+
+        if (nearEdge)
+        {
+            // Already near edge - just walk in that direction to exit
+            var connected = _worldGenerator.GetConnectedZone(_state.CurrentZoneId, dir);
+            Console.WriteLine($"[BOT] At edge, walking {dir} to exit zone {_state.CurrentZoneId}. Connected zone: {connected?.ToString() ?? "none"}");
+            OnActionRequested?.Invoke(BotActionType.Move, 0, 0, dir);
+        }
+        else
+        {
+            // Move toward edge first
+            var nearest = _pathfinder.FindNearestWalkable(_state.CurrentZone, targetX, targetY, _state.ZoneNPCs);
+            if (nearest.HasValue)
+            {
+                _actions.MoveTo(nearest.Value.X, nearest.Value.Y);
+            }
         }
     }
 

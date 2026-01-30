@@ -696,28 +696,42 @@ public class DtaParser
 
     private void ParsePuzzlesSection(uint length)
     {
-        var endPos = _reader.BaseStream.Position + length;
+        var startPos = _reader.BaseStream.Position;
+        var endPos = startPos + length;
         int puzzleId = 0;
 
-        while (_reader.BaseStream.Position < endPos - 4)
+        // First, read the puzzle count (2 bytes)
+        var puzzleCount = _reader.ReadUInt16();
+        Console.WriteLine($"PUZ2 section: expecting {puzzleCount} puzzles");
+
+        while (_reader.BaseStream.Position < endPos - 4 && puzzleId < puzzleCount)
         {
+            // Look for IPUZ marker (similar to IZON in zones)
+            var markerPos = _reader.BaseStream.Position;
+            var markerBytes = _reader.ReadBytes(4);
+            var marker = System.Text.Encoding.ASCII.GetString(markerBytes);
+
+            if (marker != "IPUZ")
+            {
+                // Not at IPUZ marker, try to find it
+                _reader.BaseStream.Seek(markerPos + 1, SeekOrigin.Begin);
+                continue;
+            }
+
+            // Found IPUZ marker - read puzzle size
+            var puzzleSize = _reader.ReadUInt32();
+            var puzzleDataStart = _reader.BaseStream.Position;
+
             var puzzle = new Puzzle { Id = puzzleId++ };
 
-            // Read puzzle header (variable format, read cautiously)
-            var marker = _reader.ReadUInt32();
-            if (marker == 0xFFFFFFFF || _reader.BaseStream.Position >= endPos)
-                break;
-
-            _reader.BaseStream.Seek(-4, SeekOrigin.Current);
-
-            // PUZ2 format:
+            // IPUZ format (after size):
             // - 2 bytes: puzzle type (0=Quest, 1=Transport, 2=Trade, 3=Use, 4=Goal)
-            // - 2 bytes: item1 (required item or NPC)
-            // - 2 bytes: item2 (reward item or destination)
-            // - 2 bytes: unknown (possibly flags or zone reference)
-            // - 2 bytes: unknown (possibly planet or difficulty)
+            // - 2 bytes: item1 (item to bring/find)
+            // - 2 bytes: item2 (reward item or NPC tile)
+            // - 2 bytes: unknown flags
+            // - 2 bytes: unknown (possibly planet)
             // - 5 strings (length-prefixed)
-            var puzzleType = _reader.ReadInt16();
+            var puzzleType = _reader.ReadUInt16();
             puzzle.Type = (PuzzleType)puzzleType;
             puzzle.Item1 = _reader.ReadUInt16();
             puzzle.Item2 = _reader.ReadUInt16();
@@ -725,25 +739,33 @@ public class DtaParser
             var unknown3 = _reader.ReadUInt16();
 
             // Read puzzle strings (5 strings typically)
-            // String 0: Puzzle name/description
-            // String 1: Hint or goal text
-            // String 2-4: Additional dialogue/text
+            // String 0: Puzzle name/description (e.g., "Give MUSHROOM to YODA")
+            // String 1: Hint text
+            // String 2-4: Additional dialogue
             for (int i = 0; i < 5; i++)
             {
+                if (_reader.BaseStream.Position >= puzzleDataStart + puzzleSize)
+                    break;
+
                 var strLen = _reader.ReadUInt16();
-                if (strLen > 0 && strLen < 1000) // Sanity check
+                if (strLen > 0 && strLen < 1000)
                 {
                     var strBytes = _reader.ReadBytes(strLen);
                     puzzle.Strings.Add(System.Text.Encoding.ASCII.GetString(strBytes).TrimEnd('\0'));
                 }
-                else if (strLen >= 1000)
+                else if (strLen == 0)
                 {
-                    // Invalid length, likely parsing error
-                    _reader.BaseStream.Seek(-2, SeekOrigin.Current);
+                    puzzle.Strings.Add("");
+                }
+                else
+                {
+                    // Invalid length, skip rest
                     break;
                 }
             }
 
+            // Skip to end of this puzzle's data
+            _reader.BaseStream.Seek(puzzleDataStart + puzzleSize, SeekOrigin.Begin);
             _data.Puzzles.Add(puzzle);
         }
 

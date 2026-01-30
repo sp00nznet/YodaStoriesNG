@@ -161,6 +161,34 @@ public class MissionSolver
             };
         }
 
+        // Check if we need to change zones to reach the target
+        if (currentStep.ZoneId.HasValue && currentStep.ZoneId.Value != _state.CurrentZoneId)
+        {
+            // Need to navigate to target zone
+            var dir = GetDirectionToAdjacentZone(currentStep.ZoneId.Value);
+            if (dir.HasValue)
+            {
+                return new BotObjective
+                {
+                    Type = ObjectiveType.ChangeZone,
+                    Description = $"Go to zone {currentStep.ZoneId.Value}",
+                    TargetZoneId = currentStep.ZoneId.Value,
+                    Direction = dir.Value
+                };
+            }
+            else
+            {
+                // Target zone not adjacent - explore toward it
+                return new BotObjective
+                {
+                    Type = ObjectiveType.Explore,
+                    Description = $"Navigate toward zone {currentStep.ZoneId.Value}"
+                };
+            }
+        }
+
+        // We're in the target zone (or no specific zone required)
+
         // Check if we have the required item for this step
         if (currentStep.RequiredItemId > 0)
         {
@@ -171,16 +199,107 @@ public class MissionSolver
             }
             else
             {
-                // Need to find the item
+                // Need to find the item - check at specific location first
+                if (currentStep.TargetX > 0 || currentStep.TargetY > 0)
+                {
+                    return new BotObjective
+                    {
+                        Type = ObjectiveType.PickupItem,
+                        Description = $"Pick up item at ({currentStep.TargetX},{currentStep.TargetY})",
+                        TargetX = currentStep.TargetX,
+                        TargetY = currentStep.TargetY,
+                        RequiredItemId = currentStep.RequiredItemId
+                    };
+                }
                 return CreateFindItemObjective(currentStep.RequiredItemId);
             }
         }
 
-        // No required item - explore
+        // No specific required item - go to target location if specified
+        if (currentStep.TargetX > 0 || currentStep.TargetY > 0)
+        {
+            // Check for items at target location
+            var itemAtTarget = FindAnyItemInCurrentZone();
+            if (itemAtTarget != null)
+            {
+                return new BotObjective
+                {
+                    Type = ObjectiveType.PickupItem,
+                    Description = $"Pick up item at ({itemAtTarget.X},{itemAtTarget.Y})",
+                    TargetX = itemAtTarget.X,
+                    TargetY = itemAtTarget.Y
+                };
+            }
+        }
+
+        // Priority 1: If we have ANY items, try to use them on friendly NPCs
+        if (_state.Inventory.Count > 0)
+        {
+            var friendlyNpc = FindNearestFriendlyNpc();
+            if (friendlyNpc != null)
+            {
+                var itemToUse = _state.Inventory.FirstOrDefault();
+                if (itemToUse > 0)
+                {
+                    return new BotObjective
+                    {
+                        Type = ObjectiveType.UseItemOnNpc,
+                        Description = $"Try using item on NPC",
+                        TargetNpc = friendlyNpc,
+                        TargetX = friendlyNpc.X,
+                        TargetY = friendlyNpc.Y,
+                        RequiredItemId = itemToUse
+                    };
+                }
+            }
+        }
+
+        // Priority 2: Talk to any friendly NPC (might get items or advance quest)
+        var talkableNpc = FindNearestFriendlyNpc();
+        if (talkableNpc != null)
+        {
+            return new BotObjective
+            {
+                Type = ObjectiveType.TalkToNpc,
+                Description = "Talk to NPC",
+                TargetNpc = talkableNpc,
+                TargetX = talkableNpc.X,
+                TargetY = talkableNpc.Y
+            };
+        }
+
+        // Priority 3: Pick up any items in the zone
+        var anyItem = FindAnyItemInCurrentZone();
+        if (anyItem != null)
+        {
+            return new BotObjective
+            {
+                Type = ObjectiveType.PickupItem,
+                Description = $"Pick up item at ({anyItem.X},{anyItem.Y})",
+                TargetX = anyItem.X,
+                TargetY = anyItem.Y
+            };
+        }
+
+        // Priority 4: Kill any enemies blocking progress
+        var enemy = FindNearestEnemy();
+        if (enemy != null)
+        {
+            return new BotObjective
+            {
+                Type = ObjectiveType.KillEnemy,
+                Description = "Defeat enemy",
+                TargetNpc = enemy,
+                TargetX = enemy.X,
+                TargetY = enemy.Y
+            };
+        }
+
+        // Priority 5: Explore to find more stuff
         return new BotObjective
         {
             Type = ObjectiveType.Explore,
-            Description = "Explore to find next objective"
+            Description = "Explore to find objectives"
         };
     }
 
@@ -297,11 +416,13 @@ public class MissionSolver
 
     /// <summary>
     /// Finds any collectable item in the current zone.
+    /// Checks both zone objects (crates) and items placed in the tile grid.
     /// </summary>
     private ZoneObject? FindAnyItemInCurrentZone()
     {
         if (_state.CurrentZone == null) return null;
 
+        // First check zone objects (crates, locators)
         foreach (var obj in _state.CurrentZone.Objects)
         {
             if ((obj.Type == ZoneObjectType.CrateItem ||
@@ -312,6 +433,39 @@ public class MissionSolver
                 return obj;
             }
         }
+
+        // Also scan the tile grid for items (e.g., mushrooms on rocks)
+        var zone = _state.CurrentZone;
+        if (zone.TileGrid != null)
+        {
+            for (int y = 0; y < zone.Height; y++)
+            {
+                for (int x = 0; x < zone.Width; x++)
+                {
+                    // Check all layers for item tiles
+                    for (int layer = 0; layer < 3; layer++)
+                    {
+                        var tileId = zone.TileGrid[y, x, layer];
+                        if (tileId != 0xFFFF && tileId < _gameData.Tiles.Count)
+                        {
+                            var tile = _gameData.Tiles[tileId];
+                            if (tile.IsItem && !_state.IsObjectCollected(_state.CurrentZoneId, x, y))
+                            {
+                                // Found an item tile - return as a synthetic object
+                                return new ZoneObject
+                                {
+                                    Type = ZoneObjectType.LocatorItem,
+                                    X = x,
+                                    Y = y,
+                                    Argument = tileId
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         return null;
     }
 

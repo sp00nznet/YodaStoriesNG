@@ -232,12 +232,12 @@ public unsafe class GameEngine : IDisposable
         switch (type)
         {
             case BotActionType.Move:
-                // Calculate dx/dy from current position to target
-                int dx = Math.Sign(x - _state.PlayerX);
-                int dy = Math.Sign(y - _state.PlayerY);
-                if (dx == 0 && dy == 0)
+                int dx, dy;
+                // When x=0 and y=0, use direction for movement (bot convention for directional moves)
+                if (x == 0 && y == 0)
                 {
-                    // Use direction to determine movement
+                    dx = 0;
+                    dy = 0;
                     switch (dir)
                     {
                         case Direction.Up: dy = -1; break;
@@ -245,6 +245,12 @@ public unsafe class GameEngine : IDisposable
                         case Direction.Left: dx = -1; break;
                         case Direction.Right: dx = 1; break;
                     }
+                }
+                else
+                {
+                    // Calculate dx/dy from current position to target
+                    dx = Math.Sign(x - _state.PlayerX);
+                    dy = Math.Sign(y - _state.PlayerY);
                 }
                 TryMovePlayer(dx, dy, dir, false);
                 break;
