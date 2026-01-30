@@ -35,11 +35,25 @@ public class WorldGenerator
     // World grid (10x10 for planets, smaller for Dagobah)
     public const int GridSize = 10;
 
+    // Special item tile IDs (from original game)
+    public const int TILE_THE_FORCE = 511;      // The Force - guaranteed weapon
+    public const int TILE_LOCATOR = 512;        // Locator/Map item
+    public const int TILE_LIGHTSABER = 510;     // Lightsaber
+
     // The generated world
     public WorldMap? CurrentWorld { get; private set; }
 
     // Current mission
     public Mission? CurrentMission { get; private set; }
+
+    // Mission progression (1-15)
+    private static int _currentMissionNumber = 1;
+    private static List<int> _usedGoalPuzzles = new();
+
+    /// <summary>
+    /// Current mission number (1-15).
+    /// </summary>
+    public static int CurrentMissionNumber => _currentMissionNumber;
 
     public WorldGenerator(GameData gameData)
     {
@@ -359,17 +373,27 @@ public class WorldGenerator
 
     /// <summary>
     /// Selects a random mission from available goal puzzles and builds the puzzle chain.
+    /// Tracks used puzzles to ensure variety across the 15-mission cycle.
     /// </summary>
     private Mission SelectRandomMission()
     {
-        // Find goal-type puzzles that define missions
+        // Find goal-type puzzles that define missions, excluding recently used ones
         var goalPuzzles = _gameData.Puzzles
             .Where(p => p.Type == PuzzleType.Goal && p.Strings.Count > 0)
+            .Where(p => !_usedGoalPuzzles.Contains(p.Id))
             .ToList();
 
-        // Determine planet (random selection)
+        // If all puzzles used, allow reuse
+        if (goalPuzzles.Count == 0)
+        {
+            goalPuzzles = _gameData.Puzzles
+                .Where(p => p.Type == PuzzleType.Goal && p.Strings.Count > 0)
+                .ToList();
+        }
+
+        // Determine planet based on mission number for variety
         var planets = new[] { Planet.Desert, Planet.Snow, Planet.Forest };
-        var planet = planets[_random.Next(planets.Length)];
+        var planet = planets[(_currentMissionNumber - 1) % planets.Length];
 
         if (goalPuzzles.Count == 0)
         {
@@ -378,6 +402,7 @@ public class WorldGenerator
         }
 
         var goalPuzzle = goalPuzzles[_random.Next(goalPuzzles.Count)];
+        _usedGoalPuzzles.Add(goalPuzzle.Id);
 
         var mission = new Mission
         {
@@ -385,8 +410,11 @@ public class WorldGenerator
             Name = goalPuzzle.Strings.FirstOrDefault() ?? "Unknown Mission",
             Planet = planet,
             Description = goalPuzzle.Strings.Count > 1 ? goalPuzzle.Strings[1] : "",
-            GoalPuzzle = goalPuzzle
+            GoalPuzzle = goalPuzzle,
+            MissionNumber = _currentMissionNumber
         };
+
+        Console.WriteLine($"Mission {_currentMissionNumber}/15: {mission.Name} on {planet}");
 
         // NOTE: Puzzle chain will be built later in GenerateWorld() after grid is generated
 
@@ -983,6 +1011,9 @@ public class WorldGenerator
             }
         }
 
+        // Place The Force at distance 2 from spaceport (guaranteed weapon pickup)
+        PlaceTheForce();
+
         // Build the list of all required items from the puzzle chain
         foreach (var step in CurrentMission.PuzzleChain)
         {
@@ -993,6 +1024,90 @@ public class WorldGenerator
         }
 
         Console.WriteLine($"Mission requires {CurrentWorld.RequiredItems.Count} unique items");
+    }
+
+    /// <summary>
+    /// Places The Force weapon at distance 2 from the spaceport.
+    /// This is the guaranteed weapon pickup in the original game.
+    /// </summary>
+    private void PlaceTheForce()
+    {
+        if (CurrentWorld?.Grid == null) return;
+
+        // Find a zone at distance 2 from the landing zone
+        var landingPos = CurrentWorld.LandingPosition;
+        var candidateZones = new List<(int zoneId, int x, int y, int distance)>();
+
+        for (int y = 0; y < GridSize; y++)
+        {
+            for (int x = 0; x < GridSize; x++)
+            {
+                var zoneId = CurrentWorld.Grid[y, x];
+                if (zoneId == null) continue;
+
+                int distance = Math.Abs(x - landingPos.x) + Math.Abs(y - landingPos.y);
+                if (distance == 2)
+                {
+                    candidateZones.Add((zoneId.Value, x, y, distance));
+                }
+            }
+        }
+
+        if (candidateZones.Count == 0)
+        {
+            // Fallback to distance 1 or 3
+            for (int y = 0; y < GridSize; y++)
+            {
+                for (int x = 0; x < GridSize; x++)
+                {
+                    var zoneId = CurrentWorld.Grid[y, x];
+                    if (zoneId == null) continue;
+
+                    int distance = Math.Abs(x - landingPos.x) + Math.Abs(y - landingPos.y);
+                    if (distance >= 1 && distance <= 3 && zoneId != CurrentWorld.LandingZoneId)
+                    {
+                        candidateZones.Add((zoneId.Value, x, y, distance));
+                    }
+                }
+            }
+        }
+
+        if (candidateZones.Count > 0)
+        {
+            var chosen = candidateZones[_random.Next(candidateZones.Count)];
+            CurrentWorld.TheForceZoneId = chosen.zoneId;
+            CurrentWorld.TheForcePosition = (chosen.x, chosen.y);
+            Console.WriteLine($"The Force placed in zone {chosen.zoneId} at grid ({chosen.x},{chosen.y}), distance {chosen.distance} from landing");
+        }
+        else
+        {
+            Console.WriteLine("Warning: Could not place The Force - no suitable zone found");
+        }
+    }
+
+    /// <summary>
+    /// Advances to the next mission (1-15 cycle).
+    /// </summary>
+    public static void AdvanceMission()
+    {
+        _currentMissionNumber++;
+        if (_currentMissionNumber > 15)
+        {
+            _currentMissionNumber = 1;
+            _usedGoalPuzzles.Clear();  // Reset for new cycle
+            Console.WriteLine("=== COMPLETED ALL 15 MISSIONS! Starting new cycle ===");
+        }
+        Console.WriteLine($"Mission {_currentMissionNumber}/15");
+    }
+
+    /// <summary>
+    /// Resets mission progression to mission 1.
+    /// </summary>
+    public static void ResetMissionProgression()
+    {
+        _currentMissionNumber = 1;
+        _usedGoalPuzzles.Clear();
+        Console.WriteLine("Mission progression reset to 1/15");
     }
 
     /// <summary>
@@ -1103,6 +1218,13 @@ public class WorldMap
     // Yoda's position within the zone
     public (int x, int y) YodaPosition { get; set; } = (5, 5);
 
+    // The Force location (guaranteed weapon at distance 2)
+    public int? TheForceZoneId { get; set; }
+    public (int x, int y) TheForcePosition { get; set; }
+
+    // Mission number (1-15)
+    public int MissionNumber { get; set; } = 1;
+
     /// <summary>
     /// Advances the mission to the next step.
     /// </summary>
@@ -1119,6 +1241,8 @@ public class WorldMap
             if (Mission.CurrentStep >= Mission.PuzzleChain.Count)
             {
                 Mission.IsCompleted = true;
+                Console.WriteLine($"=== MISSION {Mission.MissionNumber}/15 COMPLETE: {Mission.Name} ===");
+                WorldGenerator.AdvanceMission();
                 return true; // Mission complete!
             }
         }
@@ -1195,10 +1319,12 @@ public class WorldMap
         // Print statistics
         Console.WriteLine("╠════════════════════════════════════════════════════════════════════╣");
         var stats = GetMapStatistics();
-        Console.WriteLine($"║ Zones: {stats.TotalZones,3} | Puzzles: {stats.PuzzleCount,2} | Blockades: {stats.BlockadeCount,2} | Travels: {stats.TravelCount,2}   ║");
+        Console.WriteLine($"║ Mission: {Mission?.MissionNumber ?? 0,2}/15 | Zones: {stats.TotalZones,3} | Puzzles: {stats.PuzzleCount,2}                    ║");
         Console.WriteLine($"║ Landing Zone: {LandingZoneId,4} at ({LandingPosition.x},{LandingPosition.y})                               ║");
         if (ObjectiveZoneId > 0)
             Console.WriteLine($"║ Objective Zone: {ObjectiveZoneId,4} at ({ObjectivePosition.x},{ObjectivePosition.y})                             ║");
+        if (TheForceZoneId.HasValue)
+            Console.WriteLine($"║ The Force: Zone {TheForceZoneId,4} at ({TheForcePosition.x},{TheForcePosition.y}) [distance 2]               ║");
         Console.WriteLine("╚════════════════════════════════════════════════════════════════════╝\n");
     }
 
@@ -1207,11 +1333,14 @@ public class WorldMap
         // Check for special positions
         bool isLanding = (x == LandingPosition.x && y == LandingPosition.y);
         bool isObjective = (x == ObjectivePosition.x && y == ObjectivePosition.y);
+        bool isTheForce = (x == TheForcePosition.x && y == TheForcePosition.y && TheForceZoneId.HasValue);
 
         if (isLanding)
             return "  L  ";
         if (isObjective)
             return " *G* ";
+        if (isTheForce)
+            return " [F] ";
 
         return type switch
         {
@@ -1292,6 +1421,9 @@ public class Mission
     public string Description { get; set; } = "";
     public Planet Planet { get; set; }
     public Puzzle? GoalPuzzle { get; set; }
+
+    // Mission number in the 15-mission cycle
+    public int MissionNumber { get; set; } = 1;
 
     // The chain of puzzles to complete the mission
     public List<PuzzleStep> PuzzleChain { get; set; } = new();
