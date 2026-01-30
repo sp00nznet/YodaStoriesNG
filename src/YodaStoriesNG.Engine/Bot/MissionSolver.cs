@@ -65,6 +65,13 @@ public class MissionSolver
         var phase = GetCurrentPhase();
         var world = _worldGenerator.CurrentWorld;
 
+        // First priority: If we're in a room (small indoor zone), find the exit door
+        var doorExit = CheckForRoomExit();
+        if (doorExit != null)
+        {
+            return doorExit;
+        }
+
         switch (phase)
         {
             case MissionPhase.TalkToYoda:
@@ -383,6 +390,42 @@ public class MissionSolver
             Type = ObjectiveType.Explore,
             Description = "Explore to find items"
         };
+    }
+
+    /// <summary>
+    /// Checks if we're in a small room zone that needs an exit door.
+    /// Rooms are typically 9x9 zones with DoorExit objects.
+    /// </summary>
+    private BotObjective? CheckForRoomExit()
+    {
+        var zone = _state.CurrentZone;
+        if (zone == null) return null;
+
+        // Rooms are typically 9x9 (or smaller than 18x18 outdoor zones)
+        bool isRoom = zone.Width < 18 || zone.Height < 18;
+        if (!isRoom) return null;
+
+        // Find exit door in this room
+        var exitDoor = zone.Objects.FirstOrDefault(o =>
+            o.Type == ZoneObjectType.DoorExit ||
+            o.Type == ZoneObjectType.Teleporter);
+
+        if (exitDoor != null)
+        {
+            Console.WriteLine($"[BOT] In room zone {_state.CurrentZoneId} ({zone.Width}x{zone.Height}), found exit at ({exitDoor.X},{exitDoor.Y})");
+            return new BotObjective
+            {
+                Type = ObjectiveType.EnterDoor,
+                Description = $"Exit room via door at ({exitDoor.X},{exitDoor.Y})",
+                TargetX = exitDoor.X,
+                TargetY = exitDoor.Y,
+                TargetZoneId = exitDoor.Argument != 0xFFFF ? exitDoor.Argument : null
+            };
+        }
+
+        // No exit door found in room - this shouldn't happen
+        Console.WriteLine($"[BOT] WARNING: In room zone {_state.CurrentZoneId} but no exit door found!");
+        return null;
     }
 
     /// <summary>

@@ -686,14 +686,21 @@ public class WorldGenerator
         // Initialize grid
         CurrentWorld.Grid = new int?[GridSize, GridSize];
 
-        // Find zones matching the mission's planet type
+        // Find outdoor zones matching the mission's planet type (18x18 only, not 9x9 rooms)
         var planetZones = _gameData.Zones
-            .Where(z => z.Planet == CurrentMission.Planet && z.Width > 0)
+            .Where(z => z.Planet == CurrentMission.Planet && z.Width == 18 && z.Height == 18)
             .ToList();
+
+        // Also find indoor rooms for this planet (for door connections later)
+        var roomZones = _gameData.Zones
+            .Where(z => z.Planet == CurrentMission.Planet && z.Width > 0 && z.Width < 18)
+            .ToList();
+
+        Console.WriteLine($"Planet {CurrentMission.Planet}: found {planetZones.Count} outdoor zones, {roomZones.Count} room zones");
 
         if (planetZones.Count == 0)
         {
-            Console.WriteLine($"Warning: No zones found for planet {CurrentMission.Planet}");
+            Console.WriteLine($"Warning: No outdoor zones found for planet {CurrentMission.Planet}");
             return;
         }
 
@@ -702,9 +709,8 @@ public class WorldGenerator
         var townZones = planetZones.Where(z => z.Type == ZoneType.Town).ToList();
         var goalZones = planetZones.Where(z => z.Type == ZoneType.Goal).ToList();
         var puzzleZones = planetZones.Where(z => z.Type == ZoneType.Trade || z.Type == ZoneType.Use || z.Type == ZoneType.Find).ToList();
-        var roomZones = planetZones.Where(z => z.Type == ZoneType.Room).ToList();
 
-        // If no categorization, use all zones
+        // If no categorization, use all outdoor zones
         if (emptyZones.Count == 0) emptyZones = planetZones;
 
         // 1. Place Landing Cell near center (one of 4 central squares)
@@ -795,6 +801,9 @@ public class WorldGenerator
     {
         if (CurrentWorld == null) return;
 
+        Console.WriteLine($"[WORLD] Setting up zone connections for {GridSize}x{GridSize} grid...");
+        int connectionCount = 0;
+
         for (int y = 0; y < GridSize; y++)
         {
             for (int x = 0; x < GridSize; x++)
@@ -815,7 +824,28 @@ public class WorldGenerator
                     connections.South = CurrentWorld.Grid[y + 1, x];
 
                 CurrentWorld.Connections[zoneId.Value] = connections;
+
+                // Count actual connections
+                if (connections.North.HasValue) connectionCount++;
+                if (connections.South.HasValue) connectionCount++;
+                if (connections.East.HasValue) connectionCount++;
+                if (connections.West.HasValue) connectionCount++;
             }
+        }
+
+        Console.WriteLine($"[WORLD] Created {CurrentWorld.Connections.Count} zone entries with {connectionCount} total connections");
+
+        // Print grid visualization
+        Console.WriteLine("[WORLD] Zone grid (10x10):");
+        for (int y = 0; y < GridSize; y++)
+        {
+            var row = "";
+            for (int x = 0; x < GridSize; x++)
+            {
+                var zoneId = CurrentWorld.Grid[y, x];
+                row += zoneId.HasValue ? $"{zoneId.Value,4}" : "   .";
+            }
+            Console.WriteLine($"  {row}");
         }
     }
 

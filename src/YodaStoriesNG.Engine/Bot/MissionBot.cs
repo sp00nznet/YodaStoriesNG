@@ -612,6 +612,55 @@ public class MissionBot
             Console.WriteLine($"[BOT] Puzzle steps: {mission.PuzzleChain.Count}");
             Console.WriteLine($"[BOT] Current step: {mission.CurrentStep + 1}");
         }
+
+        // Log current zone connections
+        LogCurrentZoneConnections();
+    }
+
+    private void LogCurrentZoneConnections()
+    {
+        var world = _worldGenerator.CurrentWorld;
+        if (world == null)
+        {
+            Console.WriteLine("[BOT] No world loaded");
+            return;
+        }
+
+        var zoneId = _state.CurrentZoneId;
+        Console.WriteLine($"[BOT] Current zone: {zoneId} at position ({_state.PlayerX}, {_state.PlayerY})");
+
+        if (world.Connections.TryGetValue(zoneId, out var conn))
+        {
+            Console.WriteLine($"[BOT] Zone connections: N={conn.North?.ToString() ?? "none"}, S={conn.South?.ToString() ?? "none"}, E={conn.East?.ToString() ?? "none"}, W={conn.West?.ToString() ?? "none"}");
+        }
+        else
+        {
+            Console.WriteLine($"[BOT] WARNING: Zone {zoneId} has no connection entry!");
+            Console.WriteLine($"[BOT] Total connections in world: {world.Connections.Count}");
+            Console.WriteLine($"[BOT] Connection zone IDs: {string.Join(", ", world.Connections.Keys.OrderBy(k => k).Take(20))}...");
+        }
+
+        // Check if this zone is in the grid
+        bool foundInGrid = false;
+        if (world.Grid != null)
+        {
+            for (int y = 0; y < 10 && !foundInGrid; y++)
+            {
+                for (int x = 0; x < 10 && !foundInGrid; x++)
+                {
+                    if (world.Grid[y, x] == zoneId)
+                    {
+                        Console.WriteLine($"[BOT] Zone {zoneId} is at grid position ({x}, {y})");
+                        foundInGrid = true;
+                    }
+                }
+            }
+        }
+
+        if (!foundInGrid)
+        {
+            Console.WriteLine($"[BOT] WARNING: Zone {zoneId} is NOT in the world grid (may be Dagobah or room)");
+        }
     }
 }
 

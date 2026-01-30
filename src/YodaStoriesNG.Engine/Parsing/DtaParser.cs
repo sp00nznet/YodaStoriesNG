@@ -698,75 +698,66 @@ public class DtaParser
     {
         var startPos = _reader.BaseStream.Position;
         var endPos = startPos + length;
+
+        // Debug: dump first 32 bytes to understand structure
+        var debugBytes = _reader.ReadBytes(Math.Min(32, (int)length));
+        _reader.BaseStream.Seek(startPos, SeekOrigin.Begin);
+        Console.WriteLine($"PUZ2 first 32 bytes: {BitConverter.ToString(debugBytes)}");
+
+        // Try to find IPUZ markers in the section
         int puzzleId = 0;
-
-        // First, read the puzzle count (2 bytes)
-        var puzzleCount = _reader.ReadUInt16();
-        Console.WriteLine($"PUZ2 section: expecting {puzzleCount} puzzles");
-
-        while (_reader.BaseStream.Position < endPos - 4 && puzzleId < puzzleCount)
+        while (_reader.BaseStream.Position < endPos - 8)
         {
-            // Look for IPUZ marker (similar to IZON in zones)
             var markerPos = _reader.BaseStream.Position;
             var markerBytes = _reader.ReadBytes(4);
             var marker = System.Text.Encoding.ASCII.GetString(markerBytes);
 
-            if (marker != "IPUZ")
+            if (marker == "IPUZ")
             {
-                // Not at IPUZ marker, try to find it
+                // Found IPUZ marker - read puzzle size
+                var puzzleSize = _reader.ReadUInt32();
+                var puzzleDataStart = _reader.BaseStream.Position;
+
+                var puzzle = new Puzzle { Id = puzzleId++ };
+
+                // IPUZ format: type(2), item1(2), item2(2), unknown(2), unknown(2), then 5 strings
+                if (puzzleSize >= 10)
+                {
+                    var puzzleType = _reader.ReadUInt16();
+                    puzzle.Type = (PuzzleType)puzzleType;
+                    puzzle.Item1 = _reader.ReadUInt16();
+                    puzzle.Item2 = _reader.ReadUInt16();
+                    _reader.ReadUInt16(); // unknown
+                    _reader.ReadUInt16(); // unknown
+
+                    // Read strings
+                    for (int i = 0; i < 5 && _reader.BaseStream.Position < puzzleDataStart + puzzleSize; i++)
+                    {
+                        var strLen = _reader.ReadUInt16();
+                        if (strLen > 0 && strLen < 500)
+                        {
+                            var strBytes = _reader.ReadBytes(strLen);
+                            puzzle.Strings.Add(System.Text.Encoding.ASCII.GetString(strBytes).TrimEnd('\0'));
+                        }
+                        else if (strLen == 0)
+                        {
+                            puzzle.Strings.Add("");
+                        }
+                    }
+                }
+
+                // Skip to end of this puzzle
+                _reader.BaseStream.Seek(puzzleDataStart + puzzleSize, SeekOrigin.Begin);
+                _data.Puzzles.Add(puzzle);
+
+                if (puzzleId <= 5)
+                    Console.WriteLine($"  Puzzle {puzzle.Id}: Type={puzzle.Type}, Item1={puzzle.Item1}, Item2={puzzle.Item2}, Str0={puzzle.Strings.FirstOrDefault() ?? ""}");
+            }
+            else
+            {
+                // Not at IPUZ, advance by 1 byte and try again
                 _reader.BaseStream.Seek(markerPos + 1, SeekOrigin.Begin);
-                continue;
             }
-
-            // Found IPUZ marker - read puzzle size
-            var puzzleSize = _reader.ReadUInt32();
-            var puzzleDataStart = _reader.BaseStream.Position;
-
-            var puzzle = new Puzzle { Id = puzzleId++ };
-
-            // IPUZ format (after size):
-            // - 2 bytes: puzzle type (0=Quest, 1=Transport, 2=Trade, 3=Use, 4=Goal)
-            // - 2 bytes: item1 (item to bring/find)
-            // - 2 bytes: item2 (reward item or NPC tile)
-            // - 2 bytes: unknown flags
-            // - 2 bytes: unknown (possibly planet)
-            // - 5 strings (length-prefixed)
-            var puzzleType = _reader.ReadUInt16();
-            puzzle.Type = (PuzzleType)puzzleType;
-            puzzle.Item1 = _reader.ReadUInt16();
-            puzzle.Item2 = _reader.ReadUInt16();
-            var unknown2 = _reader.ReadUInt16();
-            var unknown3 = _reader.ReadUInt16();
-
-            // Read puzzle strings (5 strings typically)
-            // String 0: Puzzle name/description (e.g., "Give MUSHROOM to YODA")
-            // String 1: Hint text
-            // String 2-4: Additional dialogue
-            for (int i = 0; i < 5; i++)
-            {
-                if (_reader.BaseStream.Position >= puzzleDataStart + puzzleSize)
-                    break;
-
-                var strLen = _reader.ReadUInt16();
-                if (strLen > 0 && strLen < 1000)
-                {
-                    var strBytes = _reader.ReadBytes(strLen);
-                    puzzle.Strings.Add(System.Text.Encoding.ASCII.GetString(strBytes).TrimEnd('\0'));
-                }
-                else if (strLen == 0)
-                {
-                    puzzle.Strings.Add("");
-                }
-                else
-                {
-                    // Invalid length, skip rest
-                    break;
-                }
-            }
-
-            // Skip to end of this puzzle's data
-            _reader.BaseStream.Seek(puzzleDataStart + puzzleSize, SeekOrigin.Begin);
-            _data.Puzzles.Add(puzzle);
         }
 
         // Ensure we're at the end

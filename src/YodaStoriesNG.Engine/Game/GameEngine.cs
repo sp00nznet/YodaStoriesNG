@@ -193,11 +193,14 @@ public unsafe class GameEngine : IDisposable
             _actionExecutor.OnDialogue += (speaker, text) => _messages.ShowDialogue(speaker, text);
         }
 
-        // Initialize bot (but don't start it)
+        // Initialize bot and auto-start for debugging
         if (_worldGenerator != null)
         {
             _bot = new MissionBot(_state, _gameData!, _worldGenerator);
             _bot.OnActionRequested += HandleBotAction;
+            // Auto-start bot for debugging zone transitions
+            _bot.Start();
+            _messages.ShowMessage("Bot AUTO-STARTED - Press B to disable", MessageType.System);
         }
     }
 
