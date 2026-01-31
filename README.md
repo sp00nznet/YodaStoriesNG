@@ -25,14 +25,23 @@ Yoda Stories NG is a fan-made recreation of the classic LucasArts Desktop Advent
 - **Save/Load system** - JSON-based save files with full game state
 - **Widescreen UI** - Modern layout with sidebar HUD
 - **Xbox controller support** - Full gamepad controls
-- **Configurable graphics** - 1x, 2x, and 4x scaling options
+- **Configurable graphics** - 2x and 4x scaling options
 - **Automated Mission Bot** - AI-powered gameplay with A* pathfinding
 - **Complete script engine** - All 30+ condition and instruction opcodes implemented
 
 ## Screenshots
 
-### Gameplay
-![Gameplay](docs/screenshots/gameplay.png)
+### Yoda Stories Gameplay
+![Yoda Stories Gameplay](docs/screenshots/gameplay-yoda.png)
+
+### Indiana Jones Gameplay
+![Indiana Jones Gameplay](docs/screenshots/gameplay-indy.png)
+
+### Score Screen (Force Factor)
+![Score Screen](docs/screenshots/score-screen.png)
+
+### Palette Animation (Water/Lava Effects)
+![Palette Animation](docs/screenshots/palette-animation.png)
 
 ### World Map Viewer
 ![World Map](docs/screenshots/world-map.png)
@@ -42,6 +51,9 @@ Yoda Stories NG is a fan-made recreation of the classic LucasArts Desktop Advent
 
 ### Asset Viewer
 ![Asset Viewer](docs/screenshots/asset-viewer.png)
+
+### R2D2 Help System
+![R2D2 Help](docs/screenshots/r2d2-help.png)
 
 ## Requirements
 
@@ -139,13 +151,21 @@ The game generates procedural worlds using the original algorithm:
 | **Large** | 10x10 | 8-16 | Extended quest |
 | **X-tra Large** | 15x15 | 12-24 | Epic journey |
 
-Each world includes:
-- **Spaceport** - Landing zone with X-Wing
+### Yoda Stories Worlds
+- **Spaceport** - Landing zone with X-Wing for travel
 - **Puzzle zones** - Contain items and NPCs for trading
 - **Blockades** - Require specific items to pass
-- **Travel zones** - Vehicle connections to islands
-- **Islands** - Remote areas with special puzzles
-- **The Force** - Guaranteed weapon at distance 2 from start
+- **Travel zones** - X-Wing connections to islands
+- **Islands** - Remote areas (Dagobah) with special puzzles
+- **The Force** - Guaranteed lightsaber at distance 2 from start
+
+### Indiana Jones Worlds
+- **Home Base** - Starting location (no vehicle)
+- **Puzzle zones** - Artifacts and NPC traders
+- **Blockades** - Obstacles requiring items to pass
+- **Travel zones** - Vehicle/boat connections
+- **Remote areas** - Temples and dig sites
+- **Weapon cache** - Guaranteed weapon near start
 
 ## Score System
 
@@ -162,15 +182,15 @@ Upon completing 15 missions, you receive a score evaluation:
 
 ### Ratings
 
-| Score | Title |
-|-------|-------|
-| 450+ | Legendary Hero! |
-| 400-449 | Jedi Master |
-| 350-399 | Jedi Knight |
-| 300-349 | Padawan |
-| 250-299 | Force Sensitive |
-| 200-249 | Adventurer |
-| <200 | Beginner |
+| Score | Force Factor (Yoda) | Indy Quotient (Indy) |
+|-------|---------------------|----------------------|
+| 450+ | Legendary Hero! | Master Archaeologist! |
+| 400-449 | Jedi Master | Professor of Antiquities |
+| 350-399 | Jedi Knight | Seasoned Explorer |
+| 300-349 | Padawan | Field Researcher |
+| 250-299 | Force Sensitive | Museum Curator |
+| 200-249 | Adventurer | Graduate Student |
+| <200 | Beginner | Amateur |
 
 ## Debug Tools
 
@@ -220,6 +240,8 @@ The automated Mission Bot (press **B**) plays the game automatically:
 - **Zone exploration** to find objectives
 
 The bot displays its current task in the HUD when active.
+
+> **Note:** The Mission Bot is currently optimized for Yoda Stories (X-Wing travel, Dagobah missions). Indiana Jones support is planned for a future update.
 
 ## Project Structure
 

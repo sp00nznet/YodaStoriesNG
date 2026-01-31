@@ -239,13 +239,26 @@ public unsafe class ScoreWindow : IDisposable
 
     private string GetRating(int score)
     {
-        if (score >= 450) return "LEGENDARY HERO!";
-        if (score >= 400) return "Jedi Master";
-        if (score >= 350) return "Jedi Knight";
-        if (score >= 300) return "Padawan";
-        if (score >= 250) return "Force Sensitive";
-        if (score >= 200) return "Adventurer";
-        return "Beginner";
+        if (_gameType == GameType.IndianaJones)
+        {
+            if (score >= 450) return "MASTER ARCHAEOLOGIST!";
+            if (score >= 400) return "Professor of Antiquities";
+            if (score >= 350) return "Seasoned Explorer";
+            if (score >= 300) return "Field Researcher";
+            if (score >= 250) return "Museum Curator";
+            if (score >= 200) return "Graduate Student";
+            return "Amateur";
+        }
+        else
+        {
+            if (score >= 450) return "LEGENDARY HERO!";
+            if (score >= 400) return "Jedi Master";
+            if (score >= 350) return "Jedi Knight";
+            if (score >= 300) return "Padawan";
+            if (score >= 250) return "Force Sensitive";
+            if (score >= 200) return "Adventurer";
+            return "Beginner";
+        }
     }
 
     private void RenderTextCentered(string text, int centerX, int y, int scale, byte r, byte g, byte b)
