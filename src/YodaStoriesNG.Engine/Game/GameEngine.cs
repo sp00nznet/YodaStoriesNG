@@ -113,7 +113,7 @@ public unsafe class GameEngine : IDisposable
         _titleScreen.OnStartGame += () => { _showingTitleScreen = false; StartNewGame(); };
 
         _menuBar = new MenuBar(_renderer.GetFont());
-        _menuBar.SetRenderer(_renderer.GetRenderer());
+        _menuBar.SetRenderer(_renderer.GetRenderer(), _renderer.GetWindowID());
         _menuBar.OnNewGame += (size) => { _selectedWorldSize = size; StartNewGame(); };
         _menuBar.OnSaveGame += SaveGame;
         _menuBar.OnSaveGameAs += SaveGameAs;

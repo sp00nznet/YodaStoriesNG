@@ -10,7 +10,6 @@ A modern reimplementation of **Star Wars: Yoda Stories** (1997) built with C# an
 
 Yoda Stories NG is a fan-made recreation of the classic LucasArts desktop adventure game. It parses the original game data files and reimplements the game engine from scratch.
 
-<!-- SCREENSHOT: Title Screen -->
 ![Title Screen](docs/screenshots/title-screen.png)
 
 ## Key Features
@@ -22,25 +21,21 @@ Yoda Stories NG is a fan-made recreation of the classic LucasArts desktop advent
 - **Save/Load system** - JSON-based save files with full game state
 - **Widescreen UI** - Modern layout with sidebar HUD
 - **Xbox controller support** - Full gamepad controls
-- **Configurable graphics** - 2x and 4x scaling options
+- **Configurable graphics** - 1x, 2x, and 4x scaling options
 - **Automated Mission Bot** - AI-powered gameplay with A* pathfinding
 
 ## Screenshots
 
 ### Gameplay
-<!-- SCREENSHOT: Gameplay showing player in a zone with NPCs -->
 ![Gameplay](docs/screenshots/gameplay.png)
 
 ### World Map Viewer
-<!-- SCREENSHOT: Debug Map Window showing 10x10 or 15x15 grid -->
 ![World Map](docs/screenshots/world-map.png)
 
 ### Script Editor
-<!-- SCREENSHOT: Script Editor window showing IACT scripts -->
 ![Script Editor](docs/screenshots/script-editor.png)
 
 ### Asset Viewer
-<!-- SCREENSHOT: Asset Viewer showing tiles/characters -->
 ![Asset Viewer](docs/screenshots/asset-viewer.png)
 
 ## Requirements

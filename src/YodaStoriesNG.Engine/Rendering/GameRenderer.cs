@@ -44,6 +44,7 @@ public unsafe class GameRenderer : IDisposable
 
     public BitmapFont GetFont() => _font;
     public SDLRenderer* GetRenderer() => _renderer;
+    public uint GetWindowID() => _window != null ? SDL.GetWindowID(_window) : 0;
 
     /// <summary>
     /// Sets the window scale (2x or 4x).
@@ -107,6 +108,9 @@ public unsafe class GameRenderer : IDisposable
         {
             Console.WriteLine("Warning: Failed to initialize bitmap font");
         }
+
+        // Set initial logical size for consistent scaling behavior
+        SDL.RenderSetLogicalSize(_renderer, WindowWidth, WindowHeight);
 
         // Create tile atlas texture
         CreateTileAtlas();

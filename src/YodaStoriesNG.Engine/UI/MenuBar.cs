@@ -11,6 +11,7 @@ public unsafe class MenuBar
 {
     private readonly BitmapFont _font;
     private SDLRenderer* _renderer;
+    private uint _windowId;
 
     public const int Height = 22;
 
@@ -22,7 +23,7 @@ public unsafe class MenuBar
     private readonly string[][] _menuItems = {
         new[] { "New Game: Small", "New Game: Medium", "New Game: Large", "New Game: X-tra Large", "-", "Save Game", "Save As...", "Load Game", "-", "Exit" },
         new[] { "Asset Viewer (F2)", "Script Editor (F3)", "Map Viewer (F4)", "-", "Enable Bot", "Disable Bot" },
-        new[] { "Graphics: 2x Scale", "Graphics: 4x Scale", "-", "Keyboard Controls", "Controller Controls", "-", "Select Data File..." },
+        new[] { "Graphics: 1x Scale", "Graphics: 2x Scale", "Graphics: 4x Scale", "-", "Keyboard Controls", "Controller Controls", "-", "Select Data File..." },
         new[] { "About Yoda Stories NG", "GitHub Repository" }
     };
 
@@ -55,13 +56,22 @@ public unsafe class MenuBar
         _font = font;
     }
 
-    public void SetRenderer(SDLRenderer* renderer)
+    public void SetRenderer(SDLRenderer* renderer, uint windowId)
     {
         _renderer = renderer;
+        _windowId = windowId;
     }
 
     public bool HandleEvent(SDLEvent* evt)
     {
+        // Only handle events for our window
+        if (evt->Type == (uint)SDLEventType.Mousebuttondown && evt->Button.WindowID != _windowId)
+            return false;
+        if (evt->Type == (uint)SDLEventType.Mousemotion && evt->Motion.WindowID != _windowId)
+            return false;
+        if (evt->Type == (uint)SDLEventType.Keydown && evt->Key.WindowID != _windowId)
+            return false;
+
         if (evt->Type == (uint)SDLEventType.Mousebuttondown)
         {
             int mx = evt->Button.X;
@@ -216,11 +226,12 @@ public unsafe class MenuBar
             case 2: // Config
                 switch (item)
                 {
-                    case 0: OnSetScale?.Invoke(2); break;
-                    case 1: OnSetScale?.Invoke(4); break;
-                    case 3: OnShowKeyboardControls?.Invoke(); break;
-                    case 4: OnShowControllerControls?.Invoke(); break;
-                    case 6: OnSelectDataFile?.Invoke(); break;
+                    case 0: OnSetScale?.Invoke(1); break;
+                    case 1: OnSetScale?.Invoke(2); break;
+                    case 2: OnSetScale?.Invoke(4); break;
+                    case 4: OnShowKeyboardControls?.Invoke(); break;
+                    case 5: OnShowControllerControls?.Invoke(); break;
+                    case 7: OnSelectDataFile?.Invoke(); break;
                 }
                 break;
             case 3: // About
