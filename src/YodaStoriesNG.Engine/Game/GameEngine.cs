@@ -53,6 +53,34 @@ public unsafe class GameEngine : IDisposable
     /// </summary>
     public bool IsBotRunning => _bot?.IsRunning ?? false;
 
+    // Weapon tile constants for 15-mission progression
+    private const int TILE_BASIC_LIGHTSABER = 18;      // Starting weapon
+    private const int TILE_UPGRADED_LIGHTSABER = 510;  // After 5 missions
+    private const int TILE_THE_FORCE = 511;            // After 10 missions
+
+    /// <summary>
+    /// Gets the appropriate weapon for the player's mission count.
+    /// </summary>
+    private static int GetWeaponForMissionCount(int missionsCompleted)
+    {
+        if (missionsCompleted >= 10) return TILE_THE_FORCE;
+        if (missionsCompleted >= 5) return TILE_UPGRADED_LIGHTSABER;
+        return TILE_BASIC_LIGHTSABER;
+    }
+
+    /// <summary>
+    /// Upgrades the player's weapon, replacing the old one.
+    /// </summary>
+    private void UpgradeWeapon(int newWeaponTile)
+    {
+        // Remove old weapons and add the new one
+        _state.Weapons.Clear();
+        _state.Weapons.Add(newWeaponTile);
+        _state.CurrentWeaponIndex = 0;
+        _state.SelectedWeapon = newWeaponTile;
+        Console.WriteLine($"[Weapon] Upgraded to tile {newWeaponTile}");
+    }
+
     public GameEngine(string dataPath)
     {
         _dataPath = dataPath;
@@ -410,11 +438,14 @@ public unsafe class GameEngine : IDisposable
         if (_actionExecutor != null)
             _actionExecutor.SuppressDialogue = true;
 
-        // Give player starting weapon - lightsaber is always available at game start
-        const int LIGHTSABER_TILE = 510;  // Lightsaber tile at atlas position 1291x338
-        _state.Weapons.Add(LIGHTSABER_TILE);
+        // Give player starting weapon based on missions completed
+        // Tile 18 = Basic lightsaber (start)
+        // Tile 510 = Upgraded lightsaber (after 5 missions)
+        // Tile 511 = The Force (after 10 missions)
+        int startingWeapon = GetWeaponForMissionCount(_state.GamesWon);
+        _state.Weapons.Add(startingWeapon);
         _state.CurrentWeaponIndex = 0;
-        _state.SelectedWeapon = LIGHTSABER_TILE;
+        _state.SelectedWeapon = startingWeapon;
 
         // Generate the world with selected size
         _worldGenerator = new WorldGenerator(_gameData!);
@@ -2264,12 +2295,42 @@ public unsafe class GameEngine : IDisposable
                         // Check if mission is complete
                         if (mission != null && mission.IsCompleted)
                         {
-                            // Mission complete! Congratulate the player
+                            // Mission complete! Increment counter
                             _state.GamesWon++;
-                            _state.IsGameWon = true;
-                            _messages.ShowDialogue("Yoda", $"Completed the mission, you have! Strong with the Force, you are. {_state.GamesWon} missions completed.");
-                            _messages.ShowMessage("YOU WIN! Press R to start a new mission.", MessageType.System);
                             _sounds?.PlaySound(SoundManager.SoundPickup);
+
+                            // Check for 15-mission cycle milestones
+                            if (_state.GamesWon >= 15)
+                            {
+                                // All 15 missions complete! Show victory screen
+                                _state.IsGameWon = true;
+                                _messages.ShowDialogue("Yoda", "A true Jedi, you have become! All 15 missions completed. Proud of you, I am.");
+                                _messages.ShowMessage("CONGRATULATIONS! You've completed all 15 missions!", MessageType.System);
+                                _messages.ShowMessage("Press R to start a new 15-mission cycle.", MessageType.Info);
+                            }
+                            else if (_state.GamesWon == 10)
+                            {
+                                // Give The Force upgrade at mission 10
+                                UpgradeWeapon(TILE_THE_FORCE);
+                                _messages.ShowDialogue("Yoda", "Completed 10 missions, you have! Master of the Force, you are becoming. This power, I give to you.");
+                                _messages.ShowMessage("Received: The Force! You can now attack from a distance.", MessageType.Pickup);
+                                _messages.ShowMessage($"Mission {_state.GamesWon}/15 complete. Press R to continue.", MessageType.System);
+                            }
+                            else if (_state.GamesWon == 5)
+                            {
+                                // Give upgraded lightsaber at mission 5
+                                UpgradeWeapon(TILE_UPGRADED_LIGHTSABER);
+                                _messages.ShowDialogue("Yoda", "Completed 5 missions, you have! Growing stronger, you are. A better lightsaber, you have earned.");
+                                _messages.ShowMessage("Received: Upgraded Lightsaber!", MessageType.Pickup);
+                                _messages.ShowMessage($"Mission {_state.GamesWon}/15 complete. Press R to continue.", MessageType.System);
+                            }
+                            else
+                            {
+                                // Regular mission complete
+                                _messages.ShowDialogue("Yoda", $"Completed the mission, you have! Strong with the Force, you are. {_state.GamesWon}/15 missions completed.");
+                                _messages.ShowMessage($"Mission {_state.GamesWon}/15 complete. Press R to continue.", MessageType.System);
+                            }
+                            _state.IsGameWon = true;  // Allows pressing R to restart
                         }
                         // Give the starting item if player doesn't have it yet
                         else if (world.StartingItemId.HasValue && !_state.HasItem(world.StartingItemId.Value))
@@ -2347,15 +2408,23 @@ public unsafe class GameEngine : IDisposable
     private void PerformAttack()
     {
         // Determine weapon type
-        bool isRangedWeapon = false;
-        if (_state.SelectedWeapon.HasValue && _state.SelectedWeapon.Value > 0 &&
-            _state.SelectedWeapon.Value < _gameData!.Tiles.Count)
+        bool isRanged = false;
+        if (_state.SelectedWeapon.HasValue && _state.SelectedWeapon.Value > 0)
         {
-            var weaponTile = _gameData.Tiles[_state.SelectedWeapon.Value];
-            isRangedWeapon = (weaponTile.Flags & (TileFlags.WeaponLightBlaster | TileFlags.WeaponHeavyBlaster)) != 0;
+            // Check if it's The Force (special ranged weapon)
+            if (_state.SelectedWeapon.Value == TILE_THE_FORCE)
+            {
+                isRanged = true;
+            }
+            // Check tile flags for blasters
+            else if (_state.SelectedWeapon.Value < _gameData!.Tiles.Count)
+            {
+                var weaponTile = _gameData.Tiles[_state.SelectedWeapon.Value];
+                isRanged = (weaponTile.Flags & (TileFlags.WeaponLightBlaster | TileFlags.WeaponHeavyBlaster)) != 0;
+            }
         }
 
-        if (isRangedWeapon)
+        if (isRanged)
         {
             // Ranged attack - spawn projectile
             PerformRangedAttack();
@@ -3601,9 +3670,20 @@ public unsafe class GameEngine : IDisposable
     private int GetWeaponCharacterIndex(int weaponTileId)
     {
         // Map weapon tile IDs to character indices
-        // These are approximate - weapons are stored as characters 9-14
-        if (weaponTileId == 510) return 14;  // Lightsaber -> Character 14 "Light Saber"
+        // Lightsabers use Character 14 "Light Saber" for attack animation
+        if (weaponTileId == TILE_BASIC_LIGHTSABER) return 14;     // Basic lightsaber (tile 18)
+        if (weaponTileId == TILE_UPGRADED_LIGHTSABER) return 14;  // Upgraded lightsaber (tile 510)
+        if (weaponTileId == TILE_THE_FORCE) return 14;            // The Force (tile 511) - uses same animation
         return -1;
+    }
+
+    /// <summary>
+    /// Checks if the given weapon is a ranged weapon (can attack from a distance).
+    /// </summary>
+    private bool IsRangedWeapon(int weaponTileId)
+    {
+        // The Force allows attacking from a distance
+        return weaponTileId == TILE_THE_FORCE;
     }
 
     /// <summary>
