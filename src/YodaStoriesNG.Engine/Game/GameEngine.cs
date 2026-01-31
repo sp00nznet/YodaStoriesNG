@@ -28,6 +28,7 @@ public unsafe class GameEngine : IDisposable
     private ScriptEditorWindow? _scriptViewer;
     private AssetViewerWindow? _assetViewer;
     private ControlsWindow? _controlsWindow;
+    private AboutWindow? _aboutWindow;
     private TitleScreen? _titleScreen;
     private MenuBar? _menuBar;
 
@@ -142,10 +143,10 @@ public unsafe class GameEngine : IDisposable
         _menuBar.OnShowControllerControls += ShowControllerControls;
         _menuBar.OnSelectDataFile += SelectDataFile;
         _menuBar.OnShowAbout += ShowAboutDialog;
-        _menuBar.OnOpenGitHub += OpenGitHub;
 
-        // Initialize controls window
+        // Initialize controls window and about window
         _controlsWindow = new ControlsWindow();
+        _aboutWindow = new AboutWindow();
 
         // Show title screen
         _showingTitleScreen = true;
@@ -155,21 +156,7 @@ public unsafe class GameEngine : IDisposable
 
     private void ShowAboutDialog()
     {
-        _messages.ShowMessage("Yoda Stories NG v0.1 - Open Source Reimplementation", MessageType.System);
-        _messages.ShowMessage("github.com/anthropics/yoda-stories-ng", MessageType.Info);
-    }
-
-    private void OpenGitHub()
-    {
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "https://github.com/anthropics/yoda-stories-ng",
-                UseShellExecute = true
-            });
-        }
-        catch { }
+        _aboutWindow?.Open();
     }
 
     private void SetGraphicsScale(int scale)
@@ -797,6 +784,12 @@ public unsafe class GameEngine : IDisposable
             {
                 SDLEvent evtCopy = evt;
                 if (_controlsWindow.HandleEvent(&evtCopy))
+                    continue;
+            }
+            if (_aboutWindow != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_aboutWindow.HandleEvent(&evtCopy))
                     continue;
             }
 
@@ -3353,6 +3346,7 @@ public unsafe class GameEngine : IDisposable
         _scriptViewer?.Render();
         _assetViewer?.Render();
         _controlsWindow?.Render();
+        _aboutWindow?.Render();
     }
 
     /// <summary>

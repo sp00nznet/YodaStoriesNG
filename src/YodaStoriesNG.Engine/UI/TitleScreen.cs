@@ -187,9 +187,6 @@ public unsafe class TitleScreen : IDisposable
         int centerX = 400;
         int centerY = 300;
 
-        // Render X-Wing flyby (behind the title image)
-        RenderXWing();
-
         // Render the startup image centered on screen
         if (_startupTexture != null)
         {
@@ -205,6 +202,9 @@ public unsafe class TitleScreen : IDisposable
             RenderTextCentered("YODA STORIES", centerX, 200, 2, 100, 255, 100);
             RenderTextCentered("Next Generation", centerX, 240, 1, 150, 180, 100);
         }
+
+        // Render X-Wing flyby (in front of the title image)
+        RenderXWing();
 
         // Prompt - pulsing (below the image)
         var pulse = (byte)(180 + (int)(50 * Math.Sin(DateTime.Now.Ticks / 2000000.0)));

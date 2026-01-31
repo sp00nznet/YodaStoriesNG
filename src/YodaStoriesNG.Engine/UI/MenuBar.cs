@@ -24,7 +24,7 @@ public unsafe class MenuBar
         new[] { "New Game: Small", "New Game: Medium", "New Game: Large", "New Game: X-tra Large", "-", "Save Game", "Save As...", "Load Game", "-", "Exit" },
         new[] { "Asset Viewer (F2)", "Script Editor (F3)", "Map Viewer (F4)", "-", "Enable Bot", "Disable Bot" },
         new[] { "Graphics: 1x Scale", "Graphics: 2x Scale", "Graphics: 4x Scale", "-", "Keyboard Controls", "Controller Controls", "-", "Select Data File..." },
-        new[] { "About Yoda Stories NG", "GitHub Repository" }
+        new[] { "About Yoda Stories NG" }
     };
 
     // Menu positions (consistent 5px gap between menus)
@@ -47,7 +47,6 @@ public unsafe class MenuBar
     public event Action? OnShowControllerControls;
     public event Action? OnSelectDataFile;
     public event Action? OnShowAbout;
-    public event Action? OnOpenGitHub;
 
     public bool IsMenuOpen => _openMenu >= 0;
 
@@ -238,7 +237,6 @@ public unsafe class MenuBar
                 switch (item)
                 {
                     case 0: OnShowAbout?.Invoke(); break;
-                    case 1: OnOpenGitHub?.Invoke(); break;
                 }
                 break;
         }
