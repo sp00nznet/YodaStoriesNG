@@ -46,13 +46,17 @@ public unsafe class GameRenderer : IDisposable
     public SDLRenderer* GetRenderer() => _renderer;
     public uint GetWindowID() => _window != null ? SDL.GetWindowID(_window) : 0;
 
+    private int _currentScale = 2;
+    public int CurrentScale => _currentScale;
+
     /// <summary>
-    /// Sets the window scale (2x or 4x).
+    /// Sets the window scale (1x, 2x or 4x).
     /// </summary>
     public void SetWindowScale(int scale)
     {
         if (_window == null || _renderer == null) return;
 
+        _currentScale = scale;
         int newWidth = WindowWidth * scale / 2;  // Base is 2x
         int newHeight = WindowHeight * scale / 2;
 
@@ -63,6 +67,33 @@ public unsafe class GameRenderer : IDisposable
         SDL.RenderSetLogicalSize(_renderer, WindowWidth, WindowHeight);
 
         Console.WriteLine($"Window scale set to {scale}x ({newWidth}x{newHeight}), logical size: {WindowWidth}x{WindowHeight}");
+    }
+
+    /// <summary>
+    /// Temporarily disables logical scaling for rendering UI at fixed physical size.
+    /// Call RestoreLogicalSize() after rendering.
+    /// </summary>
+    public void DisableLogicalSize()
+    {
+        if (_renderer == null) return;
+        SDL.RenderSetLogicalSize(_renderer, 0, 0);
+    }
+
+    /// <summary>
+    /// Restores logical scaling after DisableLogicalSize().
+    /// </summary>
+    public void RestoreLogicalSize()
+    {
+        if (_renderer == null) return;
+        SDL.RenderSetLogicalSize(_renderer, WindowWidth, WindowHeight);
+    }
+
+    /// <summary>
+    /// Gets the current physical window size.
+    /// </summary>
+    public (int width, int height) GetPhysicalWindowSize()
+    {
+        return (WindowWidth * _currentScale / 2, WindowHeight * _currentScale / 2);
     }
 
     public GameRenderer(GameData gameData)

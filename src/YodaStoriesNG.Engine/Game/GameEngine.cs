@@ -3335,8 +3335,10 @@ public unsafe class GameEngine : IDisposable
             _renderer.RenderDebugOverlay(tabs, _debugOverlay.CurrentTab, lines, _debugOverlay.ScrollOffset);
         }
 
-        // Render menu bar
+        // Render menu bar at fixed physical size (doesn't scale with graphics)
+        _renderer.DisableLogicalSize();
         _menuBar?.Render();
+        _renderer.RestoreLogicalSize();
 
         // Present frame
         _renderer.Present();
