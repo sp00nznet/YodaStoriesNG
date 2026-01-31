@@ -217,6 +217,22 @@ public class MissionSolver
     /// </summary>
     private BotObjective CreateExplorationObjective()
     {
+        // Priority 0: Get the locator/R2D2 if we don't have it (highest priority after safety)
+        if (!_state.HasLocator)
+        {
+            var locator = FindLocatorItem();
+            if (locator != null)
+            {
+                return new BotObjective
+                {
+                    Type = ObjectiveType.PickupItem,
+                    Description = "Pick up R2D2 (Locator)",
+                    TargetX = locator.X,
+                    TargetY = locator.Y
+                };
+            }
+        }
+
         // Priority 1: Kill nearby enemies (safety first!)
         var enemy = FindNearestEnemy();
         if (enemy != null)
@@ -490,6 +506,29 @@ public class MissionSolver
     public void MarkUsedItemOn(NPC npc, int itemId)
     {
         _usedItemsOnNpcs.Add((_state.CurrentZoneId, npc.X * 10000 + itemId, npc.Y));
+    }
+
+    /// <summary>
+    /// Finds the locator/R2D2 item in the current zone.
+    /// </summary>
+    private ZoneObject? FindLocatorItem()
+    {
+        if (_state.CurrentZone == null) return null;
+
+        foreach (var obj in _state.CurrentZone.Objects)
+        {
+            if (obj.Type == ZoneObjectType.LocatorItem)
+            {
+                // Skip if already collected
+                if (_collectedItems.Contains((_state.CurrentZoneId, obj.X, obj.Y)))
+                    continue;
+                if (_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                    continue;
+
+                return obj;
+            }
+        }
+        return null;
     }
 
     /// <summary>

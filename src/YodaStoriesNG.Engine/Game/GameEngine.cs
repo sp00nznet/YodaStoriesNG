@@ -30,6 +30,7 @@ public unsafe class GameEngine : IDisposable
     private ControlsWindow? _controlsWindow;
     private AboutWindow? _aboutWindow;
     private ScoreWindow? _scoreWindow;
+    private UI.HighScoreWindow? _highScoreWindow;
     private TitleScreen? _titleScreen;
     private MenuBar? _menuBar;
 
@@ -210,11 +211,13 @@ public unsafe class GameEngine : IDisposable
         _menuBar.OnShowControllerControls += ShowControllerControls;
         _menuBar.OnSelectDataFile += SelectDataFile;
         _menuBar.OnShowAbout += ShowAboutDialog;
+        _menuBar.OnShowHighScores += ShowHighScores;
 
         // Initialize controls window, about window, and score window
         _controlsWindow = new ControlsWindow();
         _aboutWindow = new AboutWindow();
         _scoreWindow = new ScoreWindow();
+        _highScoreWindow = new UI.HighScoreWindow();
 
         // Show title screen
         _showingTitleScreen = true;
@@ -225,6 +228,11 @@ public unsafe class GameEngine : IDisposable
     private void ShowAboutDialog()
     {
         _aboutWindow?.Open();
+    }
+
+    private void ShowHighScores()
+    {
+        _highScoreWindow?.Open();
     }
 
     private void SetGraphicsScale(int scale)
@@ -873,6 +881,12 @@ public unsafe class GameEngine : IDisposable
             {
                 SDLEvent evtCopy = evt;
                 if (_scoreWindow.HandleEvent(&evtCopy))
+                    continue;
+            }
+            if (_highScoreWindow != null && _highScoreWindow.IsOpen)
+            {
+                SDLEvent evtCopy = evt;
+                if (_highScoreWindow.HandleEvent(&evtCopy))
                     continue;
             }
 
@@ -2360,6 +2374,12 @@ public unsafe class GameEngine : IDisposable
                                 _messages.ShowMessage("CONGRATULATIONS! You've completed all 15 missions!", MessageType.System);
                                 _messages.ShowMessage("Press R to start a new 15-mission cycle.", MessageType.Info);
 
+                                // Calculate and save high score
+                                var (total, _, _, _, _) = _state.CalculateScore();
+                                var elapsedTime = DateTime.Now - _state.GameStartTime;
+                                string rating = GetScoreRating(total, _gameData!.GameType);
+                                HighScoreManager.AddScore(_gameData!.GameType, total, rating, _state.WorldSize, elapsedTime);
+
                                 // Show score window
                                 _scoreWindow?.Show(_state, _gameData!.GameType);
                             }
@@ -3481,6 +3501,7 @@ public unsafe class GameEngine : IDisposable
         _controlsWindow?.Render();
         _aboutWindow?.Render();
         _scoreWindow?.Render();
+        _highScoreWindow?.Render();
     }
 
     /// <summary>
@@ -3894,6 +3915,33 @@ public unsafe class GameEngine : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// Gets the rating string for a score.
+    /// </summary>
+    private string GetScoreRating(int score, Data.GameType gameType)
+    {
+        if (gameType == Data.GameType.IndianaJones)
+        {
+            if (score >= 450) return "Master Archaeologist";
+            if (score >= 400) return "Professor";
+            if (score >= 350) return "Seasoned Explorer";
+            if (score >= 300) return "Field Researcher";
+            if (score >= 250) return "Curator";
+            if (score >= 200) return "Student";
+            return "Amateur";
+        }
+        else
+        {
+            if (score >= 450) return "Legendary Hero";
+            if (score >= 400) return "Jedi Master";
+            if (score >= 350) return "Jedi Knight";
+            if (score >= 300) return "Padawan";
+            if (score >= 250) return "Force Sensitive";
+            if (score >= 200) return "Adventurer";
+            return "Beginner";
+        }
+    }
+
     public void Dispose()
     {
         // Clean up controller
@@ -3906,6 +3954,7 @@ public unsafe class GameEngine : IDisposable
         _debugMapWindow?.Dispose();
         _scriptViewer?.Dispose();
         _assetViewer?.Dispose();
+        _highScoreWindow?.Dispose();
         _sounds?.Dispose();
         _renderer?.Dispose();
     }
