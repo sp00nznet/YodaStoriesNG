@@ -23,9 +23,19 @@ public unsafe class GameEngine : IDisposable
     private SoundManager? _sounds;
     private MissionBot? _bot;
     private DebugTools? _debugTools;
+    private DebugOverlay? _debugOverlay;
+    private DebugMapWindow? _debugMapWindow;
+    private ScriptEditorWindow? _scriptViewer;
+    private AssetViewerWindow? _assetViewer;
+    private ControlsWindow? _controlsWindow;
+    private TitleScreen? _titleScreen;
+    private MenuBar? _menuBar;
 
     private bool _isRunning;
     private readonly string _dataPath;
+    private bool _showingTitleScreen = true;
+    private WorldSize _selectedWorldSize = WorldSize.Medium;
+    private int _graphicsScale = 2;  // 2x or 4x
 
     // Controller support
     private SDLGameController* _controller;
@@ -97,10 +107,196 @@ public unsafe class GameEngine : IDisposable
         // Initialize game controller support
         InitializeController();
 
-        // Start new game
-        StartNewGame();
+        // Initialize UI components
+        _titleScreen = new TitleScreen(_renderer.GetFont(), _gameData.StartupScreen);
+        _titleScreen.SetRenderer(_renderer.GetRenderer());
+        _titleScreen.OnStartGame += () => { _showingTitleScreen = false; StartNewGame(); };
+
+        _menuBar = new MenuBar(_renderer.GetFont());
+        _menuBar.SetRenderer(_renderer.GetRenderer());
+        _menuBar.OnNewGame += (size) => { _selectedWorldSize = size; StartNewGame(); };
+        _menuBar.OnSaveGame += SaveGame;
+        _menuBar.OnLoadGame += LoadGame;
+        _menuBar.OnExit += () => _isRunning = false;
+        _menuBar.OnAssetViewer += () => _assetViewer?.Toggle();
+        _menuBar.OnScriptEditor += () => _scriptViewer?.Toggle();
+        _menuBar.OnMapViewer += () => _debugMapWindow?.Toggle();
+        _menuBar.OnEnableBot += EnableBot;
+        _menuBar.OnDisableBot += DisableBot;
+        _menuBar.OnSetScale += SetGraphicsScale;
+        _menuBar.OnShowKeyboardControls += ShowKeyboardControls;
+        _menuBar.OnShowControllerControls += ShowControllerControls;
+        _menuBar.OnSelectDataFile += SelectDataFile;
+        _menuBar.OnShowAbout += ShowAboutDialog;
+        _menuBar.OnOpenGitHub += OpenGitHub;
+
+        // Initialize controls window
+        _controlsWindow = new ControlsWindow();
+
+        // Show title screen
+        _showingTitleScreen = true;
 
         return true;
+    }
+
+    private void ShowAboutDialog()
+    {
+        _messages.ShowMessage("Yoda Stories NG v0.1 - Open Source Reimplementation", MessageType.System);
+        _messages.ShowMessage("github.com/anthropics/yoda-stories-ng", MessageType.Info);
+    }
+
+    private void OpenGitHub()
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "https://github.com/anthropics/yoda-stories-ng",
+                UseShellExecute = true
+            });
+        }
+        catch { }
+    }
+
+    private void SetGraphicsScale(int scale)
+    {
+        _graphicsScale = scale;
+        _renderer?.SetWindowScale(scale);
+        _messages.ShowMessage($"Graphics scale set to {scale}x", MessageType.System);
+    }
+
+    private void ShowKeyboardControls()
+    {
+        _controlsWindow?.Open(showController: false);
+    }
+
+    private void ShowControllerControls()
+    {
+        _controlsWindow?.Open(showController: true);
+    }
+
+    private void SelectDataFile()
+    {
+        // For now, show a message - full file dialog would require platform-specific code
+        _messages.ShowMessage("Data file selection: Place YODESK.DTA in the game folder", MessageType.System);
+        _messages.ShowMessage($"Current path: {_dataPath}", MessageType.Info);
+    }
+
+    private void SaveGame()
+    {
+        if (_worldGenerator == null)
+        {
+            _messages.ShowMessage("Cannot save: No active game", MessageType.System);
+            return;
+        }
+
+        var savePath = SaveGameManager.GetDefaultSavePath();
+        if (SaveGameManager.SaveGame(savePath, _state, _worldGenerator))
+        {
+            _messages.ShowMessage("Game saved!", MessageType.System);
+        }
+        else
+        {
+            _messages.ShowMessage("Failed to save game", MessageType.System);
+        }
+    }
+
+    private void LoadGame()
+    {
+        var savePath = SaveGameManager.GetDefaultSavePath();
+        var saveData = SaveGameManager.LoadGame(savePath);
+
+        if (saveData == null)
+        {
+            _messages.ShowMessage("No save file found", MessageType.System);
+            return;
+        }
+
+        // Apply save data to game state
+        SaveGameManager.ApplyToGameState(saveData, _state);
+
+        // Restore world map if we have world data
+        if (saveData.WorldData != null && _worldGenerator != null)
+        {
+            RestoreWorldFromSave(saveData);
+        }
+
+        // Load the saved zone
+        LoadZone(_state.CurrentZoneId, _state.PlayerX, _state.PlayerY);
+
+        _messages.ShowMessage("Game loaded!", MessageType.System);
+    }
+
+    private void RestoreWorldFromSave(SaveGameData saveData)
+    {
+        if (saveData.WorldData == null || _worldGenerator == null)
+            return;
+
+        var worldData = saveData.WorldData;
+        var world = new WorldMap
+        {
+            Planet = worldData.Planet,
+            MissionNumber = worldData.MissionNumber,
+            StartingZoneId = worldData.StartingZoneId,
+            LandingZoneId = worldData.LandingZoneId,
+            ObjectiveZoneId = worldData.ObjectiveZoneId,
+            YodaZoneId = worldData.YodaZoneId,
+            XWingZoneId = worldData.XWingZoneId,
+            TheForceZoneId = worldData.TheForceZoneId,
+            LandingPosition = (worldData.LandingPositionX, worldData.LandingPositionY),
+            ObjectivePosition = (worldData.ObjectivePositionX, worldData.ObjectivePositionY),
+            YodaPosition = (worldData.YodaPositionX, worldData.YodaPositionY),
+            TheForcePosition = (worldData.TheForcePositionX, worldData.TheForcePositionY),
+            DagobahZones = worldData.DagobahZones.ToList(),
+            StartingItemId = worldData.StartingItemId,
+            RequiredItems = worldData.RequiredItems.ToList(),
+        };
+
+        // Restore grid
+        if (worldData.GridData.Count > 0 && worldData.GridWidth > 0 && worldData.GridHeight > 0)
+        {
+            world.Grid = new int?[worldData.GridHeight, worldData.GridWidth];
+            int i = 0;
+            for (int y = 0; y < worldData.GridHeight; y++)
+            {
+                for (int x = 0; x < worldData.GridWidth; x++)
+                {
+                    if (i < worldData.GridData.Count)
+                        world.Grid[y, x] = worldData.GridData[i++];
+                }
+            }
+        }
+
+        // Restore connections
+        world.Connections = worldData.Connections.ToDictionary(
+            kv => kv.Key,
+            kv => new ZoneConnections
+            {
+                North = kv.Value.North,
+                South = kv.Value.South,
+                East = kv.Value.East,
+                West = kv.Value.West
+            }
+        );
+
+        world.RoomConnections = new Dictionary<int, List<int>>(worldData.RoomConnections);
+        world.RoomParents = new Dictionary<int, int>(worldData.RoomParents);
+
+        // Restore mission
+        if (saveData.MissionData != null)
+        {
+            world.Mission = new Mission
+            {
+                MissionNumber = saveData.MissionData.MissionNumber,
+                Name = saveData.MissionData.Name,
+                Description = saveData.MissionData.Description,
+                CurrentStep = saveData.MissionData.CurrentStep,
+                IsCompleted = saveData.MissionData.IsCompleted,
+            };
+        }
+
+        // Set on world generator
+        _worldGenerator.SetCurrentWorld(world);
     }
 
     /// <summary>
@@ -159,10 +355,11 @@ public unsafe class GameEngine : IDisposable
         _state.CurrentWeaponIndex = 0;
         _state.SelectedWeapon = LIGHTSABER_TILE;
 
-        // Generate the world
+        // Generate the world with selected size
         _worldGenerator = new WorldGenerator(_gameData!);
         _worldGenerator.DumpDagobahInfo();  // Debug: print Dagobah zone analysis
-        var world = _worldGenerator.GenerateWorld();
+        var world = _worldGenerator.GenerateWorld(_selectedWorldSize);
+        Console.WriteLine($"Generated {_selectedWorldSize} world ({world.GridWidth}x{world.GridHeight} grid)");
 
         // Welcome message - minimal startup hints (mission given by Yoda)
         _messages.ShowMessage("Find Yoda to receive your mission.", MessageType.System);
@@ -197,6 +394,12 @@ public unsafe class GameEngine : IDisposable
 
         // Initialize debug tools
         _debugTools = new DebugTools(_gameData!, _state, _worldGenerator);
+        _debugOverlay = new DebugOverlay(_gameData!, _state, _worldGenerator);
+        _debugMapWindow = new DebugMapWindow(_state, _worldGenerator, _gameData!);
+        _scriptViewer = new ScriptEditorWindow(_state, _gameData!);
+        _scriptViewer.OnTeleportToZone += TeleportToZoneFromEditor;
+        _scriptViewer.OnJumpToBot += JumpToBotZone;
+        _assetViewer = new AssetViewerWindow(_gameData!);
 
         // Initialize bot and auto-start for debugging
         if (_worldGenerator != null)
@@ -230,6 +433,48 @@ public unsafe class GameEngine : IDisposable
     {
         _bot?.Stop();
         _messages.ShowMessage("Bot DISABLED", MessageType.System);
+    }
+
+    /// <summary>
+    /// Teleports to a zone from the script editor.
+    /// </summary>
+    private void TeleportToZoneFromEditor(int zoneId)
+    {
+        if (zoneId < 0 || zoneId >= _gameData!.Zones.Count)
+            return;
+
+        var zone = _gameData.Zones[zoneId];
+        if (zone.Width == 0 || zone.Height == 0)
+        {
+            _messages.ShowMessage($"Zone {zoneId} is empty", MessageType.System);
+            return;
+        }
+
+        // Stop the bot during manual teleport
+        _bot?.Stop();
+
+        // Load the zone
+        LoadZone(zoneId);
+        _messages.ShowMessage($"Teleported to Zone {zoneId} ({zone.Planet})", MessageType.System);
+
+        // Script viewer will now show highlights for this zone
+        Console.WriteLine($"[ScriptEditor] Teleported to Zone {zoneId} - highlights should now be visible");
+    }
+
+    /// <summary>
+    /// Jumps the script viewer to the bot's current zone.
+    /// </summary>
+    private void JumpToBotZone()
+    {
+        if (_bot == null || !_bot.IsRunning)
+        {
+            _messages.ShowMessage("Bot is not running", MessageType.System);
+            return;
+        }
+
+        // The bot is in the same zone as the player
+        _scriptViewer?.JumpToZone(_state.CurrentZoneId);
+        _messages.ShowMessage($"Jumped to bot's zone: {_state.CurrentZoneId}", MessageType.System);
     }
 
     /// <summary>
@@ -308,6 +553,10 @@ public unsafe class GameEngine : IDisposable
 
         _state.CurrentZoneId = zoneId;
         _state.CurrentZone = zone;
+        _state.MarkZoneVisited(zoneId);
+
+        // Notify script viewer of zone change
+        _scriptViewer?.JumpToCurrentZone();
 
         // Find spawn location
         if (spawnX.HasValue && spawnY.HasValue)
@@ -435,6 +684,48 @@ public unsafe class GameEngine : IDisposable
     {
         while (_renderer!.PollEvent(out var evt))
         {
+            // Handle title screen events
+            if (_showingTitleScreen && _titleScreen != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_titleScreen.HandleEvent(&evtCopy))
+                    continue;
+            }
+
+            // Handle menu bar events
+            if (!_showingTitleScreen && _menuBar != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_menuBar.HandleEvent(&evtCopy))
+                    continue;
+            }
+
+            // Handle debug window events
+            if (_debugMapWindow != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_debugMapWindow.HandleEvent(&evtCopy))
+                    continue;
+            }
+            if (_scriptViewer != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_scriptViewer.HandleEvent(&evtCopy))
+                    continue;
+            }
+            if (_assetViewer != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_assetViewer.HandleEvent(&evtCopy))
+                    continue;
+            }
+            if (_controlsWindow != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_controlsWindow.HandleEvent(&evtCopy))
+                    continue;
+            }
+
             switch ((SDLEventType)evt.Type)
             {
                 case SDLEventType.Quit:
@@ -625,9 +916,53 @@ public unsafe class GameEngine : IDisposable
         const int SDLK_s = 115;
         const int SDLK_w = 119;
         const int SDLK_x = 120;
+        const int SDLK_F1 = 1073741882;
+        const int SDLK_F2 = 1073741883;
+
+        // Handle debug overlay input first
+        if (_debugOverlay?.IsVisible == true)
+        {
+            switch (keyCode)
+            {
+                case SDLK_F1:
+                    _debugOverlay.Toggle();
+                    return;
+                case SDLK_LEFT:
+                    _debugOverlay.PrevTab();
+                    return;
+                case SDLK_RIGHT:
+                    _debugOverlay.NextTab();
+                    return;
+                case SDLK_UP:
+                    _debugOverlay.ScrollUp();
+                    return;
+                case SDLK_DOWN:
+                    _debugOverlay.ScrollDown();
+                    return;
+                case SDLK_ESCAPE:
+                    _debugOverlay.Toggle();
+                    return;
+            }
+        }
 
         switch (keyCode)
         {
+            case SDLK_F1:  // F1 - Toggle debug overlay
+                _debugOverlay?.Toggle();
+                break;
+
+            case 1073741883:  // F2 - Toggle debug map window
+                _debugMapWindow?.Toggle();
+                break;
+
+            case 1073741884:  // F3 - Toggle script viewer
+                _scriptViewer?.Toggle();
+                break;
+
+            case 1073741885:  // F4 - Toggle asset viewer
+                _assetViewer?.Toggle();
+                break;
+
             case SDLK_ESCAPE:
                 _isRunning = false;
                 break;
@@ -1229,6 +1564,7 @@ public unsafe class GameEngine : IDisposable
         }
 
         // Check for edge transition using world generator connections
+        // IMPORTANT: Only allow transition if both the current edge and destination entry are walkable
         if (_worldGenerator != null)
         {
             var direction = (dx, dy) switch
@@ -1241,19 +1577,85 @@ public unsafe class GameEngine : IDisposable
             };
 
             var connectedZoneId = _worldGenerator.GetConnectedZone(_state.CurrentZoneId, direction);
-            Console.WriteLine($"Edge transition {direction}: connected zone = {connectedZoneId}");
 
             if (connectedZoneId.HasValue && connectedZoneId.Value < _gameData!.Zones.Count)
             {
                 var destZone = _gameData.Zones[connectedZoneId.Value];
 
-                // Spawn on opposite edge
+                // Calculate spawn position on opposite edge
                 int spawnX, spawnY;
-                if (dx < 0) { spawnX = destZone.Width - 2; spawnY = Math.Clamp(_state.PlayerY, 1, destZone.Height - 2); }
-                else if (dx > 0) { spawnX = 1; spawnY = Math.Clamp(_state.PlayerY, 1, destZone.Height - 2); }
-                else if (dy < 0) { spawnX = Math.Clamp(_state.PlayerX, 1, destZone.Width - 2); spawnY = destZone.Height - 2; }
-                else { spawnX = Math.Clamp(_state.PlayerX, 1, destZone.Width - 2); spawnY = 1; }
+                int edgeCheckX, edgeCheckY; // Position to check in destination zone
 
+                if (dx < 0)
+                {
+                    // Going left - spawn on right edge of dest
+                    spawnX = destZone.Width - 2;
+                    spawnY = Math.Clamp(_state.PlayerY, 1, destZone.Height - 2);
+                    edgeCheckX = destZone.Width - 1;
+                    edgeCheckY = spawnY;
+                }
+                else if (dx > 0)
+                {
+                    // Going right - spawn on left edge of dest
+                    spawnX = 1;
+                    spawnY = Math.Clamp(_state.PlayerY, 1, destZone.Height - 2);
+                    edgeCheckX = 0;
+                    edgeCheckY = spawnY;
+                }
+                else if (dy < 0)
+                {
+                    // Going up - spawn on bottom edge of dest
+                    spawnX = Math.Clamp(_state.PlayerX, 1, destZone.Width - 2);
+                    spawnY = destZone.Height - 2;
+                    edgeCheckX = spawnX;
+                    edgeCheckY = destZone.Height - 1;
+                }
+                else
+                {
+                    // Going down - spawn on top edge of dest
+                    spawnX = Math.Clamp(_state.PlayerX, 1, destZone.Width - 2);
+                    spawnY = 1;
+                    edgeCheckX = spawnX;
+                    edgeCheckY = 0;
+                }
+
+                // Check if the current zone's edge is walkable (player position edge tile)
+                int currentEdgeX = Math.Clamp(_state.PlayerX, 0, _state.CurrentZone!.Width - 1);
+                int currentEdgeY = Math.Clamp(_state.PlayerY, 0, _state.CurrentZone.Height - 1);
+                if (!IsEdgeTileWalkable(_state.CurrentZone, currentEdgeX, currentEdgeY))
+                {
+                    Console.WriteLine($"Edge transition blocked: current zone edge ({currentEdgeX},{currentEdgeY}) not walkable");
+                    _messages.ShowMessage("Can't go that way", MessageType.Info);
+                    return;
+                }
+
+                // Check if destination zone's entry edge is walkable
+                if (!IsEdgeTileWalkable(destZone, edgeCheckX, edgeCheckY))
+                {
+                    Console.WriteLine($"Edge transition blocked: dest zone {connectedZoneId} edge ({edgeCheckX},{edgeCheckY}) not walkable");
+                    _messages.ShowMessage("Can't go that way", MessageType.Info);
+                    return;
+                }
+
+                // Also verify spawn position is walkable
+                if (!IsPositionWalkable(destZone, spawnX, spawnY))
+                {
+                    // Try to find a nearby walkable position
+                    var walkable = FindNearestWalkablePosition(spawnX, spawnY, destZone);
+                    if (walkable.HasValue)
+                    {
+                        spawnX = walkable.Value.x;
+                        spawnY = walkable.Value.y;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Edge transition blocked: no walkable spawn in dest zone {connectedZoneId}");
+                        _messages.ShowMessage("Can't go that way", MessageType.Info);
+                        return;
+                    }
+                }
+
+                Console.WriteLine($"Edge transition {direction}: zone {_state.CurrentZoneId} -> {connectedZoneId} at ({spawnX},{spawnY})");
                 _state.PreviousZoneId = _state.CurrentZoneId;
                 LoadZone(connectedZoneId.Value, spawnX, spawnY);
                 return;
@@ -2301,6 +2703,40 @@ public unsafe class GameEngine : IDisposable
     }
 
     /// <summary>
+    /// Checks if an edge tile (at zone boundary) is walkable for zone transitions.
+    /// Edge tiles are at x=0, y=0, x=width-1, or y=height-1.
+    /// Returns true if the tile allows passage (not a wall/blocking object).
+    /// </summary>
+    private bool IsEdgeTileWalkable(Zone zone, int x, int y)
+    {
+        // Must be within zone bounds
+        if (x < 0 || x >= zone.Width || y < 0 || y >= zone.Height)
+            return false;
+
+        // Check layer 1 (middle layer) for blocking objects - this is where walls/objects are
+        var middleTileId = zone.GetTile(x, y, 1);
+        if (middleTileId != 0xFFFF && middleTileId < _gameData!.Tiles.Count)
+        {
+            var tile = _gameData.Tiles[middleTileId];
+
+            // Solid objects that aren't floors block passage
+            if (tile.IsObject && !tile.IsFloor)
+            {
+                return false;
+            }
+
+            // MapWall flag indicates a wall tile
+            if ((tile.Flags & TileFlags.MapWall) != 0)
+            {
+                return false;
+            }
+        }
+
+        // No blocking tiles found - edge is walkable
+        return true;
+    }
+
+    /// <summary>
     /// Checks for X-Wing and spawns it as a visible object.
     /// </summary>
     private void CheckForXWing(int zoneId)
@@ -2420,7 +2856,7 @@ public unsafe class GameEngine : IDisposable
 
     private void Update(double deltaTime)
     {
-        if (_state.IsPaused)
+        if (_showingTitleScreen || _state.IsPaused)
             return;
 
         // Update animation
@@ -2730,7 +3166,18 @@ public unsafe class GameEngine : IDisposable
 
     private void Render()
     {
-        if (_renderer == null || _state.CurrentZone == null)
+        if (_renderer == null)
+            return;
+
+        // Render title screen
+        if (_showingTitleScreen)
+        {
+            _titleScreen?.Render();
+            _renderer.Present();
+            return;
+        }
+
+        if (_state.CurrentZone == null)
             return;
 
         // Render zone
@@ -2781,6 +3228,13 @@ public unsafe class GameEngine : IDisposable
         // Render projectiles
         RenderProjectiles();
 
+        // Render script viewer highlights (if viewing current zone)
+        if (_scriptViewer?.IsOpen == true)
+        {
+            var highlights = _scriptViewer.GetHighlightsForZone(_state.CurrentZoneId);
+            _renderer.RenderHighlights(highlights, _state.CameraX, _state.CameraY);
+        }
+
         // Render HUD
         _renderer.RenderHUD(_state.Health, _state.MaxHealth, _state.Inventory, _state.SelectedWeapon, _state.SelectedItem);
 
@@ -2806,8 +3260,25 @@ public unsafe class GameEngine : IDisposable
         // Render messages
         _renderer.RenderMessages(_messages.GetMessages(), _messages.CurrentDialogue);
 
+        // Render debug overlay if visible
+        if (_debugOverlay?.IsVisible == true)
+        {
+            var tabs = _debugOverlay.GetTabs();
+            var lines = _debugOverlay.GetTabContent(_debugOverlay.CurrentTab);
+            _renderer.RenderDebugOverlay(tabs, _debugOverlay.CurrentTab, lines, _debugOverlay.ScrollOffset);
+        }
+
+        // Render menu bar
+        _menuBar?.Render();
+
         // Present frame
         _renderer.Present();
+
+        // Render debug map window (separate window)
+        _debugMapWindow?.Render();
+        _scriptViewer?.Render();
+        _assetViewer?.Render();
+        _controlsWindow?.Render();
     }
 
     /// <summary>
@@ -3109,6 +3580,9 @@ public unsafe class GameEngine : IDisposable
             _controller = null;
         }
 
+        _debugMapWindow?.Dispose();
+        _scriptViewer?.Dispose();
+        _assetViewer?.Dispose();
         _sounds?.Dispose();
         _renderer?.Dispose();
     }

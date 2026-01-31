@@ -42,6 +42,28 @@ public unsafe class GameRenderer : IDisposable
 
     public bool IsInitialized => _window != null;
 
+    public BitmapFont GetFont() => _font;
+    public SDLRenderer* GetRenderer() => _renderer;
+
+    /// <summary>
+    /// Sets the window scale (2x or 4x).
+    /// </summary>
+    public void SetWindowScale(int scale)
+    {
+        if (_window == null || _renderer == null) return;
+
+        int newWidth = WindowWidth * scale / 2;  // Base is 2x
+        int newHeight = WindowHeight * scale / 2;
+
+        SDL.SetWindowSize(_window, newWidth, newHeight);
+
+        // Set logical size so all rendering scales properly
+        // The logical size stays at the base resolution, SDL handles the scaling
+        SDL.RenderSetLogicalSize(_renderer, WindowWidth, WindowHeight);
+
+        Console.WriteLine($"Window scale set to {scale}x ({newWidth}x{newHeight}), logical size: {WindowWidth}x{WindowHeight}");
+    }
+
     public GameRenderer(GameData gameData)
     {
         _gameData = gameData;
@@ -423,6 +445,79 @@ public unsafe class GameRenderer : IDisposable
     }
 
     /// <summary>
+    /// Renders highlight boxes at specified world positions.
+    /// Used by the script viewer to show referenced positions.
+    /// </summary>
+    public void RenderHighlights(IReadOnlyList<UI.ScriptHighlight> highlights, int cameraX, int cameraY)
+    {
+        if (highlights.Count == 0) return;
+
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+
+        foreach (var h in highlights)
+        {
+            // Check if within viewport
+            if (h.X < cameraX || h.X >= cameraX + ViewportTilesX ||
+                h.Y < cameraY || h.Y >= cameraY + ViewportTilesY)
+                continue;
+
+            var screenX = (h.X - cameraX) * Tile.Width * Scale;
+            var screenY = (h.Y - cameraY) * Tile.Height * Scale;
+            var size = Tile.Width * Scale;
+
+            // Color based on highlight type
+            byte r = 255, g = 255, b = 255;
+            switch (h.Type)
+            {
+                case UI.HighlightType.Position:
+                    r = 0; g = 255; b = 255; // Cyan
+                    break;
+                case UI.HighlightType.Tile:
+                    r = 255; g = 255; b = 0; // Yellow
+                    break;
+                case UI.HighlightType.Door:
+                    r = 0; g = 255; b = 0; // Green
+                    break;
+                case UI.HighlightType.NPC:
+                    r = 255; g = 0; b = 255; // Magenta
+                    break;
+                case UI.HighlightType.Item:
+                    r = 255; g = 150; b = 0; // Orange
+                    break;
+                case UI.HighlightType.Trigger:
+                    r = 100; g = 150; b = 255; // Blue
+                    break;
+            }
+
+            // Draw pulsing highlight box
+            var pulse = (byte)(150 + (int)(50 * Math.Sin(DateTime.Now.Ticks / 1000000.0)));
+
+            // Outer glow
+            SDL.SetRenderDrawColor(_renderer, r, g, b, (byte)(pulse / 3));
+            var outerRect = new SDLRect { X = screenX - 4, Y = screenY - 4, W = size + 8, H = size + 8 };
+            SDL.RenderFillRect(_renderer, &outerRect);
+
+            // Border
+            SDL.SetRenderDrawColor(_renderer, r, g, b, pulse);
+            var rect = new SDLRect { X = screenX, Y = screenY, W = size, H = size };
+            SDL.RenderDrawRect(_renderer, &rect);
+
+            // Inner border
+            var innerRect = new SDLRect { X = screenX + 2, Y = screenY + 2, W = size - 4, H = size - 4 };
+            SDL.RenderDrawRect(_renderer, &innerRect);
+
+            // Draw label if there's room
+            if (!string.IsNullOrEmpty(h.Label))
+            {
+                SDL.SetRenderDrawColor(_renderer, 0, 0, 0, 180);
+                var labelBg = new SDLRect { X = screenX, Y = screenY - 12, W = h.Label.Length * 8 + 4, H = 12 };
+                SDL.RenderFillRect(_renderer, &labelBg);
+                _font.RenderText(_renderer, h.Label, screenX + 2, screenY - 10, 1, r, g, b, 255);
+            }
+        }
+    }
+
+    /// <summary>
     /// Renders a screen overlay for damage/attack feedback.
     /// </summary>
     public void RenderDamageOverlay(double intensity)
@@ -640,6 +735,79 @@ public unsafe class GameRenderer : IDisposable
     public void Present()
     {
         SDL.RenderPresent(_renderer);
+    }
+
+    /// <summary>
+    /// Renders a debug overlay with tabbed content.
+    /// </summary>
+    public void RenderDebugOverlay(string[] tabs, int currentTab, List<string> lines, int scrollOffset)
+    {
+        // Semi-transparent background
+        int panelX = 20, panelY = 20;
+        int panelWidth = WindowWidth - 40;
+        int panelHeight = WindowHeight - 40;
+
+        SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+        SDL.SetRenderDrawColor(_renderer, 0, 0, 0, 220);
+        var bgRect = new SDLRect { X = panelX, Y = panelY, W = panelWidth, H = panelHeight };
+        SDL.RenderFillRect(_renderer, &bgRect);
+
+        // Border
+        SDL.SetRenderDrawColor(_renderer, 0, 200, 0, 255);
+        SDL.RenderDrawRect(_renderer, &bgRect);
+
+        // Tabs
+        int tabWidth = panelWidth / tabs.Length;
+        for (int i = 0; i < tabs.Length; i++)
+        {
+            var tabRect = new SDLRect { X = panelX + i * tabWidth, Y = panelY, W = tabWidth, H = 20 };
+
+            if (i == currentTab)
+            {
+                SDL.SetRenderDrawColor(_renderer, 0, 150, 0, 255);
+                SDL.RenderFillRect(_renderer, &tabRect);
+            }
+            SDL.SetRenderDrawColor(_renderer, 0, 200, 0, 255);
+            SDL.RenderDrawRect(_renderer, &tabRect);
+
+            // Tab label - use RGB values (scale=1, r, g, b, a)
+            if (i == currentTab)
+                _font.RenderText(_renderer, tabs[i], panelX + i * tabWidth + 5, panelY + 4, 1, 255, 255, 255, 255);
+            else
+                _font.RenderText(_renderer, tabs[i], panelX + i * tabWidth + 5, panelY + 4, 1, 0, 255, 0, 255);
+        }
+
+        // Content area
+        int contentY = panelY + 25;
+        int lineHeight = 14;
+        int maxLines = (panelHeight - 50) / lineHeight;
+
+        for (int i = 0; i < maxLines && scrollOffset + i < lines.Count; i++)
+        {
+            var line = lines[scrollOffset + i];
+            byte r = 0, g = 255, b = 0;  // Default green
+
+            if (line.StartsWith("===")) { r = 255; g = 255; b = 0; }  // Yellow for headers
+            else if (line.StartsWith("  ")) { r = 136; g = 255; b = 136; }  // Light green for indented
+
+            _font.RenderText(_renderer, line, panelX + 10, contentY + i * lineHeight, 1, r, g, b, 255);
+        }
+
+        // Scrollbar
+        if (lines.Count > maxLines)
+        {
+            float ratio = (float)scrollOffset / Math.Max(1, lines.Count - maxLines);
+            int sbHeight = Math.Max(20, (panelHeight - 50) * maxLines / lines.Count);
+            int sbY = contentY + (int)((panelHeight - 50 - sbHeight) * ratio);
+
+            SDL.SetRenderDrawColor(_renderer, 0, 150, 0, 200);
+            var sbRect = new SDLRect { X = panelX + panelWidth - 15, Y = sbY, W = 10, H = sbHeight };
+            SDL.RenderFillRect(_renderer, &sbRect);
+        }
+
+        // Help text
+        _font.RenderText(_renderer, "F1:Close  Left/Right:Tabs  Up/Down:Scroll",
+            panelX + 10, panelY + panelHeight - 18, 1, 136, 136, 136, 255);
     }
 
     /// <summary>

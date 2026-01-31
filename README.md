@@ -8,18 +8,40 @@ A modern reimplementation of **Star Wars: Yoda Stories** (1997) built with C# an
 
 ## About
 
-Yoda Stories NG is a fan-made recreation of the classic LucasArts desktop adventure game. It parses the original game data files and reimplements the game engine from scratch, featuring:
+Yoda Stories NG is a fan-made recreation of the classic LucasArts desktop adventure game. It parses the original game data files and reimplements the game engine from scratch.
+
+<!-- SCREENSHOT: Title Screen -->
+![Title Screen](docs/screenshots/title-screen.png)
+
+## Key Features
 
 - **Complete data file parsing** - Reads original `.dta` game assets
-- **Procedural world generation** - Each playthrough is unique
-- **Mission system** - Quest chains with item trading and puzzle solving
+- **Procedural world generation** - Each playthrough generates a unique 10x10 or 15x15 world map
+- **15 mission cycle** - Full mission progression with item chains and NPC puzzles
 - **Combat system** - Melee and ranged weapons with NPC AI
+- **Save/Load system** - JSON-based save files with full game state
 - **Widescreen UI** - Modern layout with sidebar HUD
 - **Xbox controller support** - Full gamepad controls
+- **Configurable graphics** - 2x and 4x scaling options
+- **Automated Mission Bot** - AI-powered gameplay with A* pathfinding
 
 ## Screenshots
 
-*Coming soon*
+### Gameplay
+<!-- SCREENSHOT: Gameplay showing player in a zone with NPCs -->
+![Gameplay](docs/screenshots/gameplay.png)
+
+### World Map Viewer
+<!-- SCREENSHOT: Debug Map Window showing 10x10 or 15x15 grid -->
+![World Map](docs/screenshots/world-map.png)
+
+### Script Editor
+<!-- SCREENSHOT: Script Editor window showing IACT scripts -->
+![Script Editor](docs/screenshots/script-editor.png)
+
+### Asset Viewer
+<!-- SCREENSHOT: Asset Viewer showing tiles/characters -->
+![Asset Viewer](docs/screenshots/asset-viewer.png)
 
 ## Requirements
 
@@ -48,19 +70,28 @@ dotnet run --project src/YodaStoriesNG.Engine
 | Key | Action |
 |-----|--------|
 | **WASD** / **Arrow Keys** | Move |
-| **Shift + Move** | Pull blocks |
+| **Shift + Direction** | Pull blocks |
 | **Space** | Action / Talk / Attack |
-| **1-8** | Select inventory item |
+| **1-8** | Select inventory slot |
 | **Tab** | Toggle weapon |
 | **O** | Show mission objective |
 | **X** | Travel (X-Wing) |
-| **B** | Toggle Bot (auto-play) |
-| **I** | Inspect (debug dump to console) |
-| **F** | Find zone with NPCs/items |
-| **M** | Toggle sound mute |
-| **N/P** | Next/Previous zone (debug) |
 | **R** | Restart game |
+| **M** | Toggle sound mute |
 | **Escape** | Quit |
+
+### Debug Controls
+
+| Key | Action |
+|-----|--------|
+| **F1** | Toggle Debug Overlay |
+| **F2** | Toggle Map Viewer |
+| **F3** | Toggle Script Editor |
+| **F4** | Toggle Asset Viewer |
+| **B** | Toggle Mission Bot |
+| **I** | Inspect (console dump) |
+| **N/P** | Next/Previous zone |
+| **F** | Find zone with content |
 
 ### Xbox Controller
 
@@ -75,116 +106,164 @@ dotnet run --project src/YodaStoriesNG.Engine
 | **Start** | Restart game |
 | **Back** | Quit |
 
-## Game Data
+## Menu System
 
-This project requires the original `yodesk.dta` file from Star Wars: Yoda Stories.
+### File Menu
+- **New Game: Small/Medium/Large/X-tra Large** - Start new game with different world sizes
+- **Save Game** - Save current progress
+- **Load Game** - Load saved game
+- **Exit** - Quit the game
 
-Place the file in the `data/` folder or run the game from the directory containing your Yoda Stories installation.
+### Debug Menu
+- **Asset Viewer (F2)** - Browse game tiles and characters
+- **Script Editor (F3)** - View and analyze IACT action scripts
+- **Map Viewer (F4)** - See the full world map with zone types
+- **Enable/Disable Bot** - Toggle automated gameplay
+
+### Config Menu
+- **Graphics: 2x/4x Scale** - Change window size and rendering scale
+- **Keyboard Controls** - View keyboard control mappings
+- **Controller Controls** - View Xbox controller mappings
+- **Select Data File** - Choose which .dta file to load
+
+## World Generation
+
+The game generates procedural worlds using the original algorithm:
+
+| Size | Grid | Puzzles | Description |
+|------|------|---------|-------------|
+| **Small** | 10x10 | 4-8 | Quick adventure |
+| **Medium** | 10x10 | 6-12 | Standard game |
+| **Large** | 10x10 | 8-16 | Extended quest |
+| **X-tra Large** | 15x15 | 12-24 | Epic journey |
+
+Each world includes:
+- **Spaceport** - Landing zone with X-Wing
+- **Puzzle zones** - Contain items and NPCs for trading
+- **Blockades** - Require specific items to pass
+- **Travel zones** - Vehicle connections to islands
+- **Islands** - Remote areas with special puzzles
+- **The Force** - Guaranteed weapon at distance 2 from start
+
+## Debug Tools
+
+### Map Viewer (F2/F4)
+Shows the complete world grid with color-coded zones:
+- Player position highlighted with pulsing border
+- Zone types: Puzzle, Spaceport, Blockade, Travel, Island
+- Mission progress and current objective
+
+### Script Editor (F3)
+Browse and analyze zone action scripts:
+- View IACT conditions and instructions
+- Click on referenced positions to highlight in-game
+- Teleport to zones for testing
+
+### Asset Viewer
+Browse the complete tile atlas:
+- All 2000+ game tiles
+- Character frames and animations
+- Filter by tile type
+
+### Console Inspector (I)
+Dumps detailed game state to console:
+- Current zone objects and NPCs
+- Tile data at player position
+- Full IACT script dump
+- Inventory and weapon status
+
+## Save System
+
+Games are saved to `%APPDATA%/YodaStoriesNG/saves/` in JSON format.
+
+Save files include:
+- Player position, health, inventory
+- World map and zone connections
+- Mission progress and puzzle state
+- All game variables and flags
+
+## Mission Bot
+
+The automated Mission Bot (press **B**) plays the game automatically:
+
+- **A* pathfinding** for optimal movement
+- **Auto-combat** with melee and ranged weapons
+- **Item collection** from crates and NPCs
+- **Puzzle solving** through item trading
+- **Zone exploration** to find objectives
+
+The bot displays its current task in the HUD when active.
 
 ## Project Structure
 
 ```
 YodaStoriesNG/
 ├── src/
-│   ├── YodaStoriesNG.Engine/
-│   │   ├── Audio/           # Sound playback
-│   │   ├── Bot/             # Automated mission bot
-│   │   │   ├── MissionBot.cs
-│   │   │   ├── BotActions.cs
-│   │   │   ├── MissionSolver.cs
-│   │   │   └── Pathfinder.cs
-│   │   ├── Data/            # Game data structures
-│   │   ├── Debug/           # Debug tools
-│   │   │   └── DebugTools.cs
-│   │   ├── Game/            # Game logic
-│   │   │   ├── GameEngine.cs
-│   │   │   ├── GameState.cs
-│   │   │   ├── WorldGenerator.cs
-│   │   │   ├── ActionExecutor.cs
-│   │   │   └── NPC.cs
-│   │   ├── Parsing/         # DTA file parser
-│   │   ├── Rendering/       # SDL2 renderer
-│   │   └── UI/              # Message system
-│   └── IndyNG.Engine/       # Indiana Jones engine (WIP)
+│   └── YodaStoriesNG.Engine/
+│       ├── Audio/           # Sound playback
+│       ├── Bot/             # Automated mission bot
+│       │   ├── MissionBot.cs
+│       │   ├── BotActions.cs
+│       │   ├── MissionSolver.cs
+│       │   └── Pathfinder.cs
+│       ├── Data/            # Game data structures
+│       ├── Debug/           # Debug tools
+│       ├── Game/            # Core game logic
+│       │   ├── GameEngine.cs
+│       │   ├── GameState.cs
+│       │   ├── WorldGenerator.cs
+│       │   ├── MapGenerator.cs
+│       │   ├── ActionExecutor.cs
+│       │   ├── SaveGameManager.cs
+│       │   └── NPC.cs
+│       ├── Parsing/         # DTA file parser
+│       ├── Rendering/       # SDL2 renderer
+│       │   ├── GameRenderer.cs
+│       │   ├── TileRenderer.cs
+│       │   └── BitmapFont.cs
+│       └── UI/              # UI components
+│           ├── MenuBar.cs
+│           ├── TitleScreen.cs
+│           ├── ControlsWindow.cs
+│           ├── DebugMapWindow.cs
+│           ├── ScriptEditorWindow.cs
+│           └── AssetViewerWindow.cs
 └── README.md
-```
-
-## Features
-
-### Implemented
-
-- DTA file parsing (tiles, zones, characters, puzzles, sounds)
-- Zone rendering with 3-layer tile system
-- Player movement and collision detection
-- NPC spawning and AI (wandering, chasing)
-- Combat system (melee attacks, health, damage)
-- Inventory management
-- Weapon system (lightsaber, blaster, The Force)
-- Zone transitions (doors, edge scrolling)
-- X-Wing travel between Dagobah and planets
-- Action script execution (IACT)
-- Message and dialogue system
-- Sound effects
-- Mission/quest system with puzzle chains
-- IZAX entity parsing (NPC item handoff)
-- Widescreen UI layout
-- Xbox controller support
-- **Automated Mission Bot** - A* pathfinding, auto-combat, item collection
-- **Debug Tools** - IACT script viewer, game state inspector
-- **World Map Visualizer** - Shows 10x10 sector grid with zone types
-
-### In Progress
-
-- Two-strain puzzle system (matching WebFun)
-- 15 mission progression cycle
-- Full mission chain validation
-- Save/load game state
-
-### Planned
-
-- Map editor GUI
-- Mobile/portrait mode UI
-- Additional puzzle types
-- Mod support
-
-## Debug Tools
-
-Press **I** in-game to dump debug information to the console:
-
-- **Game State**: Current zone, player position, health
-- **Zone Info**: All objects, NPCs, tiles at player position
-- **IACT Scripts**: Full dump of zone action scripts with conditions and instructions
-- **Inventory**: Items and weapons with selected/equipped status
-- **Mission Progress**: Puzzle chain status and hints
-
-The **World Map Visualizer** is printed on startup showing the 10x10 sector grid:
-```
-╔════════════════════════════════════════════════════════════════════╗
-║                    WORLD MAP VISUALIZATION                         ║
-║ Legend: · Empty  P Puzzle  S Spaceport  T Travel  I Island        ║
-╠════════════════════════════════════════════════════════════════════╣
-║     │  0   │  1   │  2   │  3   │  4   │  5   │  6   │  7   │...
 ```
 
 ## Technical Details
 
 ### Data Format
 
-The game parses the proprietary `.dta` format which contains:
+The game parses the proprietary `.dta` format:
 
-- **TILE** - 32x32 pixel tiles with palette indices
-- **ZONE** - Map data with 3 tile layers
-- **CHAR** - Character definitions and animations
-- **PUZ2** - Puzzle definitions for quests
-- **IACT** - Action scripts (conditions + instructions)
-- **IZAX** - Zone auxiliary data (NPC spawns with items)
+| Section | Description |
+|---------|-------------|
+| **TILE** | 32x32 pixel tiles with palette indices |
+| **ZONE** | Map data with 3 tile layers (18x18 or 9x9) |
+| **CHAR** | Character definitions and walk frames |
+| **PUZ2** | Puzzle definitions for quest chains |
+| **IACT** | Action scripts (conditions + instructions) |
+| **IZAX** | Zone auxiliary data (NPC spawns with items) |
+| **STUP** | Title screen image (288x288) |
 
-### Action Scripts
+### Action Scripts (IACT)
 
-Zone behavior is driven by IACT scripts containing:
+Zone behavior is driven by IACT scripts:
 
-- **Conditions**: ZoneEnter, HasItem, NpcIs, TileAtIs, etc.
-- **Instructions**: PlaceTile, AddItem, SpeakNpc, ChangeZone, etc.
+**Conditions:**
+- `ZoneEnter` - Triggered on zone entry
+- `HasItem` - Check if player has an item
+- `NpcIs` - Check NPC at position
+- `TileAtIs` - Check tile at layer/position
+- `Counter` - Check game counters
+
+**Instructions:**
+- `PlaceTile` - Set tile at layer/position
+- `AddItem` - Give item to player
+- `RemoveItem` - Take item from player
+- `SpeakNpc` - Display dialogue
+- `ChangeZone` - Zone transition
 
 ## Contributing
 
@@ -198,7 +277,7 @@ You must own a legal copy of Star Wars: Yoda Stories to use this software.
 
 ## Acknowledgments
 
-- [WebDes1gn](https://www.webfun.io/) - Yoda Stories file format documentation
+- [WebFun.io](https://www.webfun.io/) - Yoda Stories file format documentation and reference implementation
 - The SDL2 team for the cross-platform multimedia library
 - LucasArts for creating the original game
 

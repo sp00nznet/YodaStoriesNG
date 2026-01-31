@@ -5,22 +5,23 @@ namespace YodaStoriesNG.Engine.Game;
 /// <summary>
 /// Sector types matching the original game's world generation.
 /// Each cell in the 10x10 grid has a sector type.
+/// IMPORTANT: The order matches the reference implementation for comparison logic.
 /// </summary>
 public enum SectorType
 {
-    None,           // Unassigned
-    Empty,          // Regular walkable zone
-    Candidate,      // Potential puzzle location
-    Puzzle,         // Contains a puzzle
-    Spaceport,      // Landing zone with X-Wing
+    BlockEast,      // Blockade requiring item (blocks east exit)
     BlockNorth,     // Blockade requiring item (blocks north exit)
     BlockSouth,     // Blockade requiring item (blocks south exit)
-    BlockEast,      // Blockade requiring item (blocks east exit)
     BlockWest,      // Blockade requiring item (blocks west exit)
-    TravelStart,    // Vehicle travel origin
-    TravelEnd,      // Vehicle travel destination (island)
+    Candidate,      // Potential puzzle location
+    Empty,          // Regular walkable zone
     Island,         // Isolated area reached by travel
-    KeptFree        // Reserved space (no zone placed)
+    KeptFree,       // Reserved space (no zone placed)
+    Puzzle,         // Contains a puzzle
+    Spaceport,      // Landing zone with X-Wing
+    TravelEnd,      // Vehicle travel destination (island)
+    TravelStart,    // Vehicle travel origin
+    None            // Unassigned
 }
 
 /// <summary>
@@ -32,8 +33,11 @@ public class WorldGenerator
     private readonly GameData _gameData;
     private readonly Random _random = new();
 
-    // World grid (10x10 for planets, smaller for Dagobah)
-    public const int GridSize = 10;
+    // World grid - dynamic based on world size (10 for Small/Medium/Large, 15 for XtraLarge)
+    private int _gridSize = 10;
+
+    /// <summary>Current grid size.</summary>
+    public int GridSize => _gridSize;
 
     // Special item tile IDs (from original game)
     public const int TILE_THE_FORCE = 511;      // The Force - guaranteed weapon
@@ -58,6 +62,17 @@ public class WorldGenerator
     public WorldGenerator(GameData gameData)
     {
         _gameData = gameData;
+    }
+
+    /// <summary>
+    /// Sets the current world (used when loading a save game).
+    /// </summary>
+    public void SetCurrentWorld(WorldMap world)
+    {
+        CurrentWorld = world;
+        CurrentMission = world.Mission;
+        if (world.MissionNumber > 0)
+            _currentMissionNumber = world.MissionNumber;
     }
 
     /// <summary>
@@ -314,8 +329,16 @@ public class WorldGenerator
     /// <summary>
     /// Generates a new world with a random mission.
     /// </summary>
-    public WorldMap GenerateWorld()
+    public WorldMap GenerateWorld() => GenerateWorld(WorldSize.Medium);
+
+    /// <summary>
+    /// Generates a new world with the specified size.
+    /// </summary>
+    public WorldMap GenerateWorld(WorldSize size)
     {
+        // Set grid size based on world size
+        _gridSize = size == WorldSize.XtraLarge ? 15 : 10;
+
         // Pick a random mission (goal puzzle) - but don't build puzzle chain yet
         CurrentMission = SelectRandomMission();
         Console.WriteLine($"Selected mission: {CurrentMission.Name} on {CurrentMission.Planet}");
@@ -729,24 +752,49 @@ public class WorldGenerator
     }
 
     /// <summary>
-    /// Generates the main planet grid with connected zones.
+    /// Generates the main planet grid with connected zones using the proper MapGenerator algorithm.
+    /// This creates a complex world with blockades, travel zones, islands, and proper puzzle ordering.
     /// </summary>
     private void GeneratePlanetGrid()
     {
         if (CurrentWorld == null || CurrentMission == null) return;
 
-        // Initialize grids
-        CurrentWorld.Grid = new int?[GridSize, GridSize];
-        CurrentWorld.TypeMap = new SectorType[GridSize, GridSize];
-        CurrentWorld.OrderMap = new int[GridSize, GridSize];
+        // Initialize grids with dynamic size
+        CurrentWorld.Grid = new int?[_gridSize, _gridSize];
+        CurrentWorld.TypeMap = new SectorType[_gridSize, _gridSize];
+        CurrentWorld.OrderMap = new int[_gridSize, _gridSize];
 
-        // Initialize type map to None and order map to -1
-        for (int y = 0; y < GridSize; y++)
+        // Store grid size in world
+        CurrentWorld.GridWidth = _gridSize;
+        CurrentWorld.GridHeight = _gridSize;
+
+        // Determine world size for MapGenerator
+        WorldSize worldSize;
+        if (_gridSize == 15)
         {
-            for (int x = 0; x < GridSize; x++)
+            worldSize = WorldSize.XtraLarge;
+        }
+        else
+        {
+            worldSize = _currentMissionNumber switch
             {
-                CurrentWorld.TypeMap[y, x] = SectorType.None;
-                CurrentWorld.OrderMap[y, x] = -1;
+                <= 5 => WorldSize.Small,
+                <= 10 => WorldSize.Medium,
+                _ => WorldSize.Large
+            };
+        }
+
+        // Use the proper MapGenerator to create the world layout
+        var mapGenerator = new MapGenerator();
+        mapGenerator.Generate(_random.Next(), worldSize);
+
+        // Copy the generated type and order maps
+        for (int y = 0; y < _gridSize; y++)
+        {
+            for (int x = 0; x < _gridSize; x++)
+            {
+                CurrentWorld.TypeMap[y, x] = mapGenerator.TypeMap[x + y * mapGenerator.MapWidth];
+                CurrentWorld.OrderMap[y, x] = mapGenerator.OrderMap[x + y * mapGenerator.MapWidth];
             }
         }
 
@@ -768,112 +816,167 @@ public class WorldGenerator
             return;
         }
 
-        // Categorize zones by type
+        // Categorize zones by type to match sector types
         var emptyZones = planetZones.Where(z => z.Type == ZoneType.Empty || z.Type == ZoneType.None).ToList();
         var townZones = planetZones.Where(z => z.Type == ZoneType.Town).ToList();
         var goalZones = planetZones.Where(z => z.Type == ZoneType.Goal).ToList();
-        var puzzleZones = planetZones.Where(z => z.Type == ZoneType.Trade || z.Type == ZoneType.Use || z.Type == ZoneType.Find).ToList();
+        var tradeZones = planetZones.Where(z => z.Type == ZoneType.Trade).ToList();
+        var useZones = planetZones.Where(z => z.Type == ZoneType.Use).ToList();
+        var findZones = planetZones.Where(z => z.Type == ZoneType.Find).ToList();
+        var blockadeZonesN = planetZones.Where(z => z.Type == ZoneType.BlockadeNorth).ToList();
+        var blockadeZonesS = planetZones.Where(z => z.Type == ZoneType.BlockadeSouth).ToList();
+        var blockadeZonesE = planetZones.Where(z => z.Type == ZoneType.BlockadeEast).ToList();
+        var blockadeZonesW = planetZones.Where(z => z.Type == ZoneType.BlockadeWest).ToList();
+        var travelStartZones = planetZones.Where(z => z.Type == ZoneType.TravelStart).ToList();
+        var travelEndZones = planetZones.Where(z => z.Type == ZoneType.TravelEnd).ToList();
 
-        // If no categorization, use all outdoor zones
-        if (emptyZones.Count == 0) emptyZones = planetZones;
+        // Fallback lists
+        if (emptyZones.Count == 0) emptyZones = planetZones.Where(z => z.Type != ZoneType.Goal).ToList();
+        var puzzleZones = tradeZones.Concat(useZones).Concat(findZones).ToList();
+        if (puzzleZones.Count == 0) puzzleZones = emptyZones;
 
-        // 1. Place Landing Cell near center (one of 4 central squares)
-        int centerX = GridSize / 2 + _random.Next(-1, 1);
-        int centerY = GridSize / 2 + _random.Next(-1, 1);
+        // Blockade fallbacks
+        var allBlockadeZones = blockadeZonesN.Concat(blockadeZonesS).Concat(blockadeZonesE).Concat(blockadeZonesW).ToList();
+        if (allBlockadeZones.Count == 0) allBlockadeZones = emptyZones;
+        if (blockadeZonesN.Count == 0) blockadeZonesN = allBlockadeZones;
+        if (blockadeZonesS.Count == 0) blockadeZonesS = allBlockadeZones;
+        if (blockadeZonesE.Count == 0) blockadeZonesE = allBlockadeZones;
+        if (blockadeZonesW.Count == 0) blockadeZonesW = allBlockadeZones;
 
-        // CRITICAL: Only use zones that have an X-Wing landing spot (XWingToDagobah object)
-        // This ensures Luke can land properly with space for the X-Wing
-        var landingZones = planetZones
-            .Where(z => z.Objects.Any(o => o.Type == ZoneObjectType.XWingToDagobah))
-            .ToList();
-
-        Zone landingZone;
-        if (landingZones.Count > 0)
-        {
-            landingZone = landingZones[_random.Next(landingZones.Count)];
-            Console.WriteLine($"Selected landing zone {landingZone.Id} with X-Wing landing spot");
-        }
-        else
-        {
-            // Fallback: use town or empty zone (but this shouldn't happen)
-            Console.WriteLine("WARNING: No zones with X-Wing landing spots found! Using fallback.");
-            landingZone = townZones.Count > 0 ? townZones[_random.Next(townZones.Count)] : emptyZones[_random.Next(emptyZones.Count)];
-        }
-
-        CurrentWorld.Grid[centerY, centerX] = landingZone.Id;
-        CurrentWorld.TypeMap[centerY, centerX] = SectorType.Spaceport;
-        CurrentWorld.LandingZoneId = landingZone.Id;
-        CurrentWorld.LandingPosition = (centerX, centerY);
+        // Travel fallbacks
+        if (travelStartZones.Count == 0) travelStartZones = emptyZones;
+        if (travelEndZones.Count == 0) travelEndZones = emptyZones;
 
         // Track used zones
-        var usedZones = new HashSet<int> { landingZone.Id };
+        var usedZones = new HashSet<int>();
 
-        // 2. Place Objective Cell (min 2 squares away from landing)
-        if (goalZones.Count > 0)
+        // Find spaceport position and assign landing zone
+        int spaceportX = -1, spaceportY = -1;
+        for (int y = 0; y < GridSize; y++)
         {
-            var goalZone = goalZones[_random.Next(goalZones.Count)];
-            int goalX, goalY;
-            do
+            for (int x = 0; x < GridSize; x++)
             {
-                goalX = _random.Next(GridSize);
-                goalY = _random.Next(GridSize);
-            } while (Math.Abs(goalX - centerX) + Math.Abs(goalY - centerY) < 2 || CurrentWorld.Grid[goalY, goalX] != null);
-
-            CurrentWorld.Grid[goalY, goalX] = goalZone.Id;
-            CurrentWorld.TypeMap[goalY, goalX] = SectorType.Puzzle;  // Goal is a puzzle zone
-            CurrentWorld.OrderMap[goalY, goalX] = 999;  // High order = final goal
-            CurrentWorld.ObjectiveZoneId = goalZone.Id;
-            CurrentWorld.ObjectivePosition = (goalX, goalY);
-            usedZones.Add(goalZone.Id);
+                if (CurrentWorld.TypeMap[y, x] == SectorType.Spaceport)
+                {
+                    spaceportX = x;
+                    spaceportY = y;
+                    break;
+                }
+            }
+            if (spaceportX >= 0) break;
         }
 
-        // 3. Fill in connected cells between landing and objective
-        // Create a path and fill surrounding area
-        int fillCount = _random.Next(15, 30); // 15-30 cells populated
-        var availableZones = emptyZones.Concat(puzzleZones).Where(z => !usedZones.Contains(z.Id)).ToList();
-
-        for (int i = 0; i < fillCount && availableZones.Count > 0; i++)
+        // Assign zones based on sector types
+        for (int y = 0; y < GridSize; y++)
         {
-            // Find an empty cell adjacent to an existing cell
-            var candidates = new List<(int x, int y)>();
-            for (int y = 0; y < GridSize; y++)
+            for (int x = 0; x < GridSize; x++)
             {
-                for (int x = 0; x < GridSize; x++)
+                var sectorType = CurrentWorld.TypeMap[y, x];
+                if (sectorType == SectorType.None || sectorType == SectorType.KeptFree)
+                    continue;
+
+                Zone? zone = null;
+                List<Zone> candidates;
+
+                switch (sectorType)
                 {
-                    if (CurrentWorld.Grid[y, x] == null && HasAdjacentCell(CurrentWorld.Grid, x, y))
+                    case SectorType.Spaceport:
+                        // Landing zone - must have X-Wing landing spot
+                        candidates = planetZones
+                            .Where(z => z.Objects.Any(o => o.Type == ZoneObjectType.XWingToDagobah) && !usedZones.Contains(z.Id))
+                            .ToList();
+                        if (candidates.Count == 0)
+                            candidates = townZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        if (candidates.Count == 0)
+                            candidates = emptyZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+
+                    case SectorType.Puzzle:
+                        // Use goal zone for the highest-order puzzle (mission objective)
+                        int order = CurrentWorld.OrderMap[y, x];
+                        if (order == mapGenerator.PuzzleCount - 1 && goalZones.Count > 0)
+                        {
+                            candidates = goalZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        }
+                        else
+                        {
+                            candidates = puzzleZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        }
+                        if (candidates.Count == 0)
+                            candidates = emptyZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+
+                    case SectorType.Empty:
+                    case SectorType.Candidate:
+                        candidates = emptyZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+
+                    case SectorType.BlockNorth:
+                        candidates = blockadeZonesN.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+                    case SectorType.BlockSouth:
+                        candidates = blockadeZonesS.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+                    case SectorType.BlockEast:
+                        candidates = blockadeZonesE.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+                    case SectorType.BlockWest:
+                        candidates = blockadeZonesW.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+
+                    case SectorType.TravelStart:
+                        candidates = travelStartZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+
+                    case SectorType.TravelEnd:
+                    case SectorType.Island:
+                        candidates = travelEndZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        if (candidates.Count == 0)
+                            candidates = emptyZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+
+                    default:
+                        candidates = emptyZones.Where(z => !usedZones.Contains(z.Id)).ToList();
+                        break;
+                }
+
+                if (candidates.Count > 0)
+                {
+                    zone = candidates[_random.Next(candidates.Count)];
+                    CurrentWorld.Grid[y, x] = zone.Id;
+                    usedZones.Add(zone.Id);
+
+                    // Track special zones
+                    if (sectorType == SectorType.Spaceport)
                     {
-                        candidates.Add((x, y));
+                        CurrentWorld.LandingZoneId = zone.Id;
+                        CurrentWorld.LandingPosition = (x, y);
+                    }
+                    else if (sectorType == SectorType.Puzzle)
+                    {
+                        int order = CurrentWorld.OrderMap[y, x];
+                        if (order == mapGenerator.PuzzleCount - 1)
+                        {
+                            CurrentWorld.ObjectiveZoneId = zone.Id;
+                            CurrentWorld.ObjectivePosition = (x, y);
+                        }
                     }
                 }
             }
-
-            if (candidates.Count == 0) break;
-
-            var (px, py) = candidates[_random.Next(candidates.Count)];
-            var zone = availableZones[_random.Next(availableZones.Count)];
-            CurrentWorld.Grid[py, px] = zone.Id;
-
-            // Assign sector type based on zone type
-            var sectorType = zone.Type switch
-            {
-                ZoneType.Trade or ZoneType.Use or ZoneType.Find => SectorType.Puzzle,
-                ZoneType.Town => SectorType.Empty,
-                ZoneType.Goal => SectorType.Puzzle,
-                _ => SectorType.Empty
-            };
-            CurrentWorld.TypeMap[py, px] = sectorType;
-
-            usedZones.Add(zone.Id);
-            availableZones.Remove(zone);
         }
 
-        // 4. Set up zone connections (adjacent cells are connected)
+        // Set up zone connections (adjacent cells are connected)
         SetupZoneConnections();
 
-        // 5. Associate room zones with their parent outdoor zones (for doors)
+        // Associate room zones with their parent outdoor zones (for doors)
         AssociateRoomZones(roomZones, usedZones);
 
-        Console.WriteLine($"Generated planet grid with {usedZones.Count} zones");
+        // Store generation stats
+        CurrentWorld.MissionNumber = _currentMissionNumber;
+
+        var stats = CurrentWorld.GetMapStatistics();
+        Console.WriteLine($"Generated planet grid: {stats.TotalZones} zones, {stats.PuzzleCount} puzzles, " +
+                          $"{stats.BlockadeCount} blockades, {stats.TravelCount} travels");
     }
 
     private bool HasAdjacentCell(int?[,] grid, int x, int y)
@@ -1186,6 +1289,10 @@ public class WorldMap
     // Order map - puzzle order index for each cell (-1 = no puzzle)
     public int[,]? OrderMap { get; set; }
 
+    // Grid dimensions (10 for Small/Medium/Large, 15 for XtraLarge)
+    public int GridWidth { get; set; } = 10;
+    public int GridHeight { get; set; } = 10;
+
     // Special zone IDs
     public int StartingZoneId { get; set; }
     public int LandingZoneId { get; set; }
@@ -1272,60 +1379,46 @@ public class WorldMap
     /// </summary>
     public void PrintMapVisualization()
     {
-        Console.WriteLine("\n╔════════════════════════════════════════════════════════════════════╗");
-        Console.WriteLine("║                    WORLD MAP VISUALIZATION                         ║");
-        Console.WriteLine("╠════════════════════════════════════════════════════════════════════╣");
-
-        // Legend
-        Console.WriteLine("║ Legend: · Empty  P Puzzle  S Spaceport  T Travel  I Island        ║");
-        Console.WriteLine("║         B Blockade  # KeptFree  ? None/Candidate  L Landing       ║");
-        Console.WriteLine("╠════════════════════════════════════════════════════════════════════╣");
+        Console.WriteLine($"\n=== WORLD MAP ({GridWidth}x{GridHeight}) ===");
+        Console.WriteLine("Legend: · Empty  P Puzzle  S Spaceport  T Travel  I Island  B Blockade  L Landing  *G* Goal");
 
         if (TypeMap == null || Grid == null)
         {
-            Console.WriteLine("║ No map data available                                              ║");
-            Console.WriteLine("╚════════════════════════════════════════════════════════════════════╝");
+            Console.WriteLine("No map data available");
             return;
         }
 
         // Print header row
-        Console.Write("║     ");
-        for (int x = 0; x < 10; x++)
-            Console.Write($"  {x}   ");
-        Console.WriteLine("║");
-        Console.WriteLine("║    ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐║");
+        Console.Write("   ");
+        for (int x = 0; x < GridWidth; x++)
+            Console.Write($" {x,2} ");
+        Console.WriteLine();
 
-        for (int y = 0; y < 10; y++)
+        for (int y = 0; y < GridHeight; y++)
         {
-            Console.Write($"║  {y} │");
-            for (int x = 0; x < 10; x++)
+            Console.Write($"{y,2} ");
+            for (int x = 0; x < GridWidth; x++)
             {
                 var sectorType = TypeMap[y, x];
                 var zoneId = Grid[y, x];
                 var orderIdx = OrderMap?[y, x] ?? -1;
 
-                // Determine display character and color
+                // Determine display character
                 string cell = GetSectorDisplayString(sectorType, zoneId, orderIdx, x, y);
-                Console.Write(cell);
-                Console.Write("│");
+                Console.Write($"{cell,4}");
             }
-            Console.WriteLine("║");
-
-            if (y < 9)
-                Console.WriteLine("║    ├─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┤║");
+            Console.WriteLine();
         }
-        Console.WriteLine("║    └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘║");
 
         // Print statistics
-        Console.WriteLine("╠════════════════════════════════════════════════════════════════════╣");
         var stats = GetMapStatistics();
-        Console.WriteLine($"║ Mission: {Mission?.MissionNumber ?? 0,2}/15 | Zones: {stats.TotalZones,3} | Puzzles: {stats.PuzzleCount,2}                    ║");
-        Console.WriteLine($"║ Landing Zone: {LandingZoneId,4} at ({LandingPosition.x},{LandingPosition.y})                               ║");
+        Console.WriteLine($"\nMission: {Mission?.MissionNumber ?? 0}/15 | Zones: {stats.TotalZones} | Puzzles: {stats.PuzzleCount}");
+        Console.WriteLine($"Landing Zone: {LandingZoneId} at ({LandingPosition.x},{LandingPosition.y})");
         if (ObjectiveZoneId > 0)
-            Console.WriteLine($"║ Objective Zone: {ObjectiveZoneId,4} at ({ObjectivePosition.x},{ObjectivePosition.y})                             ║");
+            Console.WriteLine($"Objective Zone: {ObjectiveZoneId} at ({ObjectivePosition.x},{ObjectivePosition.y})");
         if (TheForceZoneId.HasValue)
-            Console.WriteLine($"║ The Force: Zone {TheForceZoneId,4} at ({TheForcePosition.x},{TheForcePosition.y}) [distance 2]               ║");
-        Console.WriteLine("╚════════════════════════════════════════════════════════════════════╝\n");
+            Console.WriteLine($"The Force: Zone {TheForceZoneId} at ({TheForcePosition.x},{TheForcePosition.y})");
+        Console.WriteLine();
     }
 
     private string GetSectorDisplayString(SectorType type, int? zoneId, int orderIdx, int x, int y)
@@ -1370,9 +1463,9 @@ public class WorldMap
 
         int totalZones = 0, puzzles = 0, blockades = 0, travels = 0;
 
-        for (int y = 0; y < 10; y++)
+        for (int y = 0; y < GridHeight; y++)
         {
-            for (int x = 0; x < 10; x++)
+            for (int x = 0; x < GridWidth; x++)
             {
                 var type = TypeMap[y, x];
                 if (Grid?[y, x] != null) totalZones++;

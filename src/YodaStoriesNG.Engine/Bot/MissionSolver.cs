@@ -647,9 +647,9 @@ public class MissionSolver
         if (world?.Grid == null) return null;
 
         // Scan the grid for unexplored zones
-        for (int y = 0; y < WorldGenerator.GridSize; y++)
+        for (int y = 0; y < world.GridHeight; y++)
         {
-            for (int x = 0; x < WorldGenerator.GridSize; x++)
+            for (int x = 0; x < world.GridWidth; x++)
             {
                 var zoneId = world.Grid[y, x];
                 if (zoneId.HasValue && !_visitedZones.Contains(zoneId.Value))

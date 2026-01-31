@@ -32,6 +32,9 @@ public class GameState
     public HashSet<int> SolvedZones { get; set; } = new();
     public int GamesWon { get; set; }
 
+    // Zone tracking
+    public HashSet<int> VisitedZones { get; set; } = new();
+
     // Game flags
     public bool IsGameOver { get; set; }
     public bool IsGameWon { get; set; }
@@ -87,6 +90,7 @@ public class GameState
         Variables.Clear();
         Counters.Clear();
         SolvedZones.Clear();
+        VisitedZones.Clear();
         IsGameOver = false;
         IsGameWon = false;
         IsPaused = false;
@@ -168,6 +172,18 @@ public class GameState
     /// </summary>
     public bool IsZoneSolved(int zoneId) =>
         SolvedZones.Contains(zoneId);
+
+    /// <summary>
+    /// Marks a zone as visited.
+    /// </summary>
+    public void MarkZoneVisited(int zoneId) =>
+        VisitedZones.Add(zoneId);
+
+    /// <summary>
+    /// Checks if a zone has been visited.
+    /// </summary>
+    public bool IsZoneVisited(int zoneId) =>
+        VisitedZones.Contains(zoneId);
 
     /// <summary>
     /// Marks an object at a position as collected.
