@@ -6,16 +6,18 @@ namespace YodaStoriesNG.Engine.UI;
 
 /// <summary>
 /// Title screen shown when the game starts.
-/// Displays the original game startup image from the DTA file with X-Wing flyby animation.
+/// Displays the original game startup image from the DTA/DAW file with flyby animation.
+/// Supports both Yoda Stories (X-Wing) and Indiana Jones (Biplane).
 /// </summary>
 public unsafe class TitleScreen : IDisposable
 {
     private readonly BitmapFont _font;
     private readonly byte[] _startupImageData;
     private readonly List<Tile> _tiles;
+    private readonly GameType _gameType;
     private SDLRenderer* _renderer;
     private SDLTexture* _startupTexture;
-    private SDLTexture* _xwingTexture;
+    private SDLTexture* _flybyTexture;  // X-Wing for Yoda, Biplane for Indy
 
     private const int StartupImageWidth = 288;
     private const int StartupImageHeight = 288;
@@ -27,21 +29,28 @@ public unsafe class TitleScreen : IDisposable
     private DateTime _lastUpdate = DateTime.Now;
     private readonly Random _random = new();
 
-    // X-Wing tile IDs (2x2 grid)
+    // X-Wing tile IDs (2x2 grid) - Yoda Stories
     private const int XWingTileTopLeft = 948;
     private const int XWingTileTopRight = 949;
     private const int XWingTileBottomLeft = 950;
     private const int XWingTileBottomRight = 951;
 
+    // Biplane tile IDs (2x2 grid) - Indiana Jones (TODO: Verify correct tile IDs)
+    private const int BiplaneTileTopLeft = 0;      // Placeholder - need actual IDs
+    private const int BiplaneTileTopRight = 0;
+    private const int BiplaneTileBottomLeft = 0;
+    private const int BiplaneTileBottomRight = 0;
+
     public bool IsActive { get; private set; } = true;
 
     public event System.Action? OnStartGame;
 
-    public TitleScreen(BitmapFont font, byte[] startupImageData, List<Tile> tiles)
+    public TitleScreen(BitmapFont font, byte[] startupImageData, List<Tile> tiles, GameType gameType = GameType.YodaStories)
     {
         _font = font;
         _startupImageData = startupImageData;
         _tiles = tiles;
+        _gameType = gameType;
         _xwingX = -100;
         _xwingY = 80 + _random.Next(200);
     }
@@ -50,7 +59,7 @@ public unsafe class TitleScreen : IDisposable
     {
         _renderer = renderer;
         CreateStartupTexture();
-        CreateXWingTexture();
+        CreateFlybyTexture();
     }
 
     private void CreateStartupTexture()
@@ -89,12 +98,44 @@ public unsafe class TitleScreen : IDisposable
         }
     }
 
-    private void CreateXWingTexture()
+    private void CreateFlybyTexture()
     {
-        if (_renderer == null || _tiles == null || _tiles.Count <= XWingTileBottomRight)
+        if (_renderer == null || _tiles == null)
             return;
 
-        // Create a 64x64 texture for the 2x2 X-Wing (each tile is 32x32)
+        // Get the appropriate tile IDs based on game type
+        int topLeft, topRight, bottomLeft, bottomRight;
+        string vehicleName;
+
+        if (_gameType == GameType.IndianaJones)
+        {
+            // Indiana Jones uses a biplane - but tiles may not be set up yet
+            // For now, skip if we don't have valid tile IDs
+            if (BiplaneTileTopLeft == 0 || _tiles.Count <= BiplaneTileBottomRight)
+            {
+                Console.WriteLine("Biplane tiles not configured for Indiana Jones title screen");
+                return;
+            }
+            topLeft = BiplaneTileTopLeft;
+            topRight = BiplaneTileTopRight;
+            bottomLeft = BiplaneTileBottomLeft;
+            bottomRight = BiplaneTileBottomRight;
+            vehicleName = "Biplane";
+        }
+        else
+        {
+            // Yoda Stories uses X-Wing
+            if (_tiles.Count <= XWingTileBottomRight)
+                return;
+
+            topLeft = XWingTileTopLeft;
+            topRight = XWingTileTopRight;
+            bottomLeft = XWingTileBottomLeft;
+            bottomRight = XWingTileBottomRight;
+            vehicleName = "X-Wing";
+        }
+
+        // Create a 64x64 texture for the 2x2 vehicle (each tile is 32x32)
         const int tileSize = 32;
         const int textureSize = tileSize * 2;
 
@@ -102,10 +143,10 @@ public unsafe class TitleScreen : IDisposable
 
         // Copy the 4 tiles into the texture
         var tileOffsets = new[] {
-            (XWingTileTopLeft, 0, 0),
-            (XWingTileTopRight, tileSize, 0),
-            (XWingTileBottomLeft, 0, tileSize),
-            (XWingTileBottomRight, tileSize, tileSize)
+            (topLeft, 0, 0),
+            (topRight, tileSize, 0),
+            (bottomLeft, 0, tileSize),
+            (bottomRight, tileSize, tileSize)
         };
 
         foreach (var (tileId, offsetX, offsetY) in tileOffsets)
@@ -122,20 +163,20 @@ public unsafe class TitleScreen : IDisposable
             }
         }
 
-        _xwingTexture = SDL.CreateTexture(
+        _flybyTexture = SDL.CreateTexture(
             _renderer,
             (uint)SDLPixelFormatEnum.Argb8888,
             (int)SDLTextureAccess.Static,
             textureSize, textureSize);
 
-        if (_xwingTexture != null)
+        if (_flybyTexture != null)
         {
-            SDL.SetTextureBlendMode(_xwingTexture, SDLBlendMode.Blend);
+            SDL.SetTextureBlendMode(_flybyTexture, SDLBlendMode.Blend);
             fixed (uint* pixelPtr = pixels)
             {
-                SDL.UpdateTexture(_xwingTexture, null, pixelPtr, textureSize * 4);
+                SDL.UpdateTexture(_flybyTexture, null, pixelPtr, textureSize * 4);
             }
-            Console.WriteLine("Created X-Wing texture for title screen animation");
+            Console.WriteLine($"Created {vehicleName} texture for title screen animation");
         }
     }
 
@@ -199,12 +240,20 @@ public unsafe class TitleScreen : IDisposable
         else
         {
             // Fallback if no texture - show simple text
-            RenderTextCentered("YODA STORIES", centerX, 200, 2, 100, 255, 100);
-            RenderTextCentered("Next Generation", centerX, 240, 1, 150, 180, 100);
+            if (_gameType == GameType.IndianaJones)
+            {
+                RenderTextCentered("INDIANA JONES", centerX, 200, 2, 200, 150, 50);
+                RenderTextCentered("Desktop Adventures NG", centerX, 240, 1, 180, 150, 100);
+            }
+            else
+            {
+                RenderTextCentered("YODA STORIES", centerX, 200, 2, 100, 255, 100);
+                RenderTextCentered("Next Generation", centerX, 240, 1, 150, 180, 100);
+            }
         }
 
-        // Render X-Wing flyby (in front of the title image)
-        RenderXWing();
+        // Render vehicle flyby (X-Wing for Yoda, Biplane for Indy - in front of the title image)
+        RenderFlyby();
 
         // Prompt - pulsing (below the image)
         var pulse = (byte)(180 + (int)(50 * Math.Sin(DateTime.Now.Ticks / 2000000.0)));
@@ -248,9 +297,9 @@ public unsafe class TitleScreen : IDisposable
         }
     }
 
-    private void RenderXWing()
+    private void RenderFlyby()
     {
-        if (_xwingTexture == null) return;
+        if (_flybyTexture == null) return;
 
         int x = (int)_xwingX;
         int y = (int)_xwingY;
@@ -260,7 +309,7 @@ public unsafe class TitleScreen : IDisposable
 
         // Render with slight rotation for more dynamic look
         var center = new SDLPoint { X = size / 2, Y = size / 2 };
-        SDL.RenderCopyEx(_renderer, _xwingTexture, null, &dstRect,
+        SDL.RenderCopyEx(_renderer, _flybyTexture, null, &dstRect,
             _xwingAngle, &center, SDLRendererFlip.None);
     }
 
@@ -287,10 +336,10 @@ public unsafe class TitleScreen : IDisposable
             SDL.DestroyTexture(_startupTexture);
             _startupTexture = null;
         }
-        if (_xwingTexture != null)
+        if (_flybyTexture != null)
         {
-            SDL.DestroyTexture(_xwingTexture);
-            _xwingTexture = null;
+            SDL.DestroyTexture(_flybyTexture);
+            _flybyTexture = null;
         }
     }
 }

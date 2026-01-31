@@ -53,19 +53,33 @@ public unsafe class GameEngine : IDisposable
     /// </summary>
     public bool IsBotRunning => _bot?.IsRunning ?? false;
 
-    // Weapon tile constants for 15-mission progression
+    // Yoda Stories weapon tile constants for 15-mission progression
     private const int TILE_BASIC_LIGHTSABER = 18;      // Starting weapon
     private const int TILE_UPGRADED_LIGHTSABER = 510;  // After 5 missions
-    private const int TILE_THE_FORCE = 511;            // After 10 missions
+    private const int TILE_THE_FORCE = 511;            // After 10 missions (ranged)
+
+    // Indiana Jones weapon tile constants (TODO: Verify correct tile IDs from DESKTOP.DAW)
+    private const int TILE_BASIC_WHIP = 18;            // Starting weapon (whip)
+    private const int TILE_UPGRADED_WHIP = 19;         // After 5 missions (placeholder)
+    private const int TILE_PISTOL = 20;                // After 10 missions (ranged, placeholder)
 
     /// <summary>
     /// Gets the appropriate weapon for the player's mission count.
     /// </summary>
-    private static int GetWeaponForMissionCount(int missionsCompleted)
+    private int GetWeaponForMissionCount(int missionsCompleted)
     {
-        if (missionsCompleted >= 10) return TILE_THE_FORCE;
-        if (missionsCompleted >= 5) return TILE_UPGRADED_LIGHTSABER;
-        return TILE_BASIC_LIGHTSABER;
+        if (_gameData?.GameType == GameType.IndianaJones)
+        {
+            if (missionsCompleted >= 10) return TILE_PISTOL;
+            if (missionsCompleted >= 5) return TILE_UPGRADED_WHIP;
+            return TILE_BASIC_WHIP;
+        }
+        else
+        {
+            if (missionsCompleted >= 10) return TILE_THE_FORCE;
+            if (missionsCompleted >= 5) return TILE_UPGRADED_LIGHTSABER;
+            return TILE_BASIC_LIGHTSABER;
+        }
     }
 
     /// <summary>
@@ -94,19 +108,33 @@ public unsafe class GameEngine : IDisposable
     {
         Console.WriteLine("Loading game data...");
 
-        // Try to find the DTA file
-        var dtaPath = Path.Combine(_dataPath, "yodesk.dta");
-        if (!File.Exists(dtaPath))
+        // Try to find the data file (support both Yoda Stories and Indiana Jones)
+        string? dataFilePath = null;
+
+        // Check for Yoda Stories first
+        var yodaPath = Path.Combine(_dataPath, "yodesk.dta");
+        var indyPath = Path.Combine(_dataPath, "desktop.daw");
+
+        if (File.Exists(yodaPath))
         {
-            Console.WriteLine($"DTA file not found at {dtaPath}");
-            Console.WriteLine("Please select the yodesk.dta file...");
+            dataFilePath = yodaPath;
+        }
+        else if (File.Exists(indyPath))
+        {
+            dataFilePath = indyPath;
+        }
+        else
+        {
+            Console.WriteLine($"No game data file found in {_dataPath}");
+            Console.WriteLine("Looking for: YODESK.DTA (Yoda Stories) or DESKTOP.DAW (Indiana Jones)");
+            Console.WriteLine("Please select a game data file...");
 
             // Show file picker
             var selectedFile = UI.FileDialogHelper.ShowOpenDataFileDialog(_dataPath);
             if (!string.IsNullOrEmpty(selectedFile) && File.Exists(selectedFile))
             {
-                dtaPath = selectedFile;
-                Console.WriteLine($"Selected: {dtaPath}");
+                dataFilePath = selectedFile;
+                Console.WriteLine($"Selected: {dataFilePath}");
             }
             else
             {
@@ -116,14 +144,20 @@ public unsafe class GameEngine : IDisposable
         }
 
         var parser = new DtaParser();
-        _gameData = parser.Parse(dtaPath);
+        _gameData = parser.Parse(dataFilePath);
 
-        Console.WriteLine($"Game version: {_gameData.Version}");
+        // Determine window title based on game type
+        string windowTitle = _gameData.GameType == GameType.IndianaJones
+            ? "Indiana Jones Desktop Adventures NG"
+            : "Yoda Stories NG";
+
+        Console.WriteLine($"Game: {(_gameData.GameType == GameType.IndianaJones ? "Indiana Jones" : "Yoda Stories")}");
+        Console.WriteLine($"Version: {_gameData.Version}");
         Console.WriteLine($"Loaded: {_gameData.Tiles.Count} tiles, {_gameData.Zones.Count} zones, {_gameData.Characters.Count} characters");
 
         // Initialize renderer
         _renderer = new GameRenderer(_gameData);
-        if (!_renderer.Initialize("Yoda Stories NG"))
+        if (!_renderer.Initialize(windowTitle))
         {
             Console.WriteLine("Failed to initialize renderer");
             return false;
@@ -150,7 +184,7 @@ public unsafe class GameEngine : IDisposable
         InitializeController();
 
         // Initialize UI components
-        _titleScreen = new TitleScreen(_renderer.GetFont(), _gameData.StartupScreen, _gameData.Tiles);
+        _titleScreen = new TitleScreen(_renderer.GetFont(), _gameData.StartupScreen, _gameData.Tiles, _gameData.GameType);
         _titleScreen.SetRenderer(_renderer.GetRenderer());
         _titleScreen.OnStartGame += () => { _showingTitleScreen = false; StartNewGame(); };
 

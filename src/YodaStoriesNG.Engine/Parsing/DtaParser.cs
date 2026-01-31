@@ -3,7 +3,8 @@ using YodaStoriesNG.Engine.Data;
 namespace YodaStoriesNG.Engine.Parsing;
 
 /// <summary>
-/// Parser for YODESK.DTA game data files.
+/// Parser for YODESK.DTA (Yoda Stories) and DESKTOP.DAW (Indiana Jones) game data files.
+/// Both games use the same Desktop Adventures engine with minor format differences.
 /// </summary>
 public class DtaParser
 {
@@ -11,21 +12,35 @@ public class DtaParser
     private GameData _data = null!;
 
     /// <summary>
-    /// Parses a DTA file and returns the game data.
+    /// Detects the game type from a file path.
+    /// </summary>
+    public static GameType DetectGameType(string filePath)
+    {
+        var fileName = Path.GetFileName(filePath).ToUpperInvariant();
+        if (fileName.Contains("DESKTOP") || fileName.EndsWith(".DAW"))
+            return GameType.IndianaJones;
+        return GameType.YodaStories;
+    }
+
+    /// <summary>
+    /// Parses a DTA/DAW file and returns the game data.
     /// </summary>
     public GameData Parse(string filePath)
     {
         using var stream = File.OpenRead(filePath);
-        return Parse(stream);
+        var gameType = DetectGameType(filePath);
+        return Parse(stream, gameType);
     }
 
     /// <summary>
-    /// Parses a DTA file from a stream and returns the game data.
+    /// Parses a game data file from a stream with specified game type.
     /// </summary>
-    public GameData Parse(Stream stream)
+    public GameData Parse(Stream stream, GameType gameType)
     {
         _reader = new BinaryReader(stream);
-        _data = new GameData();
+        _data = new GameData { GameType = gameType };
+
+        Console.WriteLine($"Parsing {gameType} data file ({stream.Length} bytes)...");
 
         while (_reader.BaseStream.Position < _reader.BaseStream.Length)
         {
@@ -54,12 +69,16 @@ public class DtaParser
                 break;
 
             var length = _reader.ReadUInt32();
-            // Console.WriteLine($"Section '{tag}' at position {_reader.BaseStream.Position - 8}, length: {length}");
             ParseSection(tag, length);
         }
 
         return _data;
     }
+
+    /// <summary>
+    /// Parses a DTA file from a stream with auto-detection (defaults to Yoda Stories).
+    /// </summary>
+    public GameData Parse(Stream stream) => Parse(stream, GameType.YodaStories);
 
     private void ParseSection(string tag, uint length)
     {
@@ -117,6 +136,21 @@ public class DtaParser
         var major = (majorBytes[0] << 8) | majorBytes[1];
         var minor = (minorBytes[0] << 8) | minorBytes[1];
         _data.Version = new Version(major, minor);
+
+        // Version 1.x = Indiana Jones, Version 2.x = Yoda Stories
+        // This provides secondary detection if filename wasn't conclusive
+        if (major == 1 && _data.GameType != GameType.IndianaJones)
+        {
+            Console.WriteLine("Detected Indiana Jones format from version 1.x");
+            _data.GameType = GameType.IndianaJones;
+        }
+        else if (major == 2 && _data.GameType != GameType.YodaStories)
+        {
+            Console.WriteLine("Detected Yoda Stories format from version 2.x");
+            _data.GameType = GameType.YodaStories;
+        }
+
+        Console.WriteLine($"Game version: {major}.{minor} ({_data.GameType})");
     }
 
     private void ParseStartupSection(uint length)

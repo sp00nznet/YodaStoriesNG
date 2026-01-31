@@ -1,12 +1,17 @@
 namespace YodaStoriesNG.Engine.Data;
 
 /// <summary>
-/// Contains all game data loaded from the DTA file.
+/// Contains all game data loaded from the DTA/DAW file.
 /// </summary>
 public class GameData
 {
     /// <summary>
-    /// Version information (typically 2.0).
+    /// Identifies which game this data is from (Yoda Stories or Indiana Jones).
+    /// </summary>
+    public GameType GameType { get; set; } = GameType.YodaStories;
+
+    /// <summary>
+    /// Version information (typically 2.0 for Yoda, 1.0 for Indy).
     /// </summary>
     public Version Version { get; set; } = new(2, 0);
 

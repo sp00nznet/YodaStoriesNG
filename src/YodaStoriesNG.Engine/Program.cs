@@ -12,34 +12,89 @@ class Program
         Console.WriteLine("========================================");
         Console.WriteLine();
 
-        // Determine data path
+        // Determine data path - search for both Yoda Stories and Indiana Jones
         string dataPath;
-        if (args.Length > 0 && Directory.Exists(args[0]))
+        string? dataFile = null;
+        string gameName = "Yoda Stories";
+
+        if (args.Length > 0)
         {
-            dataPath = args[0];
+            // Check if arg is a direct file path
+            if (File.Exists(args[0]) && (args[0].EndsWith(".dta", StringComparison.OrdinalIgnoreCase) ||
+                                          args[0].EndsWith(".daw", StringComparison.OrdinalIgnoreCase)))
+            {
+                dataFile = args[0];
+                dataPath = Path.GetDirectoryName(args[0]) ?? ".";
+                gameName = args[0].EndsWith(".daw", StringComparison.OrdinalIgnoreCase) ? "Indiana Jones" : "Yoda Stories";
+            }
+            else if (Directory.Exists(args[0]))
+            {
+                dataPath = args[0];
+            }
+            else
+            {
+                dataPath = "Yoda";
+            }
         }
         else
         {
-            // Look for Yoda folder in common locations
+            // Look for game data in common locations (Yoda Stories first, then Indiana Jones)
             var possiblePaths = new[]
             {
-                Path.Combine(AppContext.BaseDirectory, "Yoda"),
-                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "Yoda"),
-                @"C:\YodaStoriesNG\Yoda",
-                "Yoda",
+                // Yoda Stories locations
+                (Path.Combine(AppContext.BaseDirectory, "Yoda"), "yodesk.dta", "Yoda Stories"),
+                (Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "Yoda"), "yodesk.dta", "Yoda Stories"),
+                (@"C:\YodaStoriesNG\Yoda", "yodesk.dta", "Yoda Stories"),
+                ("Yoda", "yodesk.dta", "Yoda Stories"),
+                // Indiana Jones locations
+                (Path.Combine(AppContext.BaseDirectory, "Indy"), "desktop.daw", "Indiana Jones"),
+                (Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "ida"), "desktop.daw", "Indiana Jones"),
+                (@"C:\YodaStoriesNG\ida", "desktop.daw", "Indiana Jones"),
+                ("ida", "desktop.daw", "Indiana Jones"),
+                ("INDYDESK", "desktop.daw", "Indiana Jones"),
             };
 
-            dataPath = possiblePaths.FirstOrDefault(Directory.Exists) ?? "Yoda";
+            dataPath = "Yoda"; // Default
+            foreach (var (path, file, name) in possiblePaths)
+            {
+                var fullPath = Path.Combine(path, file);
+                if (File.Exists(fullPath))
+                {
+                    dataPath = path;
+                    dataFile = fullPath;
+                    gameName = name;
+                    break;
+                }
+            }
         }
 
-        var dtaFile = Path.Combine(dataPath, "yodesk.dta");
-        if (!File.Exists(dtaFile))
+        // Try to find data file in path if not already found
+        if (dataFile == null)
         {
-            Console.WriteLine($"Note: Game data file not found at {dtaFile}");
+            var yodaFile = Path.Combine(dataPath, "yodesk.dta");
+            var indyFile = Path.Combine(dataPath, "desktop.daw");
+
+            if (File.Exists(yodaFile))
+            {
+                dataFile = yodaFile;
+                gameName = "Yoda Stories";
+            }
+            else if (File.Exists(indyFile))
+            {
+                dataFile = indyFile;
+                gameName = "Indiana Jones";
+            }
+        }
+
+        if (dataFile == null || !File.Exists(dataFile))
+        {
+            Console.WriteLine($"Note: No game data file found.");
+            Console.WriteLine("  Looking for: YODESK.DTA (Yoda Stories) or DESKTOP.DAW (Indiana Jones)");
             Console.WriteLine("The game will prompt you to select a data file.");
         }
         else
         {
+            Console.WriteLine($"Found: {gameName}");
             Console.WriteLine($"Data path: {dataPath}");
         }
         Console.WriteLine();
