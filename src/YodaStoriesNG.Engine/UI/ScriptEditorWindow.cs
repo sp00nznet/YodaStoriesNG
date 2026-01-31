@@ -43,6 +43,14 @@ public class ScriptEditorWindow : IDisposable
     private string? _selectedPlanet = null;
     private bool _isDraggingScrollbar = false;
 
+    // Edit mode
+    private bool _isEditMode = false;
+    private int _editingConditionIndex = -1;
+    private int _editingInstructionIndex = -1;
+    private string _editBuffer = "";
+    private int _editCursorPos = 0;
+    private bool _hasUnsavedChanges = false;
+
     /// <summary>
     /// Event fired when user requests to teleport to the viewed zone.
     /// </summary>
@@ -269,6 +277,13 @@ public class ScriptEditorWindow : IDisposable
                 return true;
             }
 
+            // Content area click - check if in edit mode
+            if (_isEditMode && mx > LeftPanelWidth && my > TopBarHeight)
+            {
+                HandleContentClick(mx, my);
+                return true;
+            }
+
             return true;
         }
 
@@ -360,9 +375,146 @@ public class ScriptEditorWindow : IDisposable
                 OnJumpToBot?.Invoke();
                 return true;
             }
+            if (key == 'e' || key == 'E') // E = Toggle edit mode
+            {
+                _isEditMode = !_isEditMode;
+                _editingConditionIndex = -1;
+                _editingInstructionIndex = -1;
+                _editBuffer = "";
+                return true;
+            }
+        }
+
+        // Handle text input in edit mode
+        if (_isEditMode && (_editingConditionIndex >= 0 || _editingInstructionIndex >= 0))
+        {
+            if (evt->Type == (uint)SDLEventType.Keydown && SDL.GetWindowID(SDL.GetKeyboardFocus()) == _windowId)
+            {
+                var key = (int)evt->Key.Keysym.Sym;
+
+                if (key == 8) // Backspace
+                {
+                    if (_editCursorPos > 0 && _editBuffer.Length > 0)
+                    {
+                        _editBuffer = _editBuffer.Remove(_editCursorPos - 1, 1);
+                        _editCursorPos--;
+                        _hasUnsavedChanges = true;
+                    }
+                    return true;
+                }
+                if (key == 127) // Delete
+                {
+                    if (_editCursorPos < _editBuffer.Length)
+                    {
+                        _editBuffer = _editBuffer.Remove(_editCursorPos, 1);
+                        _hasUnsavedChanges = true;
+                    }
+                    return true;
+                }
+                if (key == 1073741904) // Left arrow
+                {
+                    if (_editCursorPos > 0) _editCursorPos--;
+                    return true;
+                }
+                if (key == 1073741903) // Right arrow
+                {
+                    if (_editCursorPos < _editBuffer.Length) _editCursorPos++;
+                    return true;
+                }
+                if (key == 1073741898) // Home
+                {
+                    _editCursorPos = 0;
+                    return true;
+                }
+                if (key == 1073741901) // End
+                {
+                    _editCursorPos = _editBuffer.Length;
+                    return true;
+                }
+                if (key == 13 || key == 1073741912) // Enter or Keypad Enter
+                {
+                    ApplyEdit();
+                    return true;
+                }
+                if (key == 27) // Escape
+                {
+                    CancelEdit();
+                    return true;
+                }
+
+                // Handle printable characters
+                char ch = '\0';
+                bool shift = (evt->Key.Keysym.Mod & (ushort)SDLKeymod.Shift) != 0;
+
+                if (key >= 32 && key <= 126)
+                {
+                    ch = (char)key;
+                    // Apply shift for uppercase/symbols
+                    if (shift && key >= 'a' && key <= 'z')
+                        ch = (char)(key - 32);
+                    else if (shift)
+                    {
+                        ch = key switch
+                        {
+                            '1' => '!', '2' => '@', '3' => '#', '4' => '$', '5' => '%',
+                            '6' => '^', '7' => '&', '8' => '*', '9' => '(', '0' => ')',
+                            '-' => '_', '=' => '+', '[' => '{', ']' => '}', '\\' => '|',
+                            ';' => ':', '\'' => '"', ',' => '<', '.' => '>', '/' => '?',
+                            '`' => '~',
+                            _ => ch
+                        };
+                    }
+                }
+
+                if (ch != '\0')
+                {
+                    _editBuffer = _editBuffer.Insert(_editCursorPos, ch.ToString());
+                    _editCursorPos++;
+                    _hasUnsavedChanges = true;
+                    return true;
+                }
+            }
         }
 
         return false;
+    }
+
+    private void ApplyEdit()
+    {
+        if (_zonesWithScripts.Count == 0) return;
+
+        int zoneId = _zonesWithScripts[_selectedZoneIndex];
+        var zone = _gameData.Zones[zoneId];
+        if (_selectedActionIndex >= zone.Actions.Count) return;
+
+        var action = zone.Actions[_selectedActionIndex];
+
+        if (_editingConditionIndex >= 0 && _editingConditionIndex < action.Conditions.Count)
+        {
+            // Try to parse condition text back to arguments (simplified)
+            var cond = action.Conditions[_editingConditionIndex];
+            cond.Text = _editBuffer;
+            Console.WriteLine($"[ScriptEditor] Updated condition {_editingConditionIndex} text: {_editBuffer}");
+        }
+        else if (_editingInstructionIndex >= 0 && _editingInstructionIndex < action.Instructions.Count)
+        {
+            // Update instruction text
+            var instr = action.Instructions[_editingInstructionIndex];
+            instr.Text = _editBuffer;
+            Console.WriteLine($"[ScriptEditor] Updated instruction {_editingInstructionIndex} text: {_editBuffer}");
+        }
+
+        _editingConditionIndex = -1;
+        _editingInstructionIndex = -1;
+        _editBuffer = "";
+        _hasUnsavedChanges = true;
+    }
+
+    private void CancelEdit()
+    {
+        _editingConditionIndex = -1;
+        _editingInstructionIndex = -1;
+        _editBuffer = "";
     }
 
     private void HandleZoneListClick(int clickY)
@@ -406,6 +558,88 @@ public class ScriptEditorWindow : IDisposable
                 _selectedActionIndex = 0;
                 _scrollOffset = 0;
                 RefreshHighlights();
+            }
+        }
+    }
+
+    private void HandleContentClick(int mx, int my)
+    {
+        if (_zonesWithScripts.Count == 0) return;
+
+        int zoneId = _zonesWithScripts[_selectedZoneIndex];
+        var zone = _gameData.Zones[zoneId];
+        if (_selectedActionIndex >= zone.Actions.Count) return;
+
+        var action = zone.Actions[_selectedActionIndex];
+
+        // Calculate which line was clicked based on scroll position
+        int contentY = TopBarHeight + 10;
+        int clickedLine = (_scrollOffset * LineHeight + my - contentY) / LineHeight;
+
+        // Track line positions as we render
+        int line = 0;
+
+        // Zone objects section header
+        line++; // "ZONE OBJECTS" header
+        int zoneObjCount = zone.Objects.Count(o =>
+            o.Type == ZoneObjectType.DoorEntrance || o.Type == ZoneObjectType.DoorExit ||
+            o.Type == ZoneObjectType.Lock || o.Type == ZoneObjectType.PuzzleNPC ||
+            o.Type == ZoneObjectType.CrateItem || o.Type == ZoneObjectType.CrateWeapon ||
+            o.Type == ZoneObjectType.LocatorItem || o.Type == ZoneObjectType.Trigger);
+        line += Math.Max(1, zoneObjCount);
+        line++; // spacing
+
+        // Conditions section header
+        line++; // "CONDITIONS" header
+        int condStart = line;
+        int condCount = action.Conditions.Count;
+        if (condCount == 0) condCount = 1; // "(none)" line
+        line += condCount;
+        line++; // spacing
+
+        // Instructions section header
+        line++; // "INSTRUCTIONS" header
+        int instrStart = line;
+
+        // Check if clicked on a condition
+        if (clickedLine >= condStart && clickedLine < condStart + action.Conditions.Count)
+        {
+            int condIdx = clickedLine - condStart;
+            if (condIdx >= 0 && condIdx < action.Conditions.Count)
+            {
+                _editingConditionIndex = condIdx;
+                _editingInstructionIndex = -1;
+                _editBuffer = action.Conditions[condIdx].Text ?? "";
+                _editCursorPos = _editBuffer.Length;
+                Console.WriteLine($"[ScriptEditor] Editing condition {condIdx}");
+                return;
+            }
+        }
+
+        // Check if clicked on an instruction
+        if (clickedLine >= instrStart)
+        {
+            // Count lines including dialogue text
+            int currentLine = instrStart;
+            for (int i = 0; i < action.Instructions.Count; i++)
+            {
+                var instr = action.Instructions[i];
+                int instrLines = 1;
+                if (!string.IsNullOrEmpty(instr.Text))
+                {
+                    instrLines += WordWrap(instr.Text, 70).Count;
+                }
+
+                if (clickedLine >= currentLine && clickedLine < currentLine + instrLines)
+                {
+                    _editingInstructionIndex = i;
+                    _editingConditionIndex = -1;
+                    _editBuffer = instr.Text ?? "";
+                    _editCursorPos = _editBuffer.Length;
+                    Console.WriteLine($"[ScriptEditor] Editing instruction {i}");
+                    return;
+                }
+                currentLine += instrLines;
             }
         }
     }
@@ -740,7 +974,21 @@ public class ScriptEditorWindow : IDisposable
         footerY += 11;
         _font?.RenderText(_renderer, "T = TELEPORT here", 8, footerY, 1, 255, 180, 80, 255);
         footerY += 11;
-        _font?.RenderText(_renderer, "[READ ONLY]", 8, footerY, 1, 100, 80, 80, 255);
+        _font?.RenderText(_renderer, "E = Toggle edit mode", 8, footerY, 1, 255, 200, 100, 255);
+        footerY += 11;
+        if (_isEditMode)
+        {
+            _font?.RenderText(_renderer, "[EDIT MODE]", 8, footerY, 1, 100, 255, 100, 255);
+            if (_hasUnsavedChanges)
+            {
+                footerY += 11;
+                _font?.RenderText(_renderer, "*Unsaved changes*", 8, footerY, 1, 255, 200, 100, 255);
+            }
+        }
+        else
+        {
+            _font?.RenderText(_renderer, "[VIEW MODE]", 8, footerY, 1, 150, 150, 180, 255);
+        }
     }
 
     private unsafe void RenderTopBar()
@@ -775,7 +1023,22 @@ public class ScriptEditorWindow : IDisposable
         _font?.RenderText(_renderer, $"  ({zone.Planet}, {zone.Width}x{zone.Height})", x + 70, y, 1, planetColor.r, planetColor.g, planetColor.b, 255);
 
         y += 16;
-        if (isCurrentZone)
+        if (_isEditMode)
+        {
+            if (_editingConditionIndex >= 0)
+            {
+                _font?.RenderText(_renderer, $"Editing condition {_editingConditionIndex + 1} - Enter to save, ESC to cancel", x + 10, y, 1, 100, 255, 100, 255);
+            }
+            else if (_editingInstructionIndex >= 0)
+            {
+                _font?.RenderText(_renderer, $"Editing instruction {_editingInstructionIndex + 1} - Enter to save, ESC to cancel", x + 10, y, 1, 100, 255, 100, 255);
+            }
+            else
+            {
+                _font?.RenderText(_renderer, "EDIT MODE - Click on condition/instruction text to edit", x + 10, y, 1, 255, 200, 100, 255);
+            }
+        }
+        else if (isCurrentZone)
         {
             _font?.RenderText(_renderer, "YOU ARE HERE - Highlights visible on map", x + 10, y, 1, 100, 255, 130, 255);
         }
@@ -838,18 +1101,18 @@ public class ScriptEditorWindow : IDisposable
         }
         else
         {
-            foreach (var cond in action.Conditions)
+            for (int i = 0; i < action.Conditions.Count; i++)
             {
-                y = RenderCondition(cond, y, contentX);
+                y = RenderCondition(action.Conditions[i], y, contentX, i);
             }
         }
         y += LineHeight;
 
         // Instructions
         y = RenderSection(y, "INSTRUCTIONS", 255, 180, 100);
-        foreach (var instr in action.Instructions)
+        for (int i = 0; i < action.Instructions.Count; i++)
         {
-            y = RenderInstruction(instr, y, contentX);
+            y = RenderInstruction(action.Instructions[i], y, contentX, i);
         }
     }
 
@@ -913,19 +1176,110 @@ public class ScriptEditorWindow : IDisposable
         return y;
     }
 
-    private unsafe int RenderCondition(Condition cond, int y, int x)
+    private unsafe int RenderCondition(Condition cond, int y, int x, int condIndex = -1)
     {
         string text = FormatCondition(cond);
+
+        // Highlight if this is the item being edited
+        bool isEditing = _isEditMode && _editingConditionIndex == condIndex;
+        if (isEditing && y > 0 && y < _windowHeight)
+        {
+            SDL.SetRenderDrawColor(_renderer, 60, 80, 60, 255);
+            var editBg = new SDLRect { X = x, Y = y - 2, W = _windowWidth - x - 10, H = LineHeight + 2 };
+            SDL.RenderFillRect(_renderer, &editBg);
+        }
+        else if (_isEditMode && condIndex >= 0 && y > 0 && y < _windowHeight)
+        {
+            // Hover highlight in edit mode
+            SDL.SetRenderDrawColor(_renderer, 40, 45, 50, 255);
+            var hoverBg = new SDLRect { X = x, Y = y - 2, W = _windowWidth - x - 10, H = LineHeight + 2 };
+            SDL.RenderFillRect(_renderer, &hoverBg);
+        }
+
+        if (isEditing)
+        {
+            // Show edit box for condition text (if applicable)
+            _font?.RenderText(_renderer, $"IF {text}", x + 10, y, 1, 150, 255, 150, 255);
+            y += LineHeight;
+
+            // Show text edit box if condition has text
+            if (y > 0 && y < _windowHeight)
+            {
+                SDL.SetRenderDrawColor(_renderer, 50, 60, 70, 255);
+                var editBox = new SDLRect { X = x + 20, Y = y - 2, W = _windowWidth - x - 40, H = LineHeight + 4 };
+                SDL.RenderFillRect(_renderer, &editBox);
+                SDL.SetRenderDrawColor(_renderer, 100, 200, 150, 255);
+                SDL.RenderDrawRect(_renderer, &editBox);
+
+                string displayText = _editBuffer.Length > 0 ? _editBuffer : "(enter text)";
+                _font?.RenderText(_renderer, displayText, x + 25, y, 1, 255, 255, 255, 255);
+
+                // Render cursor
+                if ((DateTime.Now.Millisecond / 500) % 2 == 0)
+                {
+                    int cursorX = x + 25 + (_font?.GetTextWidth(_editBuffer.Substring(0, _editCursorPos)) ?? 0);
+                    SDL.SetRenderDrawColor(_renderer, 255, 255, 255, 255);
+                    var cursor = new SDLRect { X = cursorX, Y = y, W = 1, H = 12 };
+                    SDL.RenderFillRect(_renderer, &cursor);
+                }
+            }
+            return y + LineHeight;
+        }
+
         return RenderLine(y, x + 10, $"IF {text}", 150, 255, 150);
     }
 
-    private unsafe int RenderInstruction(Instruction instr, int y, int x)
+    private unsafe int RenderInstruction(Instruction instr, int y, int x, int instrIndex = -1)
     {
         var (text, color) = FormatInstruction(instr);
+
+        // Highlight if this is the item being edited
+        bool isEditing = _isEditMode && _editingInstructionIndex == instrIndex;
+        if (isEditing && y > 0 && y < _windowHeight)
+        {
+            SDL.SetRenderDrawColor(_renderer, 60, 80, 60, 255);
+            var editBg = new SDLRect { X = x, Y = y - 2, W = _windowWidth - x - 10, H = LineHeight + 2 };
+            SDL.RenderFillRect(_renderer, &editBg);
+        }
+        else if (_isEditMode && instrIndex >= 0 && y > 0 && y < _windowHeight)
+        {
+            // Hover highlight in edit mode
+            SDL.SetRenderDrawColor(_renderer, 40, 45, 50, 255);
+            var hoverBg = new SDLRect { X = x, Y = y - 2, W = _windowWidth - x - 10, H = LineHeight + 2 };
+            SDL.RenderFillRect(_renderer, &hoverBg);
+        }
+
         y = RenderLine(y, x + 10, text, color.r, color.g, color.b);
 
-        // Render dialogue text on separate lines
-        if (!string.IsNullOrEmpty(instr.Text))
+        // Render dialogue text on separate lines (or edit box if editing)
+        if (isEditing)
+        {
+            // Show edit box
+            if (y > 0 && y < _windowHeight)
+            {
+                SDL.SetRenderDrawColor(_renderer, 50, 60, 70, 255);
+                var editBox = new SDLRect { X = x + 20, Y = y - 2, W = _windowWidth - x - 40, H = LineHeight + 4 };
+                SDL.RenderFillRect(_renderer, &editBox);
+                SDL.SetRenderDrawColor(_renderer, 100, 150, 200, 255);
+                SDL.RenderDrawRect(_renderer, &editBox);
+
+                // Render edit buffer with cursor
+                string displayText = _editBuffer;
+                if (_editBuffer.Length == 0) displayText = "(enter text)";
+                _font?.RenderText(_renderer, displayText, x + 25, y, 1, 255, 255, 255, 255);
+
+                // Render cursor (blinking)
+                if ((DateTime.Now.Millisecond / 500) % 2 == 0)
+                {
+                    int cursorX = x + 25 + (_font?.GetTextWidth(_editBuffer.Substring(0, _editCursorPos)) ?? 0);
+                    SDL.SetRenderDrawColor(_renderer, 255, 255, 255, 255);
+                    var cursor = new SDLRect { X = cursorX, Y = y, W = 1, H = 12 };
+                    SDL.RenderFillRect(_renderer, &cursor);
+                }
+            }
+            y += LineHeight;
+        }
+        else if (!string.IsNullOrEmpty(instr.Text))
         {
             var lines = WordWrap(instr.Text, 70);
             foreach (var line in lines)
