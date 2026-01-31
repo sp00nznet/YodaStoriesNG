@@ -194,6 +194,7 @@ public unsafe class GameEngine : IDisposable
 
         _menuBar = new MenuBar(_renderer.GetFont());
         _menuBar.SetRenderer(_renderer.GetRenderer(), _renderer.GetWindowID());
+        _menuBar.SetScale(_graphicsScale);
         _menuBar.OnNewGame += (size) => { _selectedWorldSize = size; StartNewGame(); };
         _menuBar.OnSaveGame += SaveGame;
         _menuBar.OnSaveGameAs += SaveGameAs;
@@ -230,6 +231,7 @@ public unsafe class GameEngine : IDisposable
     {
         _graphicsScale = scale;
         _renderer?.SetWindowScale(scale);
+        _menuBar.SetScale(scale);
         _messages.ShowMessage($"Graphics scale set to {scale}x", MessageType.System);
     }
 
@@ -252,10 +254,15 @@ public unsafe class GameEngine : IDisposable
 
         if (!string.IsNullOrEmpty(selectedFile) && File.Exists(selectedFile))
         {
-            // Store the path for next launch (could save to config file)
+            // Show the selected file info
             _messages.ShowMessage($"Selected: {Path.GetFileName(selectedFile)}", MessageType.System);
-            _messages.ShowMessage($"Path: {selectedFile}", MessageType.Info);
-            _messages.ShowMessage("Copy path and restart with --data argument", MessageType.Info);
+
+            // Detect game type from filename
+            string gameName = selectedFile.ToLowerInvariant().EndsWith(".daw")
+                ? "Indiana Jones Desktop Adventures"
+                : "Star Wars: Yoda Stories";
+            _messages.ShowMessage($"Game: {gameName}", MessageType.Info);
+            _messages.ShowMessage($"Restart with: --data \"{selectedFile}\"", MessageType.Info);
         }
         else
         {

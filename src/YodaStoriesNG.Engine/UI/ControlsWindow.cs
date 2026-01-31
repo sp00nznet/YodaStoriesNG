@@ -163,7 +163,7 @@ public unsafe class ControlsWindow : IDisposable
                 int my = evt->Button.Y;
 
                 // Check for reset button click
-                if (my >= WindowHeight - 35 && mx >= WindowWidth - 120 && mx < WindowWidth - 20)
+                if (my >= WindowHeight - 35 && mx >= WindowWidth - 140 && mx < WindowWidth - 20)
                 {
                     _keyBindings.SetDefaults();
                     _keyBindings.Save();
@@ -311,9 +311,9 @@ public unsafe class ControlsWindow : IDisposable
         {
             // Reset button
             SDL.SetRenderDrawColor(_renderer, 80, 60, 60, 255);
-            var resetRect = new SDLRect { X = WindowWidth - 120, Y = WindowHeight - 30, W = 100, H = 25 };
+            var resetRect = new SDLRect { X = WindowWidth - 140, Y = WindowHeight - 30, W = 120, H = 25 };
             SDL.RenderFillRect(_renderer, &resetRect);
-            _font.RenderText(_renderer, "Reset Defaults", WindowWidth - 115, WindowHeight - 22, 1, 200, 150, 150, 255);
+            _font.RenderText(_renderer, "Reset Defaults", WindowWidth - 130, WindowHeight - 22, 1, 200, 150, 150, 255);
         }
 
         SDL.RenderPresent(_renderer);

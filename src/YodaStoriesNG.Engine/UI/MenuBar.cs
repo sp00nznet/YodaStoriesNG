@@ -12,6 +12,7 @@ public unsafe class MenuBar
     private readonly BitmapFont _font;
     private SDLRenderer* _renderer;
     private uint _windowId;
+    private int _scale = 2;  // Graphics scale factor for mouse coordinate conversion
 
     public const int Height = 22;
 
@@ -61,6 +62,11 @@ public unsafe class MenuBar
         _windowId = windowId;
     }
 
+    public void SetScale(int scale)
+    {
+        _scale = scale;
+    }
+
     public bool HandleEvent(SDLEvent* evt)
     {
         // Only handle events for our window
@@ -73,8 +79,8 @@ public unsafe class MenuBar
 
         if (evt->Type == (uint)SDLEventType.Mousebuttondown)
         {
-            int mx = evt->Button.X;
-            int my = evt->Button.Y;
+            int mx = evt->Button.X / _scale;
+            int my = evt->Button.Y / _scale;
 
             // Check if clicking on menu bar
             if (my < Height)
@@ -125,8 +131,8 @@ public unsafe class MenuBar
 
         if (evt->Type == (uint)SDLEventType.Mousemotion)
         {
-            int mx = evt->Motion.X;
-            int my = evt->Motion.Y;
+            int mx = evt->Motion.X / _scale;
+            int my = evt->Motion.Y / _scale;
 
             // Highlight menu items on hover
             if (_openMenu >= 0)

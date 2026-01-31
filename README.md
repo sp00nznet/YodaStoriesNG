@@ -129,9 +129,9 @@ dotnet run --project src/YodaStoriesNG.Engine
 - **Exit** - Quit the game
 
 ### Debug Menu
-- **Asset Viewer (F2)** - Browse game tiles and characters
+- **Map Viewer (F2)** - See the full world map with zone types
 - **Script Editor (F3)** - View and analyze IACT action scripts
-- **Map Viewer (F4)** - See the full world map with zone types
+- **Asset Viewer (F4)** - Browse game tiles and characters
 - **Enable/Disable Bot** - Toggle automated gameplay
 
 ### Config Menu
@@ -194,7 +194,7 @@ Upon completing 15 missions, you receive a score evaluation:
 
 ## Debug Tools
 
-### Map Viewer (F2/F4)
+### Map Viewer (F2)
 Shows the complete world grid with color-coded zones:
 - Player position highlighted with pulsing border
 - Zone types: Puzzle, Spaceport, Blockade, Travel, Island

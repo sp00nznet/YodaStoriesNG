@@ -14,8 +14,8 @@ public unsafe class AboutWindow : IDisposable
     private bool _isOpen = false;
     private uint _windowId;
 
-    private const int WindowWidth = 500;
-    private const int WindowHeight = 350;
+    private const int WindowWidth = 520;
+    private const int WindowHeight = 400;
 
     public bool IsOpen => _isOpen;
 
@@ -159,8 +159,8 @@ public unsafe class AboutWindow : IDisposable
         SDL.RenderFillRect(_renderer, &headerRect);
 
         // Title
-        RenderTextCentered("YODA STORIES NG", WindowWidth / 2, 15, 2, 100, 255, 100);
-        RenderTextCentered("Open Source Reimplementation", WindowWidth / 2, 42, 1, 180, 180, 180);
+        RenderTextCentered("DESKTOP ADVENTURES NG", WindowWidth / 2, 15, 2, 100, 255, 100);
+        RenderTextCentered("Yoda Stories & Indiana Jones", WindowWidth / 2, 42, 1, 180, 180, 180);
 
         // Version
         int y = 80;
@@ -183,7 +183,7 @@ public unsafe class AboutWindow : IDisposable
 
         // Legal notice section
         SDL.SetRenderDrawColor(_renderer, 40, 45, 55, 255);
-        var legalRect = new SDLRect { X = 20, Y = y, W = WindowWidth - 40, H = 100 };
+        var legalRect = new SDLRect { X = 20, Y = y, W = WindowWidth - 40, H = 120 };
         SDL.RenderFillRect(_renderer, &legalRect);
 
         y += 10;
@@ -192,10 +192,10 @@ public unsafe class AboutWindow : IDisposable
 
         var legalLines = new[]
         {
-            "This is a fan project and is not affiliated with or",
-            "endorsed by LucasArts, Disney, or any related entities.",
-            "Star Wars and Yoda Stories are trademarks of Lucasfilm Ltd.",
-            "You must own a legal copy of Star Wars: Yoda Stories."
+            "This is a fan project not affiliated with or endorsed by",
+            "LucasArts, Disney, or any related entities.",
+            "Star Wars, Yoda Stories, and Indiana Jones are trademarks",
+            "of Lucasfilm Ltd. You must own a legal copy to play."
         };
 
         foreach (var line in legalLines)

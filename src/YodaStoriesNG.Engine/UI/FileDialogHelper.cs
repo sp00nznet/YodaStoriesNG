@@ -159,13 +159,13 @@ public static class FileDialogHelper
     }
 
     /// <summary>
-    /// Shows an Open File dialog specifically for .dta game data files.
+    /// Shows an Open File dialog for Desktop Adventures game data files (.dta or .daw).
     /// </summary>
     public static string? ShowOpenDataFileDialog(string? initialDir = null)
     {
         return ShowOpenDialog(
-            "Select Yoda Stories Data File",
-            "Yoda Stories Data (*.dta)|*.dta|All Files (*.*)|*.*",
+            "Select Game Data File",
+            "Desktop Adventures Data (*.dta;*.daw)|*.dta;*.daw|Yoda Stories (*.dta)|*.dta|Indiana Jones (*.daw)|*.daw|All Files (*.*)|*.*",
             initialDir,
             "dta"
         );
