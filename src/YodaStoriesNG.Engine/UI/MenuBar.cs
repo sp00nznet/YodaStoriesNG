@@ -20,7 +20,7 @@ public unsafe class MenuBar
     // Menu structure
     private readonly string[] _menus = { "File", "Debug", "Config", "About" };
     private readonly string[][] _menuItems = {
-        new[] { "New Game: Small", "New Game: Medium", "New Game: Large", "New Game: X-tra Large", "-", "Save Game", "Load Game", "-", "Exit" },
+        new[] { "New Game: Small", "New Game: Medium", "New Game: Large", "New Game: X-tra Large", "-", "Save Game", "Save As...", "Load Game", "-", "Exit" },
         new[] { "Asset Viewer (F2)", "Script Editor (F3)", "Map Viewer (F4)", "-", "Enable Bot", "Disable Bot" },
         new[] { "Graphics: 2x Scale", "Graphics: 4x Scale", "-", "Keyboard Controls", "Controller Controls", "-", "Select Data File..." },
         new[] { "About Yoda Stories NG", "GitHub Repository" }
@@ -33,6 +33,7 @@ public unsafe class MenuBar
     // Events
     public event Action<WorldSize>? OnNewGame;
     public event Action? OnSaveGame;
+    public event Action? OnSaveGameAs;
     public event Action? OnLoadGame;
     public event Action? OnExit;
     public event Action? OnAssetViewer;
@@ -196,9 +197,10 @@ public unsafe class MenuBar
                     case 1: OnNewGame?.Invoke(WorldSize.Medium); break;
                     case 2: OnNewGame?.Invoke(WorldSize.Large); break;
                     case 3: OnNewGame?.Invoke(WorldSize.XtraLarge); break;
-                    case 5: OnSaveGame?.Invoke(); break;
-                    case 6: OnLoadGame?.Invoke(); break;
-                    case 8: OnExit?.Invoke(); break;
+                    case 5: OnSaveGame?.Invoke(); break;      // Quick Save
+                    case 6: OnSaveGameAs?.Invoke(); break;    // Save As...
+                    case 7: OnLoadGame?.Invoke(); break;      // Load Game
+                    case 9: OnExit?.Invoke(); break;          // Exit
                 }
                 break;
             case 1: // Debug

@@ -116,6 +116,7 @@ public unsafe class GameEngine : IDisposable
         _menuBar.SetRenderer(_renderer.GetRenderer());
         _menuBar.OnNewGame += (size) => { _selectedWorldSize = size; StartNewGame(); };
         _menuBar.OnSaveGame += SaveGame;
+        _menuBar.OnSaveGameAs += SaveGameAs;
         _menuBar.OnLoadGame += LoadGame;
         _menuBar.OnExit += () => _isRunning = false;
         _menuBar.OnAssetViewer += () => _assetViewer?.Toggle();
@@ -177,13 +178,27 @@ public unsafe class GameEngine : IDisposable
 
     private void SelectDataFile()
     {
-        // For now, show a message - full file dialog would require platform-specific code
-        _messages.ShowMessage("Data file selection: Place YODESK.DTA in the game folder", MessageType.System);
-        _messages.ShowMessage($"Current path: {_dataPath}", MessageType.Info);
+        // Get current directory or parent for initial location
+        var initialDir = Path.GetDirectoryName(_dataPath) ?? Environment.CurrentDirectory;
+
+        var selectedFile = UI.FileDialogHelper.ShowOpenDataFileDialog(initialDir);
+
+        if (!string.IsNullOrEmpty(selectedFile) && File.Exists(selectedFile))
+        {
+            // Store the path for next launch (could save to config file)
+            _messages.ShowMessage($"Selected: {Path.GetFileName(selectedFile)}", MessageType.System);
+            _messages.ShowMessage($"Path: {selectedFile}", MessageType.Info);
+            _messages.ShowMessage("Copy path and restart with --data argument", MessageType.Info);
+        }
+        else
+        {
+            _messages.ShowMessage("No file selected", MessageType.System);
+        }
     }
 
     private void SaveGame()
     {
+        // Quick save to default location
         if (_worldGenerator == null)
         {
             _messages.ShowMessage("Cannot save: No active game", MessageType.System);
@@ -201,14 +216,60 @@ public unsafe class GameEngine : IDisposable
         }
     }
 
+    private void SaveGameAs()
+    {
+        // Save As with file picker
+        if (_worldGenerator == null)
+        {
+            _messages.ShowMessage("Cannot save: No active game", MessageType.System);
+            return;
+        }
+
+        var savePath = UI.FileDialogHelper.ShowSaveSaveGameDialog();
+
+        if (string.IsNullOrEmpty(savePath))
+        {
+            _messages.ShowMessage("Save cancelled", MessageType.System);
+            return;
+        }
+
+        if (SaveGameManager.SaveGame(savePath, _state, _worldGenerator))
+        {
+            _messages.ShowMessage($"Saved to: {Path.GetFileName(savePath)}", MessageType.System);
+        }
+        else
+        {
+            _messages.ShowMessage("Failed to save game", MessageType.System);
+        }
+    }
+
     private void LoadGame()
     {
-        var savePath = SaveGameManager.GetDefaultSavePath();
+        var defaultPath = SaveGameManager.GetDefaultSavePath();
+        string? savePath;
+
+        // If default save exists, use it; otherwise show file picker
+        if (File.Exists(defaultPath))
+        {
+            savePath = defaultPath;
+        }
+        else
+        {
+            // Show file picker
+            savePath = UI.FileDialogHelper.ShowOpenSaveGameDialog();
+
+            if (string.IsNullOrEmpty(savePath))
+            {
+                _messages.ShowMessage("Load cancelled", MessageType.System);
+                return;
+            }
+        }
+
         var saveData = SaveGameManager.LoadGame(savePath);
 
         if (saveData == null)
         {
-            _messages.ShowMessage("No save file found", MessageType.System);
+            _messages.ShowMessage("Failed to load save file", MessageType.System);
             return;
         }
 
