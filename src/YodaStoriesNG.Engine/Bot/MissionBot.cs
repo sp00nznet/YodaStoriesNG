@@ -32,8 +32,9 @@ public class MissionBot
 
     // Timing constants
     private const double ThinkInterval = 0.15;    // 150ms between decisions
-    private const double StuckThreshold = 3.0;    // Consider stuck after 3 seconds
-    private const int MaxStuckRetries = 5;
+    private const double StuckThreshold = 5.0;    // Consider stuck after 5 seconds (was 3)
+    private const int MaxStuckRetries = 10;       // More retries before giving up (was 5)
+    private const int MaxZoneExitAttempts = 10;   // More attempts before marking exit blocked (was 3)
 
     // Random for exploration
     private readonly Random _random = new();
@@ -662,13 +663,13 @@ public class MissionBot
             _stuckTimer += deltaTime;
 
             // If we're trying to exit a zone and are stuck, increment exit attempts
-            if (_pendingZoneExitDirection.HasValue && _stuckTimer > 1.0)
+            if (_pendingZoneExitDirection.HasValue && _stuckTimer > 2.0)
             {
                 _zoneExitAttempts++;
-                if (_zoneExitAttempts >= 3)
+                if (_zoneExitAttempts >= MaxZoneExitAttempts)
                 {
-                    // Failed to exit zone multiple times - mark exit as blocked
-                    Console.WriteLine($"[BOT] Failed to exit via {_pendingZoneExitDirection} after {_zoneExitAttempts} attempts, marking blocked");
+                    // Failed to exit zone multiple times - mark exit as temporarily blocked
+                    Console.WriteLine($"[BOT] Failed to exit via {_pendingZoneExitDirection} after {_zoneExitAttempts} attempts, marking temporarily blocked");
                     _solver.MarkExitBlocked(_pendingZoneExitDirection.Value);
                     _pendingZoneExitDirection = null;
                     _committedExplorationZone = null;

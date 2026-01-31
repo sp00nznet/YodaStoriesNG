@@ -22,7 +22,7 @@ public unsafe class GameRenderer : IDisposable
     private int _atlasHeight;
     private int _tilesPerRow;
 
-    private readonly GameData _gameData;
+    private GameData _gameData;
     private readonly TileRenderer _tileRenderer;
     private readonly BitmapFont _font;
 
@@ -45,6 +45,7 @@ public unsafe class GameRenderer : IDisposable
     public BitmapFont GetFont() => _font;
     public SDLRenderer* GetRenderer() => _renderer;
     public uint GetWindowID() => _window != null ? SDL.GetWindowID(_window) : 0;
+    public SDLWindow* GetWindow() => _window;
 
     private int _currentScale = 2;
     public int CurrentScale => _currentScale;
@@ -56,7 +57,7 @@ public unsafe class GameRenderer : IDisposable
         get => _inventoryScrollOffset;
         set => _inventoryScrollOffset = Math.Max(0, value);
     }
-    public const int InventoryVisibleSlots = 16;
+    public const int InventoryVisibleSlots = 32;
     public const int InventoryMaxItems = 100;
 
     /// <summary>
@@ -72,7 +73,15 @@ public unsafe class GameRenderer : IDisposable
     /// </summary>
     public void ScrollInventoryDown(int inventoryCount, int amount = 4)
     {
-        int maxScroll = Math.Max(0, inventoryCount - InventoryVisibleSlots);
+        // Calculate actual visible slots dynamically (same formula as RenderHUD)
+        int gridStartY = 15 + 18 + 45 + 18 + (Tile.Width * Scale) + 15 + 16;  // Approximate start Y
+        int slotSize = 48;
+        int slotPadding = 2;
+        int availableHeight = WindowHeight - gridStartY - 10;
+        int gridRows = availableHeight / (slotSize + slotPadding);
+        int visibleSlots = gridRows * 4;  // 4 columns
+
+        int maxScroll = Math.Max(0, inventoryCount - visibleSlots);
         _inventoryScrollOffset = Math.Min(maxScroll, _inventoryScrollOffset + amount);
     }
 
@@ -232,6 +241,25 @@ public unsafe class GameRenderer : IDisposable
         }
 
         Console.WriteLine($"Created tile atlas: {width}x{height} ({_gameData.Tiles.Count} tiles, {_tilesPerRow} per row)");
+    }
+
+    /// <summary>
+    /// Recreates the tile atlas with new game data (for game reload).
+    /// </summary>
+    public void RecreateTileAtlas(GameData newGameData)
+    {
+        // Destroy old atlas
+        if (_tileAtlas != null)
+        {
+            SDL.DestroyTexture(_tileAtlas);
+            _tileAtlas = null;
+        }
+
+        // Update game data reference
+        _gameData = newGameData;
+
+        // Create new atlas
+        CreateTileAtlas();
     }
 
     /// <summary>
@@ -450,16 +478,20 @@ public unsafe class GameRenderer : IDisposable
         // === INVENTORY SECTION ===
         sectionY += weaponSlotSize + 15;
 
-        // Calculate scroll limits
-        int totalItems = inventory.Count;
-        int maxScroll = Math.Max(0, totalItems - InventoryVisibleSlots);
-        _inventoryScrollOffset = Math.Clamp(_inventoryScrollOffset, 0, maxScroll);
-
         // Header with item count
+        int totalItems = inventory.Count;
         string invHeader = totalItems > 0 ? $"ITEMS ({totalItems})" : "ITEMS";
         _font.RenderText(_renderer, invHeader, hudX + 10, sectionY, 1, 200, 200, 200, 255);
 
+        // Calculate visible slots for scroll calculation (preview)
+        int previewGridStartY = sectionY + 16;
+        int previewAvailableHeight = WindowHeight - previewGridStartY - 10;
+        int previewGridRows = previewAvailableHeight / (48 + 2);  // slotSize + padding
+        int previewVisibleSlots = previewGridRows * 4;
+
         // Scroll indicators
+        int maxScroll = Math.Max(0, totalItems - previewVisibleSlots);
+        _inventoryScrollOffset = Math.Clamp(_inventoryScrollOffset, 0, maxScroll);
         if (_inventoryScrollOffset > 0)
             _font.RenderText(_renderer, "^", hudX + SidebarWidth - 25, sectionY, 1, 150, 200, 150, 255);
         if (_inventoryScrollOffset < maxScroll)
@@ -467,15 +499,19 @@ public unsafe class GameRenderer : IDisposable
 
         sectionY += 16;
 
-        // Inventory grid (4x4 layout = 16 visible slots)
-        var slotSize = 38;
-        var slotPadding = 3;
-        var gridStartX = hudX + 8;
+        // Inventory grid - larger slots (48px), 4 columns, fill available space
+        var slotSize = 48;
+        var slotPadding = 2;
+        var gridStartX = hudX + 10;
         var gridStartY = sectionY;
         var gridCols = 4;
-        var gridRows = 4;
 
-        for (int slot = 0; slot < InventoryVisibleSlots; slot++)
+        // Calculate max rows that fit in available space - always show all that fit
+        int availableHeight = WindowHeight - gridStartY - 10;
+        int gridRows = availableHeight / (slotSize + slotPadding);
+        int visibleSlots = gridRows * gridCols;
+
+        for (int slot = 0; slot < visibleSlots; slot++)
         {
             int inventoryIndex = slot + _inventoryScrollOffset;
             var col = slot % gridCols;
@@ -509,34 +545,14 @@ public unsafe class GameRenderer : IDisposable
                 var tileY = slotY + (slotSize - Tile.Height) / 2;
                 RenderTileUnscaled(inventory[inventoryIndex], tileX, tileY);
             }
-
-            // Slot number for first 9 (keyboard shortcuts 1-9, 0)
-            int displayNum = inventoryIndex + 1;
-            if (displayNum <= 10)
-            {
-                string numStr = displayNum == 10 ? "0" : displayNum.ToString();
-                _font.RenderText(_renderer, numStr, slotX + slotSize - 10, slotY + slotSize - 12, 1, 120, 120, 130, 200);
-            }
         }
 
-        // === CONTROLS SECTION ===
-        sectionY = gridStartY + gridRows * (slotSize + slotPadding) + 10;
-        SDL.SetRenderDrawColor(_renderer, 50, 50, 60, 255);
-        var controlsBg = new SDLRect { X = hudX + 5, Y = sectionY, W = SidebarWidth - 10, H = WindowHeight - sectionY - 5 };
-        SDL.RenderFillRect(_renderer, &controlsBg);
-
-        sectionY += 8;
-        _font.RenderText(_renderer, "CONTROLS", hudX + 10, sectionY, 1, 150, 180, 200, 255);
-        sectionY += 16;
-        _font.RenderText(_renderer, "WASD - Move", hudX + 10, sectionY, 1, 130, 130, 140, 255);
-        sectionY += 12;
-        _font.RenderText(_renderer, "SPACE - Action", hudX + 10, sectionY, 1, 130, 130, 140, 255);
-        sectionY += 12;
-        _font.RenderText(_renderer, "O - Objective", hudX + 10, sectionY, 1, 130, 130, 140, 255);
-        sectionY += 12;
-        _font.RenderText(_renderer, "X - Travel", hudX + 10, sectionY, 1, 130, 130, 140, 255);
-        sectionY += 12;
-        _font.RenderText(_renderer, "R - Restart", hudX + 10, sectionY, 1, 130, 130, 140, 255);
+        // Scroll hint at bottom if there are more items than visible
+        if (maxScroll > 0)
+        {
+            int hintY = gridStartY + gridRows * (slotSize + slotPadding) + 2;
+            _font.RenderText(_renderer, "Scroll: PgUp/Dn or wheel", hudX + 10, hintY, 1, 100, 100, 120, 255);
+        }
     }
 
     /// <summary>

@@ -395,49 +395,65 @@ public class WorldGenerator
     }
 
     /// <summary>
-    /// Selects a random mission from available goal puzzles and builds the puzzle chain.
+    /// Selects a random mission from available puzzles and builds the puzzle chain.
     /// Tracks used puzzles to ensure variety across the 15-mission cycle.
     /// </summary>
     private Mission SelectRandomMission()
     {
-        // Find goal-type puzzles that define missions, excluding recently used ones
-        var goalPuzzles = _gameData.Puzzles
-            .Where(p => p.Type == PuzzleType.Goal && p.Strings.Count > 0)
+        // Find Quest-type puzzles that have meaningful strings (Quest type is most common: 73 puzzles)
+        // First try puzzles not yet used in this cycle
+        var questPuzzles = _gameData.Puzzles
+            .Where(p => p.Type == PuzzleType.Quest && p.Strings.Count > 0 && p.Strings.Any(s => !string.IsNullOrEmpty(s)))
             .Where(p => !_usedGoalPuzzles.Contains(p.Id))
             .ToList();
 
-        // If all puzzles used, allow reuse
-        if (goalPuzzles.Count == 0)
+        // If all puzzles used, allow reuse (shuffle for variety)
+        if (questPuzzles.Count == 0)
         {
-            goalPuzzles = _gameData.Puzzles
-                .Where(p => p.Type == PuzzleType.Goal && p.Strings.Count > 0)
+            questPuzzles = _gameData.Puzzles
+                .Where(p => p.Type == PuzzleType.Quest && p.Strings.Count > 0 && p.Strings.Any(s => !string.IsNullOrEmpty(s)))
+                .OrderBy(_ => _random.Next())
                 .ToList();
+            _usedGoalPuzzles.Clear();  // Reset tracking when cycling
         }
 
-        // Determine planet based on mission number for variety
-        var planets = new[] { Planet.Desert, Planet.Snow, Planet.Forest };
-        var planet = planets[(_currentMissionNumber - 1) % planets.Length];
+        Console.WriteLine($"[Mission] {questPuzzles.Count} available quest puzzles, {_usedGoalPuzzles.Count} used");
 
-        if (goalPuzzles.Count == 0)
+        // Randomly select planet for variety
+        var planets = new[] { Planet.Desert, Planet.Snow, Planet.Forest };
+        var planet = planets[_random.Next(planets.Length)];
+
+        if (questPuzzles.Count == 0)
         {
             // Fallback: create a simple mission with no puzzle chain
             return CreateFallbackMission(planet);
         }
 
-        var goalPuzzle = goalPuzzles[_random.Next(goalPuzzles.Count)];
-        _usedGoalPuzzles.Add(goalPuzzle.Id);
+        var questPuzzle = questPuzzles[_random.Next(questPuzzles.Count)];
+        _usedGoalPuzzles.Add(questPuzzle.Id);
+
+        // Filter out corrupted strings (containing IPUZ markers or being too long)
+        var cleanStrings = questPuzzle.Strings
+            .Where(s => !string.IsNullOrEmpty(s) && !s.Contains("IPUZ") && s.Length < 200)
+            .ToList();
+
+        // Extract a clean mission name (first sentence or first 60 chars)
+        var rawName = cleanStrings.FirstOrDefault() ?? "Unknown Mission";
+        var missionName = rawName.Length > 60 ? rawName.Substring(0, 60) + "..." : rawName;
+        if (missionName.Contains("."))
+            missionName = missionName.Substring(0, missionName.IndexOf('.') + 1);
 
         var mission = new Mission
         {
-            Id = goalPuzzle.Id,
-            Name = goalPuzzle.Strings.FirstOrDefault() ?? "Unknown Mission",
+            Id = questPuzzle.Id,
+            Name = missionName,
             Planet = planet,
-            Description = goalPuzzle.Strings.Count > 1 ? goalPuzzle.Strings[1] : "",
-            GoalPuzzle = goalPuzzle,
+            Description = cleanStrings.Count > 1 ? cleanStrings[1] : "",
+            GoalPuzzle = questPuzzle,
             MissionNumber = _currentMissionNumber
         };
 
-        Console.WriteLine($"Mission {_currentMissionNumber}/15: {mission.Name} on {planet}");
+        Console.WriteLine($"Mission {_currentMissionNumber}/15: {mission.Name} on {planet} (quest puzzle #{questPuzzle.Id})");
 
         // NOTE: Puzzle chain will be built later in GenerateWorld() after grid is generated
 
@@ -449,17 +465,32 @@ public class WorldGenerator
     /// </summary>
     private Mission CreateFallbackMission(Planet planet)
     {
+        // Random mission names for variety
+        var missionNames = new[]
+        {
+            "Find the Lost Artifact",
+            "Retrieve the Stolen Plans",
+            "Rescue the Captured Rebel",
+            "Recover the Ancient Relic",
+            "Locate the Hidden Base",
+            "Find the Missing Droid",
+            "Discover the Secret Weapon",
+            "Track the Imperial Spy"
+        };
+
         var mission = new Mission
         {
-            Id = 0,
-            Name = "Find the Lost Artifact",
+            Id = _random.Next(1000, 9999),
+            Name = missionNames[_random.Next(missionNames.Length)],
             Planet = planet,
-            Description = "Locate and retrieve a valuable artifact.",
+            Description = "Complete the mission by exploring the planet.",
             GoalPuzzle = null
         };
 
-        // Create a simple 3-step chain using available items
-        var itemTiles = _gameData.Tiles.Where(t => t.IsItem).Take(10).ToList();
+        // Create a simple 3-step chain using RANDOM items (shuffle first)
+        var itemTiles = _gameData.Tiles.Where(t => t.IsItem)
+            .OrderBy(_ => _random.Next())
+            .Take(10).ToList();
         if (itemTiles.Count >= 3)
         {
             // Step 1: Trade starting item for intermediate item
@@ -562,9 +593,15 @@ public class WorldGenerator
             }
         }
 
-        // Shuffle and take a subset
-        itemLocations = itemLocations.OrderBy(_ => _random.Next()).Take(5).ToList();
+        // Shuffle and take a subset - use current time to ensure different results each game
+        itemLocations = itemLocations.OrderBy(_ => _random.Next()).ToList();
         npcZones = npcZones.OrderBy(_ => _random.Next()).ToList();
+
+        // Take a random subset (3-5 items for varied chain lengths)
+        int itemCount = Math.Min(itemLocations.Count, 3 + _random.Next(3));
+        itemLocations = itemLocations.Take(itemCount).ToList();
+
+        Console.WriteLine($"BuildPuzzleChain: Selected {itemLocations.Count} items, {npcZones.Count} NPCs for this run");
 
         // Build a puzzle chain with specific zone locations
         if (itemLocations.Count >= 2)

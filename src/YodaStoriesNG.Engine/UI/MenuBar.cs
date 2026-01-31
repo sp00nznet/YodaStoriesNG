@@ -11,8 +11,8 @@ public unsafe class MenuBar
 {
     private readonly BitmapFont _font;
     private SDLRenderer* _renderer;
+    private SDLWindow* _window;
     private uint _windowId;
-    private int _scale = 2;  // Graphics scale factor for mouse coordinate conversion
 
     public const int Height = 22;
 
@@ -57,15 +57,41 @@ public unsafe class MenuBar
         _font = font;
     }
 
-    public void SetRenderer(SDLRenderer* renderer, uint windowId)
+    public void SetRenderer(SDLRenderer* renderer, SDLWindow* window, uint windowId)
     {
         _renderer = renderer;
+        _window = window;
         _windowId = windowId;
     }
 
     public void SetScale(int scale)
     {
-        _scale = scale;
+        // No longer needed - we query actual window size dynamically
+        // Kept for API compatibility
+    }
+
+    /// <summary>
+    /// Gets the current window scale factor (physical / logical).
+    /// </summary>
+    private float GetWindowScale()
+    {
+        if (_window == null) return 1f;
+
+        int windowW, windowH;
+        SDL.GetWindowSize(_window, &windowW, &windowH);
+
+        // Logical width is always 796
+        return (float)windowW / 796f;
+    }
+
+    /// <summary>
+    /// Gets mouse coordinates - returns physical coordinates.
+    /// Menu bounds are scaled to match physical space.
+    /// </summary>
+    private (int x, int y) GetLogicalMousePosition(int physicalX, int physicalY)
+    {
+        // Use physical coordinates directly
+        return (physicalX, physicalY);
     }
 
     public bool HandleEvent(SDLEvent* evt)
@@ -80,14 +106,16 @@ public unsafe class MenuBar
 
         if (evt->Type == (uint)SDLEventType.Mousebuttondown)
         {
-            int mx = evt->Button.X / _scale;
-            int my = evt->Button.Y / _scale;
+            // Get mouse coordinates - use physical directly since menus render at logical coords
+            int mx = evt->Button.X;
+            int my = evt->Button.Y;
 
-            // Check if clicking on menu bar
+            // Check if clicking on menu bar (use logical Height since rendering isn't scaled)
             if (my < Height)
             {
                 for (int i = 0; i < _menus.Length; i++)
                 {
+                    // Use logical menu positions directly (no scaling)
                     if (mx >= _menuX[i] && mx < _menuX[i] + _menuWidths[i])
                     {
                         _openMenu = _openMenu == i ? -1 : i;
@@ -132,8 +160,9 @@ public unsafe class MenuBar
 
         if (evt->Type == (uint)SDLEventType.Mousemotion)
         {
-            int mx = evt->Motion.X / _scale;
-            int my = evt->Motion.Y / _scale;
+            // Get mouse coordinates - use directly since menus render at logical coords
+            int mx = evt->Motion.X;
+            int my = evt->Motion.Y;
 
             // Highlight menu items on hover
             if (_openMenu >= 0)

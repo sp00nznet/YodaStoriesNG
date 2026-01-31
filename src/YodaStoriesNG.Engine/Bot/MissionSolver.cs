@@ -24,11 +24,15 @@ public class MissionSolver
     // Track unreachable positions to avoid infinite loops
     private readonly HashSet<(int zoneId, int x, int y)> _unreachablePositions = new();
 
-    // Track blocked zone exits (from current zone -> target zone)
-    private readonly HashSet<(int fromZone, Direction dir)> _blockedExits = new();
+    // Track blocked zone exits (from current zone -> target zone) with retry counter
+    private readonly Dictionary<(int fromZone, Direction dir), int> _blockedExits = new();
+    private const int BlockedExitRetryThreshold = 3; // Retry blocked exits after visiting 3 other zones
 
     // Current exploration target
     private int? _targetZoneId;
+
+    // Track zone changes to periodically retry blocked exits
+    private int _zoneChangesSinceBlockedExitRetry = 0;
 
     public MissionSolver(GameState state, GameData gameData, WorldGenerator worldGenerator)
     {
@@ -50,23 +54,46 @@ public class MissionSolver
         _unreachablePositions.Clear();
         _blockedExits.Clear();
         _targetZoneId = null;
+        _zoneChangesSinceBlockedExitRetry = 0;
     }
 
     /// <summary>
-    /// Mark a zone exit as blocked (can't reach the edge).
+    /// Mark a zone exit as temporarily blocked (can't reach the edge).
+    /// Will be retried after visiting several other zones.
     /// </summary>
     public void MarkExitBlocked(Direction dir)
     {
-        _blockedExits.Add((_state.CurrentZoneId, dir));
-        Console.WriteLine($"[BOT] Marked exit {dir} from zone {_state.CurrentZoneId} as blocked");
+        var key = (_state.CurrentZoneId, dir);
+        _blockedExits[key] = _zoneChangesSinceBlockedExitRetry;
+        Console.WriteLine($"[BOT] Marked exit {dir} from zone {_state.CurrentZoneId} as temporarily blocked");
     }
 
     /// <summary>
-    /// Check if a zone exit is blocked.
+    /// Check if a zone exit is blocked. Blocked exits are retried after visiting several zones.
     /// </summary>
     public bool IsExitBlocked(Direction dir)
     {
-        return _blockedExits.Contains((_state.CurrentZoneId, dir));
+        var key = (_state.CurrentZoneId, dir);
+        if (!_blockedExits.TryGetValue(key, out int blockedAtCount))
+            return false;
+
+        // Retry blocked exits after visiting several zones
+        if (_zoneChangesSinceBlockedExitRetry - blockedAtCount >= BlockedExitRetryThreshold)
+        {
+            _blockedExits.Remove(key);
+            Console.WriteLine($"[BOT] Retrying previously blocked exit {dir} from zone {_state.CurrentZoneId}");
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Called when entering a new zone. Clears position blocklists and tracks zone changes.
+    /// </summary>
+    public void OnZoneChanged()
+    {
+        _zoneChangesSinceBlockedExitRetry++;
+        _unreachablePositions.RemoveWhere(p => p.zoneId == _state.CurrentZoneId);
     }
 
     /// <summary>
@@ -83,15 +110,6 @@ public class MissionSolver
     public void MarkUnreachable(int x, int y)
     {
         _unreachablePositions.Add((_state.CurrentZoneId, x, y));
-    }
-
-    /// <summary>
-    /// Clear unreachable positions when zone changes.
-    /// </summary>
-    public void OnZoneChanged()
-    {
-        // Clear unreachable markers for old zone - they might be reachable now
-        _unreachablePositions.RemoveWhere(p => p.zoneId != _state.CurrentZoneId);
     }
 
     /// <summary>
@@ -562,35 +580,39 @@ public class MissionSolver
     }
 
     /// <summary>
-    /// Finds a tile item (like health kits) that we haven't picked up yet.
-    /// These are tiles placed directly in the zone's middle layer with IsItem flag.
+    /// Finds a tile item (like health kits, keys) that we haven't picked up yet.
+    /// Checks both middle layer (1) and top layer (2) for items.
     /// </summary>
     public (int X, int Y)? FindTileItem()
     {
         if (_state.CurrentZone == null) return null;
 
-        // Scan the middle layer for item tiles
-        for (int y = 0; y < _state.CurrentZone.Height; y++)
+        // Scan both middle and top layers for item tiles
+        for (int layer = 1; layer <= 2; layer++)
         {
-            for (int x = 0; x < _state.CurrentZone.Width; x++)
+            for (int y = 0; y < _state.CurrentZone.Height; y++)
             {
-                var tileId = _state.CurrentZone.GetTile(x, y, 1); // Middle layer
-                if (tileId == 0xFFFF || tileId >= _gameData.Tiles.Count)
-                    continue;
-
-                var tile = _gameData.Tiles[tileId];
-                if (tile.IsItem && !tile.IsObject) // Item tile, not blocking object
+                for (int x = 0; x < _state.CurrentZone.Width; x++)
                 {
-                    // Skip if already collected
-                    var key = $"{_state.CurrentZoneId}_{x}_{y}_tile";
-                    if (_state.CollectedObjects.Contains(key))
-                        continue;
-                    if (_collectedItems.Contains((_state.CurrentZoneId, x, y)))
-                        continue;
-                    if (_unreachablePositions.Contains((_state.CurrentZoneId, x, y)))
+                    var tileId = _state.CurrentZone.GetTile(x, y, layer);
+                    if (tileId == 0xFFFF || tileId >= _gameData.Tiles.Count)
                         continue;
 
-                    return (x, y);
+                    var tile = _gameData.Tiles[tileId];
+                    // Check if it's an item tile (including keys, keycards, etc.)
+                    if (tile.IsItem || (tile.Flags & TileFlags.ItemKeycard) != 0)
+                    {
+                        // Skip if already collected
+                        var key = $"{_state.CurrentZoneId}_{x}_{y}_tile";
+                        if (_state.CollectedObjects.Contains(key))
+                            continue;
+                        if (_collectedItems.Contains((_state.CurrentZoneId, x, y)))
+                            continue;
+                        if (_unreachablePositions.Contains((_state.CurrentZoneId, x, y)))
+                            continue;
+
+                        return (x, y);
+                    }
                 }
             }
         }

@@ -32,7 +32,7 @@ public unsafe class GameEngine : IDisposable
     private ScoreWindow? _scoreWindow;
     private UI.HighScoreWindow? _highScoreWindow;
     private TitleScreen? _titleScreen;
-    private MenuBar? _menuBar;
+    private NativeMenuBar? _menuBar;
 
     private bool _isRunning;
     private readonly string _dataPath;
@@ -258,9 +258,8 @@ public unsafe class GameEngine : IDisposable
         _titleScreen.SetRenderer(_renderer.GetRenderer());
         _titleScreen.OnStartGame += () => { _showingTitleScreen = false; StartNewGame(); };
 
-        _menuBar = new MenuBar(_renderer.GetFont());
-        _menuBar.SetRenderer(_renderer.GetRenderer(), _renderer.GetWindowID());
-        _menuBar.SetScale(_graphicsScale);
+        _menuBar = new NativeMenuBar();
+        _menuBar.Initialize(_renderer.GetWindow());
         _menuBar.OnNewGame += (size) => { _selectedWorldSize = size; StartNewGame(); };
         _menuBar.OnSaveGame += SaveGame;
         _menuBar.OnSaveGameAs += SaveGameAs;
@@ -304,7 +303,6 @@ public unsafe class GameEngine : IDisposable
     {
         _graphicsScale = scale;
         _renderer?.SetWindowScale(scale);
-        _menuBar.SetScale(scale);
         _messages.ShowMessage($"Graphics scale set to {scale}x", MessageType.System);
     }
 
@@ -327,19 +325,61 @@ public unsafe class GameEngine : IDisposable
 
         if (!string.IsNullOrEmpty(selectedFile) && File.Exists(selectedFile))
         {
-            // Show the selected file info
-            _messages.ShowMessage($"Selected: {Path.GetFileName(selectedFile)}", MessageType.System);
-
-            // Detect game type from filename
-            string gameName = selectedFile.ToLowerInvariant().EndsWith(".daw")
-                ? "Indiana Jones Desktop Adventures"
-                : "Star Wars: Yoda Stories";
-            _messages.ShowMessage($"Game: {gameName}", MessageType.Info);
-            _messages.ShowMessage($"Restart with: --data \"{selectedFile}\"", MessageType.Info);
+            // Reload the game with the new data file
+            ReloadGameData(selectedFile);
         }
         else
         {
             _messages.ShowMessage("No file selected", MessageType.System);
+        }
+    }
+
+    private void ReloadGameData(string dataFilePath)
+    {
+        _messages.ShowMessage($"Loading: {Path.GetFileName(dataFilePath)}...", MessageType.System);
+
+        try
+        {
+            // Parse the new data file
+            var parser = new DtaParser();
+            var newGameData = parser.Parse(dataFilePath);
+
+            if (newGameData == null)
+            {
+                _messages.ShowMessage("Failed to parse data file", MessageType.System);
+                return;
+            }
+
+            // Detect game type
+            string gameName = dataFilePath.ToLowerInvariant().EndsWith(".daw")
+                ? "Indiana Jones"
+                : "Yoda Stories";
+            Console.WriteLine($"Reloading game: {gameName} from {dataFilePath}");
+
+            // Update game data
+            _gameData = newGameData;
+
+            // Recreate tile atlas
+            _renderer?.RecreateTileAtlas(_gameData);
+
+            // Reset state
+            _state.Reset();
+            _messages.Clear();
+
+            // Create new world generator
+            _worldGenerator = new WorldGenerator(_gameData);
+
+            // Show success message
+            _messages.ShowMessage($"Loaded: {gameName}", MessageType.System);
+            _messages.ShowMessage("Starting new game...", MessageType.Info);
+
+            // Start a new game with the new data
+            StartNewGame();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to reload game data: {ex.Message}");
+            _messages.ShowMessage($"Error: {ex.Message}", MessageType.System);
         }
     }
 
@@ -896,6 +936,26 @@ public unsafe class GameEngine : IDisposable
     {
         while (_renderer!.PollEvent(out var evt))
         {
+            // Handle Quit event FIRST - before any windows can consume it
+            if ((SDLEventType)evt.Type == SDLEventType.Quit)
+            {
+                _isRunning = false;
+                return; // Exit immediately
+            }
+
+            // Handle main window close event (when other windows are open, SDL may not send Quit)
+            if ((SDLEventType)evt.Type == SDLEventType.Windowevent)
+            {
+                // Check if this is the main window being closed
+                uint mainWindowId = _renderer.GetWindowID();
+                if (evt.Window.WindowID == mainWindowId &&
+                    evt.Window.Event == (byte)SDLWindowEventID.Close)
+                {
+                    _isRunning = false;
+                    return; // Exit immediately
+                }
+            }
+
             // Handle title screen events
             if (_showingTitleScreen && _titleScreen != null)
             {
@@ -958,9 +1018,6 @@ public unsafe class GameEngine : IDisposable
 
             switch ((SDLEventType)evt.Type)
             {
-                case SDLEventType.Quit:
-                    _isRunning = false;
-                    break;
 
                 case SDLEventType.Keydown:
                     HandleKeyDown(evt.Key.Keysym.Sym);
@@ -1001,8 +1058,11 @@ public unsafe class GameEngine : IDisposable
                     break;
 
                 case SDLEventType.Mousewheel:
-                    // Scroll inventory when mouse wheel is used over sidebar
-                    if (_renderer != null && _renderer.IsPointOverSidebar(evt.Wheel.MouseX, evt.Wheel.MouseY))
+                    // Scroll inventory when mouse wheel is used
+                    // Get current mouse position to check if over sidebar
+                    int mouseX, mouseY;
+                    SDL.GetMouseState(&mouseX, &mouseY);
+                    if (_renderer != null && _renderer.IsPointOverSidebar(mouseX, mouseY))
                     {
                         if (evt.Wheel.Y > 0)
                             _renderer.ScrollInventoryUp();
@@ -1208,6 +1268,18 @@ public unsafe class GameEngine : IDisposable
 
             case 1073741885:  // F4 - Toggle asset viewer
                 _assetViewer?.Toggle();
+                break;
+
+            case 1073741886:  // F5 - Scale 1x
+                SetGraphicsScale(1);
+                break;
+
+            case 1073741887:  // F6 - Scale 2x (default)
+                SetGraphicsScale(2);
+                break;
+
+            case 1073741888:  // F7 - Scale 4x
+                SetGraphicsScale(4);
                 break;
 
             case SDLK_ESCAPE:
@@ -2950,8 +3022,8 @@ public unsafe class GameEngine : IDisposable
                 npc.Damage = character.AuxData.Damage;
             }
 
-            // Apply character weapon data for health
-            if (character.Weapon != null)
+            // Apply character weapon data for health (ignore invalid/placeholder values like 0xFFFF)
+            if (character.Weapon != null && character.Weapon.Health > 0 && character.Weapon.Health < 1000)
             {
                 npc.MaxHealth = character.Weapon.Health;
                 npc.Health = character.Weapon.Health;
