@@ -91,10 +91,75 @@ public unsafe class GameEngine : IDisposable
     {
         // Remove old weapons and add the new one
         _state.Weapons.Clear();
+        _state.WeaponAmmo.Clear();
         _state.Weapons.Add(newWeaponTile);
         _state.CurrentWeaponIndex = 0;
         _state.SelectedWeapon = newWeaponTile;
+
+        // Initialize ammo for the new weapon
+        InitializeWeaponAmmo(newWeaponTile);
         Console.WriteLine($"[Weapon] Upgraded to tile {newWeaponTile}");
+    }
+
+    /// <summary>
+    /// Gets weapon configuration (ammo, damage) based on tile ID and flags.
+    /// </summary>
+    private (int maxAmmo, int damage, bool isSingleUse) GetWeaponConfig(int tileId)
+    {
+        // Check if it's The Force - unlimited ammo
+        if (tileId == TILE_THE_FORCE)
+            return (-1, 75, false);  // -1 = unlimited
+
+        // Lightsabers - melee, no ammo
+        if (tileId == TILE_BASIC_LIGHTSABER || tileId == TILE_UPGRADED_LIGHTSABER)
+            return (-1, 50, false);
+
+        // Check tile flags for weapon type
+        if (tileId < _gameData!.Tiles.Count)
+        {
+            var tile = _gameData.Tiles[tileId];
+            var flags = tile.Flags;
+
+            // Heavy blaster - more damage, less ammo
+            if ((flags & TileFlags.WeaponHeavyBlaster) != 0)
+                return (15, 75, false);
+
+            // Light blaster - standard
+            if ((flags & TileFlags.WeaponLightBlaster) != 0)
+                return (30, 50, false);
+
+            // Generic weapon flag (pistols, etc)
+            if ((flags & TileFlags.Weapon) != 0)
+            {
+                // Check for grenade-like items (single use)
+                var name = GetTileName(tileId).ToLower();
+                if (name.Contains("grenade") || name.Contains("bomb") || name.Contains("thermal"))
+                    return (1, 100, true);  // Single use, high damage
+
+                // Default ranged weapon
+                return (20, 50, false);
+            }
+        }
+
+        // Default for unknown weapons
+        return (20, 50, false);
+    }
+
+
+    /// <summary>
+    /// Initializes ammo tracking for a weapon.
+    /// </summary>
+    private void InitializeWeaponAmmo(int tileId)
+    {
+        var (maxAmmo, damage, isSingleUse) = GetWeaponConfig(tileId);
+
+        // -1 means unlimited (melee or The Force)
+        if (maxAmmo > 0)
+        {
+            _state.InitializeWeaponAmmo(tileId, maxAmmo, damage, isSingleUse);
+            Console.WriteLine($"[Weapon] Initialized ammo for tile {tileId}: {maxAmmo} shots, {damage} damage" +
+                (isSingleUse ? " (single use)" : ""));
+        }
     }
 
     public GameEngine(string dataPath)
@@ -500,6 +565,7 @@ public unsafe class GameEngine : IDisposable
         _state.Weapons.Add(startingWeapon);
         _state.CurrentWeaponIndex = 0;
         _state.SelectedWeapon = startingWeapon;
+        InitializeWeaponAmmo(startingWeapon);
 
         // Generate the world with selected size
         _worldGenerator = new WorldGenerator(_gameData!);
@@ -933,6 +999,17 @@ public unsafe class GameEngine : IDisposable
                 case SDLEventType.Controllerbuttonup:
                     HandleControllerButton(evt.Cbutton.Button, false);
                     break;
+
+                case SDLEventType.Mousewheel:
+                    // Scroll inventory when mouse wheel is used over sidebar
+                    if (_renderer != null && _renderer.IsPointOverSidebar(evt.Wheel.MouseX, evt.Wheel.MouseY))
+                    {
+                        if (evt.Wheel.Y > 0)
+                            _renderer.ScrollInventoryUp();
+                        else if (evt.Wheel.Y < 0)
+                            _renderer.ScrollInventoryDown(_state.Inventory.Count);
+                    }
+                    break;
             }
         }
 
@@ -1064,8 +1141,14 @@ public unsafe class GameEngine : IDisposable
         const int SDLK_DOWN = 1073741905;
         const int SDLK_LEFT = 1073741904;
         const int SDLK_RIGHT = 1073741903;
+        const int SDLK_0 = 48;
         const int SDLK_1 = 49;
         const int SDLK_8 = 56;
+        const int SDLK_9 = 57;
+        const int SDLK_PAGEUP = 1073741899;
+        const int SDLK_PAGEDOWN = 1073741902;
+        const int SDLK_LBRACKET = 91;  // [ for scroll up
+        const int SDLK_RBRACKET = 93;  // ] for scroll down
         const int SDLK_TAB = 9;
         const int SDLK_a = 97;
         const int SDLK_b = 98;
@@ -1156,19 +1239,34 @@ public unsafe class GameEngine : IDisposable
                 UseItem();
                 break;
 
-            case >= SDLK_1 and <= SDLK_8:
-                // Select inventory item (keys 1-8)
-                var slot = keyCode - SDLK_1;
-                if (slot < _state.Inventory.Count)
+            case >= SDLK_1 and <= SDLK_9:
+            case SDLK_0:
+                // Select inventory item (keys 1-9, 0 for slot 10)
+                // Slot number is affected by scroll offset
+                int slotNum = keyCode == SDLK_0 ? 10 : keyCode - SDLK_1 + 1;
+                int inventoryIdx = _renderer!.GetInventoryIndexForSlot(slotNum, _state.Inventory.Count);
+                if (inventoryIdx >= 0 && inventoryIdx < _state.Inventory.Count)
                 {
-                    _state.SelectedItem = _state.Inventory[slot];
-                    var itemName = GetTileName(_state.Inventory[slot]) ?? $"Item {slot + 1}";
+                    _state.SelectedItem = _state.Inventory[inventoryIdx];
+                    var itemName = GetTileName(_state.Inventory[inventoryIdx]) ?? $"Item {inventoryIdx + 1}";
                     _messages.ShowMessage($"Selected: {itemName}", MessageType.Info);
                 }
                 else
                 {
-                    _messages.ShowMessage($"Slot {slot + 1} is empty", MessageType.Info);
+                    _messages.ShowMessage($"Slot {slotNum} is empty", MessageType.Info);
                 }
+                break;
+
+            case SDLK_PAGEUP:
+            case SDLK_LBRACKET:
+                // Scroll inventory up
+                _renderer?.ScrollInventoryUp();
+                break;
+
+            case SDLK_PAGEDOWN:
+            case SDLK_RBRACKET:
+                // Scroll inventory down
+                _renderer?.ScrollInventoryDown(_state.Inventory.Count);
                 break;
 
             case SDLK_r:
@@ -1862,13 +1960,18 @@ public unsafe class GameEngine : IDisposable
                         if (!_state.Weapons.Contains(obj.Argument))
                         {
                             _state.Weapons.Add(obj.Argument);
+                            InitializeWeaponAmmo(obj.Argument);
                         }
                         // Auto-equip the new weapon
                         _state.CurrentWeaponIndex = _state.Weapons.IndexOf(obj.Argument);
                         _state.SelectedWeapon = obj.Argument;
                         _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
                         var weaponName = GetTileName(obj.Argument) ?? $"Weapon";
-                        _messages.ShowPickup(weaponName);
+                        var ammoState = _state.GetWeaponAmmo(obj.Argument);
+                        if (ammoState != null)
+                            _messages.ShowPickup($"{weaponName} ({ammoState.CurrentAmmo} ammo)");
+                        else
+                            _messages.ShowPickup(weaponName);
                         _messages.ShowMessage("Press Tab to switch weapons", MessageType.Info);
                         _sounds?.PlaySound(SoundManager.SoundPickup);
                     }
@@ -2233,12 +2336,17 @@ public unsafe class GameEngine : IDisposable
                         if (!_state.Weapons.Contains(obj.Argument))
                         {
                             _state.Weapons.Add(obj.Argument);
+                            InitializeWeaponAmmo(obj.Argument);
                         }
                         _state.CurrentWeaponIndex = _state.Weapons.IndexOf(obj.Argument);
                         _state.SelectedWeapon = obj.Argument;
                         _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
                         var weaponName = GetTileName(obj.Argument) ?? $"Weapon";
-                        _messages.ShowPickup(weaponName);
+                        var ammoState = _state.GetWeaponAmmo(obj.Argument);
+                        if (ammoState != null)
+                            _messages.ShowPickup($"{weaponName} ({ammoState.CurrentAmmo} ammo)");
+                        else
+                            _messages.ShowPickup(weaponName);
                         _messages.ShowMessage("Press Tab to switch weapons", MessageType.Info);
                         _sounds?.PlaySound(SoundManager.SoundPickup);
                         return true;
@@ -2513,6 +2621,42 @@ public unsafe class GameEngine : IDisposable
 
     private void PerformRangedAttack()
     {
+        if (!_state.SelectedWeapon.HasValue)
+            return;
+
+        int weaponId = _state.SelectedWeapon.Value;
+        var ammoState = _state.GetWeaponAmmo(weaponId);
+
+        // Check and consume ammo (if weapon has limited ammo)
+        if (ammoState != null)
+        {
+            if (ammoState.CurrentAmmo <= 0)
+            {
+                _messages.ShowMessage("Out of ammo!", MessageType.Combat);
+                // Switch to melee or next weapon
+                if (_state.Weapons.Count > 1)
+                {
+                    CycleWeapon();
+                    _messages.ShowMessage("Switched weapons", MessageType.Info);
+                }
+                return;
+            }
+
+            // Consume ammo
+            _state.ConsumeWeaponAmmo(weaponId);
+
+            // Show ammo count
+            if (ammoState.CurrentAmmo > 0)
+                _messages.ShowMessage($"*pew* ({ammoState.CurrentAmmo} left)", MessageType.Combat);
+            else
+                _messages.ShowMessage("*pew* (last shot!)", MessageType.Combat);
+        }
+        else
+        {
+            // Unlimited ammo (The Force, etc)
+            _messages.ShowMessage("*pew*", MessageType.Combat);
+        }
+
         // Trigger attack animation
         _state.IsAttacking = true;
         _state.AttackTimer = 0.15;  // Shorter for shooting
@@ -2529,6 +2673,20 @@ public unsafe class GameEngine : IDisposable
             case Direction.Right: velX = projectileSpeed; break;
         }
 
+        // Get damage from ammo state or use default
+        int damage = ammoState?.Damage ?? 50;
+
+        // Determine projectile type
+        var projType = ProjectileType.Blaster;
+        if (weaponId == TILE_THE_FORCE)
+            projType = ProjectileType.Force;
+        else if (_gameData != null && weaponId < _gameData.Tiles.Count)
+        {
+            var tile = _gameData.Tiles[weaponId];
+            if ((tile.Flags & TileFlags.WeaponHeavyBlaster) != 0)
+                projType = ProjectileType.HeavyBlaster;
+        }
+
         // Spawn projectile
         var projectile = new Projectile
         {
@@ -2536,14 +2694,43 @@ public unsafe class GameEngine : IDisposable
             Y = _state.PlayerY + (velY > 0 ? 0.5 : velY < 0 ? -0.5 : 0),
             VelocityX = velX,
             VelocityY = velY,
-            Damage = 50,
+            Damage = damage,
             LifeTime = 2.0,
-            Type = ProjectileType.Blaster
+            Type = projType
         };
         _state.Projectiles.Add(projectile);
 
         _sounds?.PlaySound(SoundManager.SoundAttack);
-        _messages.ShowMessage("*pew*", MessageType.Combat);
+
+        // Handle single-use weapons (grenades, thermal detonators)
+        if (ammoState is { IsSingleUse: true, CurrentAmmo: 0 })
+        {
+            var weaponName = GetTileName(weaponId);
+            _messages.ShowMessage($"{weaponName} used up!", MessageType.Info);
+            _state.RemoveDepletedWeapon(weaponId);
+        }
+        // Check if weapon is now empty
+        else if (ammoState != null && ammoState.CurrentAmmo == 0)
+        {
+            var weaponName = GetTileName(weaponId);
+            _messages.ShowMessage($"{weaponName} is empty!", MessageType.Combat);
+            _state.RemoveDepletedWeapon(weaponId);
+        }
+    }
+
+    /// <summary>
+    /// Cycles to the next weapon.
+    /// </summary>
+    private void CycleWeapon()
+    {
+        if (_state.Weapons.Count == 0)
+        {
+            _state.SelectedWeapon = null;
+            return;
+        }
+
+        _state.CurrentWeaponIndex = (_state.CurrentWeaponIndex + 1) % _state.Weapons.Count;
+        _state.SelectedWeapon = _state.Weapons[_state.CurrentWeaponIndex];
     }
 
     private void PerformMeleeAttack()
@@ -3453,8 +3640,18 @@ public unsafe class GameEngine : IDisposable
             _renderer.RenderHighlights(highlights, _state.CameraX, _state.CameraY);
         }
 
-        // Render HUD
-        _renderer.RenderHUD(_state.Health, _state.MaxHealth, _state.Inventory, _state.SelectedWeapon, _state.SelectedItem);
+        // Render HUD with weapon ammo info
+        int currentAmmo = -1, maxAmmo = -1;
+        if (_state.SelectedWeapon.HasValue)
+        {
+            var ammoState = _state.GetWeaponAmmo(_state.SelectedWeapon.Value);
+            if (ammoState != null)
+            {
+                currentAmmo = ammoState.CurrentAmmo;
+                maxAmmo = ammoState.MaxAmmo;
+            }
+        }
+        _renderer.RenderHUD(_state.Health, _state.MaxHealth, _state.Inventory, _state.SelectedWeapon, _state.SelectedItem, currentAmmo, maxAmmo);
 
         // Render zone info
         _renderer.RenderZoneInfo(
@@ -3677,11 +3874,26 @@ public unsafe class GameEngine : IDisposable
     /// <summary>
     /// Gets a tile name by ID, if available.
     /// </summary>
-    private string? GetTileName(int tileId)
+    private string GetTileName(int tileId)
     {
+        // Check tile names dictionary first
         if (_gameData!.TileNames.TryGetValue(tileId, out var name))
             return name;
-        return null;
+
+        // Check puzzles for associated strings
+        if (_gameData.Puzzles != null)
+        {
+            foreach (var puzzle in _gameData.Puzzles)
+            {
+                if (puzzle.Item1 == tileId && puzzle.Strings.Count > 0)
+                    return puzzle.Strings[0];
+                if (puzzle.Item2 == tileId && puzzle.Strings.Count > 1)
+                    return puzzle.Strings[1];
+            }
+        }
+
+        // Fallback
+        return $"Tile_{tileId}";
     }
 
     /// <summary>

@@ -43,6 +43,17 @@ public class SaveGameManager
                 SelectedWeapon = state.SelectedWeapon,
                 SelectedItem = state.SelectedItem,
 
+                // Weapon ammo
+                WeaponAmmo = state.WeaponAmmo.ToDictionary(
+                    kv => kv.Key,
+                    kv => new SaveWeaponAmmo
+                    {
+                        CurrentAmmo = kv.Value.CurrentAmmo,
+                        MaxAmmo = kv.Value.MaxAmmo,
+                        Damage = kv.Value.Damage,
+                        IsSingleUse = kv.Value.IsSingleUse
+                    }),
+
                 // Game variables
                 Variables = new Dictionary<int, int>(state.Variables),
                 Counters = new Dictionary<int, int>(state.Counters),
@@ -219,6 +230,20 @@ public class SaveGameManager
         state.SelectedWeapon = saveData.SelectedWeapon;
         state.SelectedItem = saveData.SelectedItem;
 
+        // Weapon ammo
+        state.WeaponAmmo.Clear();
+        foreach (var kv in saveData.WeaponAmmo)
+        {
+            state.WeaponAmmo[kv.Key] = new WeaponAmmoState
+            {
+                TileId = kv.Key,
+                CurrentAmmo = kv.Value.CurrentAmmo,
+                MaxAmmo = kv.Value.MaxAmmo,
+                Damage = kv.Value.Damage,
+                IsSingleUse = kv.Value.IsSingleUse
+            };
+        }
+
         // Game variables
         state.Variables = new Dictionary<int, int>(saveData.Variables);
         state.Counters = new Dictionary<int, int>(saveData.Counters);
@@ -326,6 +351,9 @@ public class SaveGameData
     public int? SelectedWeapon { get; set; }
     public int? SelectedItem { get; set; }
 
+    // Weapon ammo states
+    public Dictionary<int, SaveWeaponAmmo> WeaponAmmo { get; set; } = new();
+
     // Game variables
     public Dictionary<int, int> Variables { get; set; } = new();
     public Dictionary<int, int> Counters { get; set; } = new();
@@ -409,4 +437,15 @@ public class SaveMissionData
     public string Description { get; set; } = "";
     public int CurrentStep { get; set; }
     public bool IsCompleted { get; set; }
+}
+
+/// <summary>
+/// Weapon ammo save data.
+/// </summary>
+public class SaveWeaponAmmo
+{
+    public int CurrentAmmo { get; set; }
+    public int MaxAmmo { get; set; }
+    public int Damage { get; set; }
+    public bool IsSingleUse { get; set; }
 }

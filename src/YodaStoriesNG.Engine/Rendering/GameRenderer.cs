@@ -49,6 +49,54 @@ public unsafe class GameRenderer : IDisposable
     private int _currentScale = 2;
     public int CurrentScale => _currentScale;
 
+    // Inventory scroll state
+    private int _inventoryScrollOffset = 0;
+    public int InventoryScrollOffset
+    {
+        get => _inventoryScrollOffset;
+        set => _inventoryScrollOffset = Math.Max(0, value);
+    }
+    public const int InventoryVisibleSlots = 16;
+    public const int InventoryMaxItems = 100;
+
+    /// <summary>
+    /// Scrolls the inventory up (towards index 0).
+    /// </summary>
+    public void ScrollInventoryUp(int amount = 4)
+    {
+        _inventoryScrollOffset = Math.Max(0, _inventoryScrollOffset - amount);
+    }
+
+    /// <summary>
+    /// Scrolls the inventory down (towards higher indices).
+    /// </summary>
+    public void ScrollInventoryDown(int inventoryCount, int amount = 4)
+    {
+        int maxScroll = Math.Max(0, inventoryCount - InventoryVisibleSlots);
+        _inventoryScrollOffset = Math.Min(maxScroll, _inventoryScrollOffset + amount);
+    }
+
+    /// <summary>
+    /// Gets the inventory index for a given slot number (1-based keyboard input).
+    /// Returns -1 if the slot is empty or out of range.
+    /// </summary>
+    public int GetInventoryIndexForSlot(int slotNumber, int inventoryCount)
+    {
+        // Slots 1-9, 0 map to indices based on scroll offset
+        int index = (slotNumber == 0 ? 9 : slotNumber - 1) + _inventoryScrollOffset;
+        return index < inventoryCount ? index : -1;
+    }
+
+    /// <summary>
+    /// Checks if the given screen coordinates (adjusted for current scale) are over the sidebar.
+    /// </summary>
+    public bool IsPointOverSidebar(int screenX, int screenY)
+    {
+        // Convert screen coordinates to logical coordinates
+        int logicalX = screenX * 2 / _currentScale;
+        return logicalX >= GameAreaWidth;
+    }
+
     /// <summary>
     /// Sets the window scale (1x, 2x or 4x).
     /// </summary>
@@ -288,7 +336,7 @@ public unsafe class GameRenderer : IDisposable
     /// <summary>
     /// Renders the HUD (health, inventory, etc.) on the right sidebar.
     /// </summary>
-    public void RenderHUD(int health, int maxHealth, List<int> inventory, int? selectedWeapon, int? selectedItem = null)
+    public void RenderHUD(int health, int maxHealth, List<int> inventory, int? selectedWeapon, int? selectedItem = null, int currentAmmo = -1, int maxAmmo = -1)
     {
         var hudX = GameAreaWidth;  // Right side of game area
         var hudY = 0;
@@ -351,6 +399,48 @@ public unsafe class GameRenderer : IDisposable
         if (selectedWeapon.HasValue && selectedWeapon.Value > 0 && selectedWeapon.Value < _gameData.Tiles.Count)
         {
             RenderTile(selectedWeapon.Value, weaponSlotX, weaponSlotY);
+
+            // Display ammo next to weapon slot
+            if (currentAmmo >= 0)
+            {
+                // Ammo bar background
+                int ammoBarX = weaponSlotX + weaponSlotSize + 10;
+                int ammoBarY = weaponSlotY + 5;
+                int ammoBarWidth = SidebarWidth - weaponSlotSize - 30;
+                int ammoBarHeight = 16;
+
+                SDL.SetRenderDrawColor(_renderer, 40, 40, 50, 255);
+                var ammoBarBg = new SDLRect { X = ammoBarX, Y = ammoBarY, W = ammoBarWidth, H = ammoBarHeight };
+                SDL.RenderFillRect(_renderer, &ammoBarBg);
+
+                // Ammo bar fill
+                if (maxAmmo > 0)
+                {
+                    int fillWidth = (int)((float)currentAmmo / maxAmmo * ammoBarWidth);
+                    byte ammoR = currentAmmo > maxAmmo / 3 ? (byte)80 : (byte)200;
+                    byte ammoG = currentAmmo > maxAmmo / 3 ? (byte)180 : (byte)80;
+                    SDL.SetRenderDrawColor(_renderer, ammoR, ammoG, 80, 255);
+                    var ammoFill = new SDLRect { X = ammoBarX, Y = ammoBarY, W = fillWidth, H = ammoBarHeight };
+                    SDL.RenderFillRect(_renderer, &ammoFill);
+                }
+
+                // Ammo bar border
+                SDL.SetRenderDrawColor(_renderer, 100, 100, 120, 255);
+                SDL.RenderDrawRect(_renderer, &ammoBarBg);
+
+                // Ammo text
+                string ammoText = $"{currentAmmo}/{maxAmmo}";
+                _font.RenderText(_renderer, ammoText, ammoBarX + 5, ammoBarY + 3, 1, 220, 220, 220, 255);
+
+                // "AMMO" label below
+                _font.RenderText(_renderer, "AMMO", ammoBarX + 5, ammoBarY + ammoBarHeight + 5, 1, 150, 150, 150, 255);
+            }
+            else
+            {
+                // Unlimited ammo display
+                int ammoTextX = weaponSlotX + weaponSlotSize + 10;
+                _font.RenderText(_renderer, "UNLIMITED", ammoTextX, weaponSlotY + 20, 1, 100, 200, 255, 255);
+            }
         }
         else
         {
@@ -358,20 +448,38 @@ public unsafe class GameRenderer : IDisposable
         }
 
         // === INVENTORY SECTION ===
-        sectionY += weaponSlotSize + 20;
-        _font.RenderText(_renderer, "INVENTORY [1-8]", hudX + 10, sectionY, 1, 200, 200, 200, 255);
-        sectionY += 18;
+        sectionY += weaponSlotSize + 15;
 
-        // Inventory grid (2x4 layout)
-        var slotSize = 44;
-        var slotPadding = 4;
-        var gridStartX = hudX + 10;
+        // Calculate scroll limits
+        int totalItems = inventory.Count;
+        int maxScroll = Math.Max(0, totalItems - InventoryVisibleSlots);
+        _inventoryScrollOffset = Math.Clamp(_inventoryScrollOffset, 0, maxScroll);
+
+        // Header with item count
+        string invHeader = totalItems > 0 ? $"ITEMS ({totalItems})" : "ITEMS";
+        _font.RenderText(_renderer, invHeader, hudX + 10, sectionY, 1, 200, 200, 200, 255);
+
+        // Scroll indicators
+        if (_inventoryScrollOffset > 0)
+            _font.RenderText(_renderer, "^", hudX + SidebarWidth - 25, sectionY, 1, 150, 200, 150, 255);
+        if (_inventoryScrollOffset < maxScroll)
+            _font.RenderText(_renderer, "v", hudX + SidebarWidth - 15, sectionY, 1, 150, 200, 150, 255);
+
+        sectionY += 16;
+
+        // Inventory grid (4x4 layout = 16 visible slots)
+        var slotSize = 38;
+        var slotPadding = 3;
+        var gridStartX = hudX + 8;
         var gridStartY = sectionY;
+        var gridCols = 4;
+        var gridRows = 4;
 
-        for (int i = 0; i < 8; i++)
+        for (int slot = 0; slot < InventoryVisibleSlots; slot++)
         {
-            var col = i % 2;
-            var row = i / 2;
+            int inventoryIndex = slot + _inventoryScrollOffset;
+            var col = slot % gridCols;
+            var row = slot / gridCols;
             var slotX = gridStartX + col * (slotSize + slotPadding);
             var slotY = gridStartY + row * (slotSize + slotPadding);
 
@@ -381,7 +489,7 @@ public unsafe class GameRenderer : IDisposable
             SDL.RenderFillRect(_renderer, &slotRect);
 
             // Highlight selected item (green border)
-            if (selectedItem.HasValue && i < inventory.Count && inventory[i] == selectedItem.Value)
+            if (selectedItem.HasValue && inventoryIndex < inventory.Count && inventory[inventoryIndex] == selectedItem.Value)
             {
                 SDL.SetRenderDrawColor(_renderer, 50, 255, 50, 255);
                 var innerRect = new SDLRect { X = slotX - 2, Y = slotY - 2, W = slotSize + 4, H = slotSize + 4 };
@@ -394,20 +502,25 @@ public unsafe class GameRenderer : IDisposable
             SDL.RenderDrawRect(_renderer, &slotRect);
 
             // Item tile
-            if (i < inventory.Count && inventory[i] > 0 && inventory[i] < _gameData.Tiles.Count)
+            if (inventoryIndex < inventory.Count && inventory[inventoryIndex] > 0 && inventory[inventoryIndex] < _gameData.Tiles.Count)
             {
                 // Center the tile in the slot
                 var tileX = slotX + (slotSize - Tile.Width) / 2;
                 var tileY = slotY + (slotSize - Tile.Height) / 2;
-                RenderTileUnscaled(inventory[i], tileX, tileY);
+                RenderTileUnscaled(inventory[inventoryIndex], tileX, tileY);
             }
 
-            // Slot number (bottom right corner)
-            _font.RenderText(_renderer, $"{i + 1}", slotX + slotSize - 10, slotY + slotSize - 12, 1, 120, 120, 130, 200);
+            // Slot number for first 9 (keyboard shortcuts 1-9, 0)
+            int displayNum = inventoryIndex + 1;
+            if (displayNum <= 10)
+            {
+                string numStr = displayNum == 10 ? "0" : displayNum.ToString();
+                _font.RenderText(_renderer, numStr, slotX + slotSize - 10, slotY + slotSize - 12, 1, 120, 120, 130, 200);
+            }
         }
 
         // === CONTROLS SECTION ===
-        sectionY = gridStartY + 4 * (slotSize + slotPadding) + 15;
+        sectionY = gridStartY + gridRows * (slotSize + slotPadding) + 10;
         SDL.SetRenderDrawColor(_renderer, 50, 50, 60, 255);
         var controlsBg = new SDLRect { X = hudX + 5, Y = sectionY, W = SidebarWidth - 10, H = WindowHeight - sectionY - 5 };
         SDL.RenderFillRect(_renderer, &controlsBg);

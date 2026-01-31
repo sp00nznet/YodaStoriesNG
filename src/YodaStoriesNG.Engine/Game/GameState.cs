@@ -3,6 +3,18 @@ using YodaStoriesNG.Engine.Data;
 namespace YodaStoriesNG.Engine.Game;
 
 /// <summary>
+/// Tracks ammo and durability for a weapon.
+/// </summary>
+public class WeaponAmmoState
+{
+    public int TileId { get; set; }
+    public int CurrentAmmo { get; set; }
+    public int MaxAmmo { get; set; }
+    public int Damage { get; set; }
+    public bool IsSingleUse { get; set; }
+}
+
+/// <summary>
 /// Represents the current state of the game.
 /// </summary>
 public class GameState
@@ -62,6 +74,9 @@ public class GameState
     public List<int> Weapons { get; set; } = new();
     public int CurrentWeaponIndex { get; set; }
 
+    // Weapon ammo tracking (key = tile ID)
+    public Dictionary<int, WeaponAmmoState> WeaponAmmo { get; set; } = new();
+
     // Camera position (for large zones)
     public int CameraX { get; set; }
     public int CameraY { get; set; }
@@ -110,6 +125,7 @@ public class GameState
         AttackTimer = 0;
         Weapons.Clear();
         CurrentWeaponIndex = 0;
+        WeaponAmmo.Clear();
         Projectiles.Clear();
         GameStartTime = DateTime.Now;
         TotalSectors = 0;
@@ -245,6 +261,83 @@ public class GameState
     /// </summary>
     public bool IsObjectCollected(int zoneId, int x, int y) =>
         CollectedObjects.Contains($"{zoneId}_{x}_{y}");
+
+    /// <summary>
+    /// Gets the ammo state for a weapon, or null if not tracked.
+    /// </summary>
+    public WeaponAmmoState? GetWeaponAmmo(int tileId) =>
+        WeaponAmmo.TryGetValue(tileId, out var state) ? state : null;
+
+    /// <summary>
+    /// Initializes ammo tracking for a weapon when picked up.
+    /// </summary>
+    public void InitializeWeaponAmmo(int tileId, int maxAmmo, int damage, bool isSingleUse = false)
+    {
+        if (!WeaponAmmo.ContainsKey(tileId))
+        {
+            WeaponAmmo[tileId] = new WeaponAmmoState
+            {
+                TileId = tileId,
+                CurrentAmmo = maxAmmo,
+                MaxAmmo = maxAmmo,
+                Damage = damage,
+                IsSingleUse = isSingleUse
+            };
+        }
+    }
+
+    /// <summary>
+    /// Consumes ammo for a weapon. Returns true if ammo was available.
+    /// </summary>
+    public bool ConsumeWeaponAmmo(int tileId, int amount = 1)
+    {
+        if (WeaponAmmo.TryGetValue(tileId, out var state))
+        {
+            if (state.CurrentAmmo >= amount)
+            {
+                state.CurrentAmmo -= amount;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Gets the remaining ammo for a weapon.
+    /// </summary>
+    public int GetRemainingAmmo(int tileId) =>
+        WeaponAmmo.TryGetValue(tileId, out var state) ? state.CurrentAmmo : 0;
+
+    /// <summary>
+    /// Checks if a weapon is out of ammo.
+    /// </summary>
+    public bool IsWeaponEmpty(int tileId) =>
+        WeaponAmmo.TryGetValue(tileId, out var state) && state.CurrentAmmo <= 0;
+
+    /// <summary>
+    /// Removes a depleted weapon from inventory and weapons list.
+    /// </summary>
+    public void RemoveDepletedWeapon(int tileId)
+    {
+        Inventory.Remove(tileId);
+        Weapons.Remove(tileId);
+        WeaponAmmo.Remove(tileId);
+
+        // Switch to next weapon or fists
+        if (SelectedWeapon == tileId)
+        {
+            if (Weapons.Count > 0)
+            {
+                CurrentWeaponIndex = Math.Min(CurrentWeaponIndex, Weapons.Count - 1);
+                SelectedWeapon = Weapons[CurrentWeaponIndex];
+            }
+            else
+            {
+                SelectedWeapon = null;
+                CurrentWeaponIndex = 0;
+            }
+        }
+    }
 }
 
 public enum Direction
