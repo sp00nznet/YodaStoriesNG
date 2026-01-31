@@ -35,6 +35,11 @@ public class GameState
     // Zone tracking
     public HashSet<int> VisitedZones { get; set; } = new();
 
+    // Score tracking
+    public DateTime GameStartTime { get; set; } = DateTime.Now;
+    public WorldSize WorldSize { get; set; } = WorldSize.Medium;
+    public int TotalSectors { get; set; } = 0;  // Total puzzle sectors in this world
+
     // Game flags
     public bool IsGameOver { get; set; }
     public bool IsGameWon { get; set; }
@@ -106,6 +111,50 @@ public class GameState
         Weapons.Clear();
         CurrentWeaponIndex = 0;
         Projectiles.Clear();
+        GameStartTime = DateTime.Now;
+        TotalSectors = 0;
+    }
+
+    /// <summary>
+    /// Calculates the end-game score (Force Factor for Yoda, Indy Quotient for Indy).
+    /// Score is based on: Time, Puzzle Completion, Difficulty, and Exploration.
+    /// </summary>
+    public (int total, int time, int puzzles, int difficulty, int exploration) CalculateScore()
+    {
+        // World size as number: Small=1, Medium=2, Large=3, XtraLarge=4
+        int worldSizeValue = WorldSize switch
+        {
+            WorldSize.Small => 1,
+            WorldSize.Medium => 2,
+            WorldSize.Large => 3,
+            WorldSize.XtraLarge => 4,
+            _ => 2
+        };
+
+        // Time component (200 points max)
+        double elapsedSeconds = (DateTime.Now - GameStartTime).TotalSeconds;
+        double timeValue = (elapsedSeconds / 60.0) - (5 * worldSizeValue);
+        int timeScore;
+        if (timeValue <= 0)
+            timeScore = 200;
+        else
+            timeScore = Math.Max(0, 200 - (int)(20 * timeValue));
+
+        // Puzzle completion (100 points max - percentage of sectors solved)
+        int puzzleScore = TotalSectors > 0
+            ? (int)((SolvedZones.Count * 100.0) / TotalSectors)
+            : 100;
+        puzzleScore = Math.Min(100, puzzleScore);
+
+        // Difficulty (100 points max - same as puzzle completion for now)
+        int difficultyScore = puzzleScore;
+
+        // Exploration (100 points max - percentage of zones visited vs world size)
+        int expectedZones = worldSizeValue * 10; // Rough estimate
+        int explorationScore = Math.Min(100, (int)((VisitedZones.Count * 100.0) / expectedZones));
+
+        int totalScore = timeScore + puzzleScore + difficultyScore + explorationScore;
+        return (totalScore, timeScore, puzzleScore, difficultyScore, explorationScore);
     }
 
     /// <summary>

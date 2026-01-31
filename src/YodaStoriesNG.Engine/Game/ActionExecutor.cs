@@ -237,6 +237,64 @@ public class ActionExecutor
                     return false;
                 return _state.HasItem(args[0]);
 
+            case ConditionOpcode.EnterByPlane:
+                // Check if entered zone by X-Wing
+                return _state.XWingPosition.HasValue;
+
+            case ConditionOpcode.HeroIsAt:
+                // Check if hero is at position
+                if (args.Count < 2)
+                    return false;
+                return _state.PlayerX == args[0] && _state.PlayerY == args[1];
+
+            case ConditionOpcode.PlacedItemIsNot:
+                // Check if placed item does NOT match
+                if (args.Count < 1)
+                    return false;
+                return PlacedItemId != args[0];
+
+            case ConditionOpcode.EndingIs:
+                // Check goal item - for now just check if we have the item
+                if (args.Count < 1)
+                    return false;
+                return _state.HasItem(args[0]);
+
+            // Note: SectorCounterIs (0x19) shares value with NpcIs - handled above
+            // Note: SectorCounterIsLessThan (0x1A) shares value with HasNpc - handled above
+            // Note: HasGoalItem (0x12) shares value with ItemIsPlaced - handled above
+
+            case ConditionOpcode.SectorCounterIsGreaterThan:
+                if (args.Count < 2)
+                    return false;
+                return _state.GetVariable(args[0] + 3000) > args[1];
+
+            case ConditionOpcode.SectorCounterIsNot:
+                if (args.Count < 2)
+                    return false;
+                return _state.GetVariable(args[0] + 3000) != args[1];
+
+            case ConditionOpcode.DropsQuestItemAt:
+                // Check if quest item dropped at position
+                if (args.Count < 2)
+                    return false;
+                return BumpX == args[0] && BumpY == args[1] && DroppedItemId.HasValue;
+
+            case ConditionOpcode.HasAnyRequiredItem:
+                // Check if has any required item for zone puzzles
+                // For now, assume true if inventory is not empty
+                return _state.Inventory.Count > 0;
+
+            case ConditionOpcode.GamesWonIsGreaterThan:
+                if (args.Count < 1)
+                    return false;
+                return _state.GamesWon > args[0];
+
+            case ConditionOpcode.IsVariable:
+                // Same as TileAtIs internally
+                if (args.Count < 4 || _currentZone == null)
+                    return false;
+                return _currentZone.GetTile(args[0], args[1], args[2]) == args[3];
+
             default:
                 // Unknown condition - assume true to allow script to continue
                 return true;
@@ -475,6 +533,65 @@ public class ActionExecutor
                 // Draw a tile at position (same as PlaceTile for us)
                 if (args.Count >= 4 && _currentZone != null)
                     _currentZone.SetTile(args[0], args[1], args[2], (ushort)args[3]);
+                break;
+
+            case InstructionOpcode.SetTileNeedsDisplay:
+                // Redraw tile at position - handled by renderer automatically
+                break;
+
+            case InstructionOpcode.SetRectNeedsDisplay:
+                // Redraw rectangle area - handled by renderer automatically
+                break;
+
+            case InstructionOpcode.StopSound:
+                // Stop currently playing sounds
+                // TODO: Implement sound stopping
+                break;
+
+            case InstructionOpcode.EnableHotspot:
+                // Enable a hotspot (zone object) at specified index
+                if (args.Count >= 1 && _currentZone != null)
+                {
+                    int idx = args[0];
+                    if (idx >= 0 && idx < _currentZone.Objects.Count)
+                    {
+                        // Hotspots are typically zone objects - enable by restoring their tile
+                        var obj = _currentZone.Objects[idx];
+                        if (obj.Argument > 0)
+                            _currentZone.SetTile(obj.X, obj.Y, 1, (ushort)obj.Argument);
+                    }
+                }
+                break;
+
+            case InstructionOpcode.DisableHotspot:
+                // Disable a hotspot (zone object) at specified index
+                if (args.Count >= 1 && _currentZone != null)
+                {
+                    int idx = args[0];
+                    if (idx >= 0 && idx < _currentZone.Objects.Count)
+                    {
+                        var obj = _currentZone.Objects[idx];
+                        // Remove the tile
+                        _currentZone.SetTile(obj.X, obj.Y, 1, 0xFFFF);
+                    }
+                }
+                break;
+
+            // Note: SetSectorCounter (0x22) shares value with SetZoneType - handled above
+
+            case InstructionOpcode.AddToSectorCounter:
+                // Add to zone sector counter
+                if (args.Count >= 2)
+                {
+                    int current = _state.GetVariable(args[0] + 3000);
+                    _state.SetVariable(args[0] + 3000, current + args[1]);
+                }
+                break;
+
+            case InstructionOpcode.SetRandom:
+                // Set zone random to specific value
+                if (args.Count >= 1)
+                    _lastRandomValue = args[0];
                 break;
 
             default:

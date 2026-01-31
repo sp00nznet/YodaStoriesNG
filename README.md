@@ -1,6 +1,6 @@
 # Yoda Stories NG
 
-A modern reimplementation of **Star Wars: Yoda Stories** (1997) built with C# and SDL2.
+A modern reimplementation of **Star Wars: Yoda Stories** (1997) and **Indiana Jones and His Desktop Adventures** (1996) built with C# and SDL2.
 
 ![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
@@ -8,21 +8,26 @@ A modern reimplementation of **Star Wars: Yoda Stories** (1997) built with C# an
 
 ## About
 
-Yoda Stories NG is a fan-made recreation of the classic LucasArts desktop adventure game. It parses the original game data files and reimplements the game engine from scratch.
+Yoda Stories NG is a fan-made recreation of the classic LucasArts Desktop Adventures games. It parses the original game data files and reimplements the game engine from scratch. Both **Star Wars: Yoda Stories** (`YODESK.DTA`) and **Indiana Jones and His Desktop Adventures** (`DESKTOP.DAW`) are supported.
 
 ![Title Screen](docs/screenshots/title-screen.png)
 
 ## Key Features
 
-- **Complete data file parsing** - Reads original `.dta` game assets
+- **Dual game support** - Plays both Yoda Stories (`.dta`) and Indiana Jones (`.daw`) files
+- **Complete data file parsing** - Reads original game assets with automatic game type detection
 - **Procedural world generation** - Each playthrough generates a unique 10x10 or 15x15 world map
 - **15 mission cycle** - Full mission progression with item chains and NPC puzzles
 - **Combat system** - Melee and ranged weapons with NPC AI
+- **Score system** - Force Factor (Yoda) / Indy Quotient (Indy) end-game scoring
+- **Color palette animation** - Authentic animated water, lava, and fire effects
+- **R2D2 help system** - Context-sensitive hints from your droid companion
 - **Save/Load system** - JSON-based save files with full game state
 - **Widescreen UI** - Modern layout with sidebar HUD
 - **Xbox controller support** - Full gamepad controls
 - **Configurable graphics** - 1x, 2x, and 4x scaling options
 - **Automated Mission Bot** - AI-powered gameplay with A* pathfinding
+- **Complete script engine** - All 30+ condition and instruction opcodes implemented
 
 ## Screenshots
 
@@ -41,7 +46,9 @@ Yoda Stories NG is a fan-made recreation of the classic LucasArts desktop advent
 ## Requirements
 
 - .NET 8.0 SDK
-- Original Yoda Stories game files (`yodesk.dta`)
+- Original game files:
+  - Star Wars: Yoda Stories - `YODESK.DTA`
+  - Indiana Jones Desktop Adventures - `DESKTOP.DAW` (optional)
 - Windows, Linux, or macOS
 
 ## Building
@@ -140,6 +147,31 @@ Each world includes:
 - **Islands** - Remote areas with special puzzles
 - **The Force** - Guaranteed weapon at distance 2 from start
 
+## Score System
+
+Upon completing 15 missions, you receive a score evaluation:
+
+### Force Factor (Yoda Stories) / Indy Quotient (Indiana Jones)
+
+| Component | Max Points | Description |
+|-----------|------------|-------------|
+| **Time Bonus** | 200 | Faster completion = more points |
+| **Puzzles Solved** | 100 | Percentage of puzzles completed |
+| **Difficulty** | 100 | Based on puzzle complexity |
+| **Exploration** | 100 | Zones visited vs world size |
+
+### Ratings
+
+| Score | Title |
+|-------|-------|
+| 450+ | Legendary Hero! |
+| 400-449 | Jedi Master |
+| 350-399 | Jedi Knight |
+| 300-349 | Padawan |
+| 250-299 | Force Sensitive |
+| 200-249 | Adventurer |
+| <200 | Beginner |
+
 ## Debug Tools
 
 ### Map Viewer (F2/F4)
@@ -222,7 +254,8 @@ YodaStoriesNG/
 │           ├── ControlsWindow.cs
 │           ├── DebugMapWindow.cs
 │           ├── ScriptEditorWindow.cs
-│           └── AssetViewerWindow.cs
+│           ├── AssetViewerWindow.cs
+│           └── ScoreWindow.cs
 └── README.md
 ```
 
@@ -242,23 +275,39 @@ The game parses the proprietary `.dta` format:
 | **IZAX** | Zone auxiliary data (NPC spawns with items) |
 | **STUP** | Title screen image (288x288) |
 
+### Palette Animation
+
+The game features authentic color cycling animation for environmental effects:
+
+| Effect | Speed | Description |
+|--------|-------|-------------|
+| Water | Fast (150ms) | Blue shimmer in lakes and oceans |
+| Lava | Fast (150ms) | Red/orange fire and volcanic effects |
+| Forest | Slow (300ms) | Subtle foliage color shifts |
+| Ice | Fast (150ms) | Sparkle effects on snow/ice |
+
+Different palette cycles are used for Yoda Stories vs Indiana Jones.
+
 ### Action Scripts (IACT)
 
-Zone behavior is driven by IACT scripts:
+Zone behavior is driven by IACT scripts. All 30+ opcodes are fully implemented.
 
-**Conditions:**
-- `ZoneEnter` - Triggered on zone entry
-- `HasItem` - Check if player has an item
-- `NpcIs` - Check NPC at position
-- `TileAtIs` - Check tile at layer/position
-- `Counter` - Check game counters
+**Conditions (25 opcodes):**
+- `ZoneEntered`, `ZoneNotInitialized` - Zone entry triggers
+- `HasItem`, `RequiredItemIs`, `FindItemIs` - Inventory checks
+- `NpcIs`, `HasNpc`, `MonsterIsDead` - NPC state checks
+- `TileAtIs`, `Standing`, `HeroIsAt`, `Bump` - Position checks
+- `CounterIs`, `RandomIs`, `SectorCounterIs` - Variable checks
+- `HealthIsLessThan`, `GamesWonIs`, `ZoneIsSolved` - Game state checks
 
-**Instructions:**
-- `PlaceTile` - Set tile at layer/position
-- `AddItem` - Give item to player
-- `RemoveItem` - Take item from player
-- `SpeakNpc` - Display dialogue
-- `ChangeZone` - Zone transition
+**Instructions (25 opcodes):**
+- `PlaceTile`, `RemoveTile`, `MoveTile`, `DrawTile` - Map manipulation
+- `AddItem`, `RemoveItem`, `DropItem` - Inventory management
+- `SpeakHero`, `SpeakNpc`, `PlaySound` - Dialogue and audio
+- `MoveHeroTo`, `MoveHeroBy`, `ChangeZone` - Player movement
+- `EnableMonster`, `DisableMonster`, `EnableHotspot` - Entity control
+- `MarkAsSolved`, `WinGame`, `LoseGame` - Game flow
+- `SetCounter`, `RollDice`, `AddHealth` - Game variables
 
 ## Contributing
 

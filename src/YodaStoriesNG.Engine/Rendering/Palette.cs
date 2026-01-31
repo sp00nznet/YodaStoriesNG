@@ -1,18 +1,58 @@
+using YodaStoriesNG.Engine.Data;
+
 namespace YodaStoriesNG.Engine.Rendering;
 
 /// <summary>
-/// Default 256-color palette for Yoda Stories.
+/// Default 256-color palette for Yoda Stories with animated color cycling.
 /// This palette was extracted from the original game executable.
 /// Format: RGBA (Red, Green, Blue, Alpha)
 /// </summary>
 public static class Palette
 {
     /// <summary>
-    /// The color palette as an array of 256 ARGB values.
-    /// Extracted from the goda-stories project (correct Yoda Stories palette).
-    /// Index 0 (0x00) is transparent.
+    /// Animation cycle definition: start index, length, is fast (true) or slow (false)
     /// </summary>
-    public static readonly uint[] Colors = new uint[256]
+    private static readonly (int start, int length, bool fast)[] YodaCycles = new[]
+    {
+        (0x0A, 6, true),   // Water/blue effects
+        (0xC6, 2, false),
+        (0xC8, 2, false),
+        (0xCA, 2, true),
+        (0xCC, 2, true),
+        (0xCE, 2, true),
+        (0xD7, 9, false),  // Forest colors
+        (0xE0, 5, true),   // Ice/snow effects
+        (0xE5, 9, false),  // Water shimmer
+        (0xEE, 6, true),   // Lava/fire effects
+        (0xF4, 2, false),
+    };
+
+    private static readonly (int start, int length, bool fast)[] IndyCycles = new[]
+    {
+        (0xA0, 8, true),   // Fire/lava
+        (0xE0, 5, true),   // Water
+        (0xE5, 9, true),   // More water
+        (0xEE, 6, false),  // Lava
+        (0xF4, 2, false),
+    };
+
+    // Animation state
+    private static double _fastTimer = 0;
+    private static double _slowTimer = 0;
+    private const double FastCycleTime = 0.15;  // 150ms
+    private const double SlowCycleTime = 0.30;  // 300ms
+    private static bool _animationDirty = false;
+    private static GameType _gameType = GameType.YodaStories;
+
+    /// <summary>
+    /// The working color palette (may be modified by animation).
+    /// </summary>
+    public static readonly uint[] Colors = new uint[256];
+
+    /// <summary>
+    /// The original color palette (never modified).
+    /// </summary>
+    private static readonly uint[] OriginalColors = new uint[256]
     {
         // Palette from goda-stories project
         // Row 0 (0x00-0x0F)
@@ -88,4 +128,92 @@ public static class Palette
     /// Checks if the given palette index should be treated as transparent.
     /// </summary>
     public static bool IsTransparent(byte index) => index == 0;
+
+    /// <summary>
+    /// Static constructor - copy original colors to working palette.
+    /// </summary>
+    static Palette()
+    {
+        Array.Copy(OriginalColors, Colors, 256);
+    }
+
+    /// <summary>
+    /// Sets the game type for palette animation (different games have different cycling regions).
+    /// </summary>
+    public static void SetGameType(GameType gameType)
+    {
+        _gameType = gameType;
+        // Reset colors to original
+        Array.Copy(OriginalColors, Colors, 256);
+        _animationDirty = true;
+    }
+
+    /// <summary>
+    /// Updates the palette animation. Call this every frame.
+    /// </summary>
+    /// <param name="deltaTime">Time since last frame in seconds</param>
+    /// <returns>True if palette was modified and textures should be refreshed</returns>
+    public static bool UpdateAnimation(double deltaTime)
+    {
+        _animationDirty = false;
+
+        _fastTimer += deltaTime;
+        _slowTimer += deltaTime;
+
+        bool fastCycle = _fastTimer >= FastCycleTime;
+        bool slowCycle = _slowTimer >= SlowCycleTime;
+
+        if (fastCycle) _fastTimer = 0;
+        if (slowCycle) _slowTimer = 0;
+
+        if (!fastCycle && !slowCycle) return false;
+
+        var cycles = _gameType == GameType.IndianaJones ? IndyCycles : YodaCycles;
+
+        foreach (var (start, length, fast) in cycles)
+        {
+            if ((fast && fastCycle) || (!fast && slowCycle))
+            {
+                CycleColors(start, length);
+                _animationDirty = true;
+            }
+        }
+
+        return _animationDirty;
+    }
+
+    /// <summary>
+    /// Cycles colors in a range by rotating them.
+    /// </summary>
+    private static void CycleColors(int start, int length)
+    {
+        if (start < 0 || start + length > 256 || length < 2) return;
+
+        // Rotate colors: save first, shift all left, put saved at end
+        uint first = Colors[start];
+        for (int i = 0; i < length - 1; i++)
+        {
+            Colors[start + i] = Colors[start + i + 1];
+        }
+        Colors[start + length - 1] = first;
+    }
+
+    /// <summary>
+    /// Returns true if the palette animation has changed since last check.
+    /// </summary>
+    public static bool IsAnimationDirty => _animationDirty;
+
+    /// <summary>
+    /// Checks if a palette index is in an animated color range.
+    /// </summary>
+    public static bool IsAnimatedIndex(byte index)
+    {
+        var cycles = _gameType == GameType.IndianaJones ? IndyCycles : YodaCycles;
+        foreach (var (start, length, _) in cycles)
+        {
+            if (index >= start && index < start + length)
+                return true;
+        }
+        return false;
+    }
 }

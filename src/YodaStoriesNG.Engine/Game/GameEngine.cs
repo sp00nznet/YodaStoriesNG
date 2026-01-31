@@ -29,6 +29,7 @@ public unsafe class GameEngine : IDisposable
     private AssetViewerWindow? _assetViewer;
     private ControlsWindow? _controlsWindow;
     private AboutWindow? _aboutWindow;
+    private ScoreWindow? _scoreWindow;
     private TitleScreen? _titleScreen;
     private MenuBar? _menuBar;
 
@@ -146,6 +147,9 @@ public unsafe class GameEngine : IDisposable
         var parser = new DtaParser();
         _gameData = parser.Parse(dataFilePath);
 
+        // Set palette animation for game type (different games have different cycling color ranges)
+        Palette.SetGameType(_gameData.GameType);
+
         // Determine window title based on game type
         string windowTitle = _gameData.GameType == GameType.IndianaJones
             ? "Indiana Jones Desktop Adventures NG"
@@ -206,9 +210,10 @@ public unsafe class GameEngine : IDisposable
         _menuBar.OnSelectDataFile += SelectDataFile;
         _menuBar.OnShowAbout += ShowAboutDialog;
 
-        // Initialize controls window and about window
+        // Initialize controls window, about window, and score window
         _controlsWindow = new ControlsWindow();
         _aboutWindow = new AboutWindow();
+        _scoreWindow = new ScoreWindow();
 
         // Show title screen
         _showingTitleScreen = true;
@@ -855,6 +860,12 @@ public unsafe class GameEngine : IDisposable
             {
                 SDLEvent evtCopy = evt;
                 if (_aboutWindow.HandleEvent(&evtCopy))
+                    continue;
+            }
+            if (_scoreWindow != null && _scoreWindow.IsOpen)
+            {
+                SDLEvent evtCopy = evt;
+                if (_scoreWindow.HandleEvent(&evtCopy))
                     continue;
             }
 
@@ -2336,11 +2347,14 @@ public unsafe class GameEngine : IDisposable
                             // Check for 15-mission cycle milestones
                             if (_state.GamesWon >= 15)
                             {
-                                // All 15 missions complete! Show victory screen
+                                // All 15 missions complete! Show victory screen and score
                                 _state.IsGameWon = true;
                                 _messages.ShowDialogue("Yoda", "A true Jedi, you have become! All 15 missions completed. Proud of you, I am.");
                                 _messages.ShowMessage("CONGRATULATIONS! You've completed all 15 missions!", MessageType.System);
                                 _messages.ShowMessage("Press R to start a new 15-mission cycle.", MessageType.Info);
+
+                                // Show score window
+                                _scoreWindow?.Show(_state, _gameData!.GameType);
                             }
                             else if (_state.GamesWon == 10)
                             {
@@ -3026,6 +3040,13 @@ public unsafe class GameEngine : IDisposable
 
     private void Update(double deltaTime)
     {
+        // Update palette animation (even during title screen for visual effects)
+        if (Palette.UpdateAnimation(deltaTime))
+        {
+            // Palette colors changed - renderer will pick this up automatically
+            // since it reads from Palette.Colors which is now updated
+        }
+
         if (_showingTitleScreen || _state.IsPaused)
             return;
 
@@ -3452,6 +3473,7 @@ public unsafe class GameEngine : IDisposable
         _assetViewer?.Render();
         _controlsWindow?.Render();
         _aboutWindow?.Render();
+        _scoreWindow?.Render();
     }
 
     /// <summary>
@@ -3659,28 +3681,39 @@ public unsafe class GameEngine : IDisposable
 
     /// <summary>
     /// Shows a hint from the locator/R2D2.
+    /// Context-sensitive: checks what's at the target position and provides relevant hints.
     /// </summary>
     private void ShowLocatorHint()
     {
+        _sounds?.PlaySound(SoundManager.SoundTalk);
+
+        // First check what's in front of the player for context-sensitive hints
+        var targetPos = GetFacingPosition();
+        string? contextHint = GetR2D2ContextHint(targetPos.x, targetPos.y);
+
+        if (contextHint != null)
+        {
+            _messages.ShowDialogue("R2-D2", contextHint);
+            return;
+        }
+
+        // Fall back to mission-based hints
         if (_worldGenerator?.CurrentWorld == null)
         {
             _messages.ShowDialogue("R2-D2", "*beep boop* No mission data available.");
-            _sounds?.PlaySound(SoundManager.SoundTalk);
             return;
         }
 
         var mission = _worldGenerator.CurrentWorld.Mission;
         if (mission == null)
         {
-            _messages.ShowDialogue("R2-D2", "*beep boop* Explore the area to find clues.");
-            _sounds?.PlaySound(SoundManager.SoundTalk);
+            _messages.ShowDialogue("R2-D2", GetGenericHint());
             return;
         }
 
         if (mission.IsCompleted)
         {
             _messages.ShowDialogue("R2-D2", "*happy beeps* Mission complete! Return to Yoda on Dagobah.");
-            _sounds?.PlaySound(SoundManager.SoundTalk);
             return;
         }
 
@@ -3695,7 +3728,106 @@ public unsafe class GameEngine : IDisposable
             var objective = _worldGenerator.CurrentWorld.GetCurrentObjective();
             _messages.ShowDialogue("R2-D2", $"*beep boop* {objective}");
         }
-        _sounds?.PlaySound(SoundManager.SoundTalk);
+    }
+
+    /// <summary>
+    /// Gets the position in front of the player.
+    /// </summary>
+    private (int x, int y) GetFacingPosition()
+    {
+        int x = _state.PlayerX;
+        int y = _state.PlayerY;
+
+        switch (_state.PlayerDirection)
+        {
+            case Direction.Up: y--; break;
+            case Direction.Down: y++; break;
+            case Direction.Left: x--; break;
+            case Direction.Right: x++; break;
+        }
+
+        return (x, y);
+    }
+
+    /// <summary>
+    /// Gets a context-sensitive hint based on what's at the given position.
+    /// Returns null if no specific hint applies.
+    /// </summary>
+    private string? GetR2D2ContextHint(int x, int y)
+    {
+        if (_state.CurrentZone == null || _gameData == null) return null;
+        if (x < 0 || x >= _state.CurrentZone.Width || y < 0 || y >= _state.CurrentZone.Height) return null;
+
+        // Check for NPCs at position
+        var npc = _state.ZoneNPCs.FirstOrDefault(n => n.IsEnabled && n.IsAlive && n.X == x && n.Y == y);
+        if (npc != null)
+        {
+            if (npc.IsHostile)
+                return "*warning beeps* Enemy detected! Use your weapon to defeat it.";
+            else
+            {
+                var charName = _gameData.Characters.FirstOrDefault(c => c.Id == npc.CharacterId)?.Name ?? "This character";
+                return $"*beep* {charName} appears friendly. Try talking to them - they may have useful information or items.";
+            }
+        }
+
+        // Check for zone objects at position
+        var obj = _state.CurrentZone.Objects.FirstOrDefault(o => o.X == x && o.Y == y);
+        if (obj != null)
+        {
+            return obj.Type switch
+            {
+                ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit => "*beep boop* This door leads to another area. Walk into it to enter.",
+                ZoneObjectType.Lock => "*concerned beeps* This is locked! You need to find the right item to open it.",
+                ZoneObjectType.CrateItem or ZoneObjectType.CrateWeapon => "*excited beeps* There might be something useful here! Try opening it.",
+                ZoneObjectType.LocatorItem => "*happy beeps* That's me! I can help you find your way.",
+                ZoneObjectType.Trigger => "*beep* Something interesting is here. Step on it to see what happens.",
+                ZoneObjectType.PuzzleNPC => "*beep* This character may be important for your mission. Try interacting with them.",
+                ZoneObjectType.Teleporter => "*beep boop* This teleporter can transport you to another location.",
+                _ => null
+            };
+        }
+
+        // Check the tile at position
+        var middleTile = _state.CurrentZone.GetTile(x, y, 1);
+        if (middleTile != 0xFFFF && middleTile < _gameData.Tiles.Count)
+        {
+            var tile = _gameData.Tiles[middleTile];
+
+            if (tile.IsDraggable)
+                return "*beep* This object can be pushed or pulled. Try walking into it or holding shift to pull.";
+
+            if (tile.IsWeapon)
+                return "*beep boop* A weapon! Pick it up to defend yourself against enemies.";
+
+            if (tile.IsItem)
+            {
+                var itemName = GetTileName(middleTile);
+                return $"*beep* That's {itemName}. It might be useful for your mission.";
+            }
+
+            if ((tile.Flags & TileFlags.Object) != 0)
+                return "*beep* An object is here. Try interacting with it.";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Gets a random generic hint when no specific context applies.
+    /// </summary>
+    private string GetGenericHint()
+    {
+        var hints = new[]
+        {
+            "*beep boop* Walk around and explore! There's always more to discover.",
+            "*beep* Try talking to friendly characters - they often have useful items or information.",
+            "*beep boop* Some objects can be pushed or pulled. Try approaching them from different directions.",
+            "*beep* Use your weapon wisely! Attack enemies before they get too close.",
+            "*beep boop* Keep an eye out for locked doors - you'll need to find the right item to open them."
+        };
+
+        return hints[new Random().Next(hints.Length)];
     }
 
     /// <summary>
