@@ -35,15 +35,13 @@ class Program
         var dtaFile = Path.Combine(dataPath, "yodesk.dta");
         if (!File.Exists(dtaFile))
         {
-            Console.WriteLine($"Error: Could not find game data file.");
-            Console.WriteLine($"Expected: {dtaFile}");
-            Console.WriteLine();
-            Console.WriteLine("Please ensure the Yoda Stories data files are in the 'Yoda' folder.");
-            Console.WriteLine("Usage: YodaStoriesNG.Engine [path-to-yoda-folder]");
-            return 1;
+            Console.WriteLine($"Note: Game data file not found at {dtaFile}");
+            Console.WriteLine("The game will prompt you to select a data file.");
         }
-
-        Console.WriteLine($"Data path: {dataPath}");
+        else
+        {
+            Console.WriteLine($"Data path: {dataPath}");
+        }
         Console.WriteLine();
 
         Console.WriteLine("Controls:");

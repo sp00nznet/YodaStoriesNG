@@ -65,12 +65,25 @@ public unsafe class GameEngine : IDisposable
     {
         Console.WriteLine("Loading game data...");
 
-        // Parse the DTA file
+        // Try to find the DTA file
         var dtaPath = Path.Combine(_dataPath, "yodesk.dta");
         if (!File.Exists(dtaPath))
         {
-            Console.WriteLine($"Error: Could not find {dtaPath}");
-            return false;
+            Console.WriteLine($"DTA file not found at {dtaPath}");
+            Console.WriteLine("Please select the yodesk.dta file...");
+
+            // Show file picker
+            var selectedFile = UI.FileDialogHelper.ShowOpenDataFileDialog(_dataPath);
+            if (!string.IsNullOrEmpty(selectedFile) && File.Exists(selectedFile))
+            {
+                dtaPath = selectedFile;
+                Console.WriteLine($"Selected: {dtaPath}");
+            }
+            else
+            {
+                Console.WriteLine("No file selected. Cannot start without game data.");
+                return false;
+            }
         }
 
         var parser = new DtaParser();
@@ -108,7 +121,7 @@ public unsafe class GameEngine : IDisposable
         InitializeController();
 
         // Initialize UI components
-        _titleScreen = new TitleScreen(_renderer.GetFont(), _gameData.StartupScreen);
+        _titleScreen = new TitleScreen(_renderer.GetFont(), _gameData.StartupScreen, _gameData.Tiles);
         _titleScreen.SetRenderer(_renderer.GetRenderer());
         _titleScreen.OnStartGame += () => { _showingTitleScreen = false; StartNewGame(); };
 
