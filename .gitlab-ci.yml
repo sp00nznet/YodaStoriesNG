@@ -8,10 +8,10 @@ variables:
   PROJECT_YODA: "src/YodaStoriesNG.Engine/YodaStoriesNG.Engine.csproj"
   PROJECT_INDY: "src/IndyNG.Engine/IndyNG.Engine.csproj"
   NFS_SERVER: "192.168.100.22"
-  NFS_SHARE: "/pool/releases/YodaStoriesNG"
+  NFS_SHARE: "\\\\192.168.100.22\\pool\\releases\\YodaStoriesNG"
 
-# Build for Windows x64
-build:windows:
+# Build all platforms on Windows runner
+build:
   stage: build
   tags:
     - win10
@@ -20,125 +20,57 @@ build:windows:
     - $env:PATH = "C:\Program Files\dotnet;$env:PATH"
   script:
     - dotnet restore
+    # Windows x64
     - dotnet publish $env:PROJECT_YODA -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/windows/YodaStoriesNG
     - dotnet publish $env:PROJECT_INDY -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/windows/IndyNG
+    # Linux x64
+    - dotnet publish $env:PROJECT_YODA -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/linux/YodaStoriesNG
+    - dotnet publish $env:PROJECT_INDY -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/linux/IndyNG
+    # macOS x64
+    - dotnet publish $env:PROJECT_YODA -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/macos/YodaStoriesNG
+    - dotnet publish $env:PROJECT_INDY -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/macos/IndyNG
   artifacts:
     paths:
-      - publish/windows/
-    expire_in: 1 week
-
-# Build for Linux x64
-build:linux:
-  stage: build
-  tags:
-    - debian
-  script:
-    - dotnet restore
-    - dotnet publish $PROJECT_YODA -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/linux/YodaStoriesNG
-    - dotnet publish $PROJECT_INDY -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/linux/IndyNG
-    - chmod 755 publish/linux/YodaStoriesNG/*
-    - chmod 755 publish/linux/IndyNG/*
-  artifacts:
-    paths:
-      - publish/linux/
-    expire_in: 1 week
-
-# Build for macOS x64
-build:macos:
-  stage: build
-  tags:
-    - darwin
-    - shell
-  script:
-    - dotnet restore
-    - dotnet publish $PROJECT_YODA -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/macos/YodaStoriesNG
-    - dotnet publish $PROJECT_INDY -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/macos/IndyNG
-    - chmod 755 publish/macos/YodaStoriesNG/*
-    - chmod 755 publish/macos/IndyNG/*
-  artifacts:
-    paths:
-      - publish/macos/
+      - publish/
     expire_in: 1 week
 
 # Package all builds into zips
 package:
   stage: package
   tags:
-    - debian
+    - win10
+    - shell
   needs:
-    - build:windows
-    - build:linux
-    - build:macos
+    - build
   script:
-    - VERSION=$(date +%Y%m%d-%H%M%S)
-    - echo "VERSION=$VERSION" > version.env
+    - $VERSION = Get-Date -Format "yyyyMMdd-HHmmss"
+    - echo "VERSION=$VERSION" | Out-File -FilePath version.env -Encoding utf8
     # Create Windows zip
-    - cd publish/windows && zip -r ../../YodaStoriesNG-windows-x64-$VERSION.zip . && cd ../..
+    - Compress-Archive -Path publish/windows/* -DestinationPath "YodaStoriesNG-windows-x64-$VERSION.zip"
     # Create Linux zip
-    - cd publish/linux && zip -r ../../YodaStoriesNG-linux-x64-$VERSION.zip . && cd ../..
+    - Compress-Archive -Path publish/linux/* -DestinationPath "YodaStoriesNG-linux-x64-$VERSION.zip"
     # Create macOS zip
-    - cd publish/macos && zip -r ../../YodaStoriesNG-macos-x64-$VERSION.zip . && cd ../..
-    - ls -la *.zip
+    - Compress-Archive -Path publish/macos/* -DestinationPath "YodaStoriesNG-macos-x64-$VERSION.zip"
+    - Get-ChildItem *.zip
   artifacts:
     paths:
       - "*.zip"
       - version.env
     expire_in: 1 month
 
-# Deploy Windows build
-deploy:windows:
+# Deploy to network share
+deploy:
   stage: deploy
   tags:
     - win10
     - shell
   needs:
     - package
-  before_script:
-    - $env:PATH = "C:\Program Files\dotnet;$env:PATH"
   script:
-    - $mountPath = "Z:"
-    - if (!(Test-Path $mountPath)) { net use $mountPath "\\$env:NFS_SERVER\pool\releases\YodaStoriesNG" }
-    - Copy-Item -Path "*.zip" -Destination $mountPath -Force
-    - Get-ChildItem $mountPath
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-      when: on_success
-    - when: manual
-
-# Deploy Linux build
-deploy:linux:
-  stage: deploy
-  tags:
-    - debian
-  needs:
-    - package
-  script:
-    - mkdir -p /mnt/releases
-    - mount -t nfs ${NFS_SERVER}:${NFS_SHARE} /mnt/releases
-    - cp -v *.zip /mnt/releases/
-    - chmod 755 /mnt/releases/*.zip
-    - ls -la /mnt/releases/
-    - umount /mnt/releases
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-      when: on_success
-    - when: manual
-
-# Deploy macOS build
-deploy:macos:
-  stage: deploy
-  tags:
-    - darwin
-    - shell
-  needs:
-    - package
-  script:
-    - mkdir -p /tmp/releases
-    - mount -t nfs ${NFS_SERVER}:${NFS_SHARE} /tmp/releases
-    - cp -v *.zip /tmp/releases/
-    - chmod 755 /tmp/releases/*.zip
-    - ls -la /tmp/releases/
-    - umount /tmp/releases
+    - $sharePath = $env:NFS_SHARE
+    - if (!(Test-Path $sharePath)) { New-PSDrive -Name "R" -PSProvider FileSystem -Root $sharePath -ErrorAction Stop }
+    - Copy-Item -Path "*.zip" -Destination $sharePath -Force
+    - Get-ChildItem $sharePath
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
       when: on_success
