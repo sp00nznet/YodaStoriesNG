@@ -14,11 +14,13 @@ variables:
 # Build for Windows x64
 build:windows:
   stage: build
-  image: mcr.microsoft.com/dotnet/sdk:8.0
+  tags:
+    - win10
+    - shell
   script:
     - dotnet restore
-    - dotnet publish $PROJECT_YODA -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/windows/YodaStoriesNG
-    - dotnet publish $PROJECT_INDY -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/windows/IndyNG
+    - dotnet publish $env:PROJECT_YODA -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/windows/YodaStoriesNG
+    - dotnet publish $env:PROJECT_INDY -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/windows/IndyNG
   artifacts:
     paths:
       - publish/windows/
@@ -27,7 +29,8 @@ build:windows:
 # Build for Linux x64
 build:linux:
   stage: build
-  image: mcr.microsoft.com/dotnet/sdk:8.0
+  tags:
+    - debian
   script:
     - dotnet restore
     - dotnet publish $PROJECT_YODA -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/linux/YodaStoriesNG
@@ -42,7 +45,9 @@ build:linux:
 # Build for macOS x64
 build:macos:
   stage: build
-  image: mcr.microsoft.com/dotnet/sdk:8.0
+  tags:
+    - darwin
+    - shell
   script:
     - dotnet restore
     - dotnet publish $PROJECT_YODA -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/macos/YodaStoriesNG
@@ -57,13 +62,12 @@ build:macos:
 # Package all builds into zips
 package:
   stage: package
-  image: alpine:latest
+  tags:
+    - debian
   needs:
     - build:windows
     - build:linux
     - build:macos
-  before_script:
-    - apk add --no-cache zip
   script:
     - VERSION=$(date +%Y%m%d-%H%M%S)
     - echo "VERSION=$VERSION" > version.env
@@ -89,13 +93,11 @@ package:
 # Deploy to NFS share
 deploy:
   stage: deploy
-  image: alpine:latest
+  tags:
+    - debian
   needs:
     - package
-  tags:
-    - nfs-deploy
   before_script:
-    - apk add --no-cache nfs-utils
     - source version.env
   script:
     - mkdir -p $RELEASE_PATH
