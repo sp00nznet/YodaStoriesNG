@@ -107,6 +107,9 @@ public class MissionBot
         _zoneExitAttempts = 0;
         _solver.Reset();
 
+        // Block X-Wing positions in starting zone to avoid accidental travel
+        BlockXWingPositions();
+
         Console.WriteLine("[BOT] Started - Explorer mode");
         Console.WriteLine("[BOT] Will systematically explore zones and interact with everything");
     }
@@ -263,13 +266,22 @@ public class MissionBot
                 }
                 else if (objective.TargetZoneId.HasValue)
                 {
+                    // Try direct adjacency first, then pathfind if needed
                     var dir = _solver.GetDirectionToAdjacentZone(objective.TargetZoneId.Value);
+                    if (!dir.HasValue)
+                    {
+                        // Not directly adjacent - use pathfinding to find next step
+                        dir = _solver.GetDirectionTowardZone(objective.TargetZoneId.Value);
+                    }
+
                     if (dir.HasValue)
                     {
+                        Console.WriteLine($"[BOT] Navigating toward zone {objective.TargetZoneId} via {dir.Value}");
                         MoveToZoneEdge(dir.Value);
                     }
                     else
                     {
+                        Console.WriteLine($"[BOT] Cannot find path to zone {objective.TargetZoneId}");
                         _currentState = BotState.Exploring;
                     }
                 }

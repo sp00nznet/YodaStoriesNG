@@ -171,6 +171,35 @@ public class SaveGameManager
     }
 
     /// <summary>
+    /// Saves a SaveGameData object directly to a file.
+    /// Used by the Save Inspector editor.
+    /// </summary>
+    public static bool SaveGameData(string filePath, SaveGameData saveData)
+    {
+        try
+        {
+            saveData.SaveTime = DateTime.Now;
+
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Converters = { new JsonStringEnumConverter() }
+            };
+
+            var json = JsonSerializer.Serialize(saveData, options);
+            File.WriteAllText(filePath, json);
+
+            Console.WriteLine($"Save data written to: {filePath}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to write save data: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Loads game state from a file.
     /// </summary>
     public static SaveGameData? LoadGame(string filePath)

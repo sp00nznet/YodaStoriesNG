@@ -62,6 +62,8 @@ public unsafe class NativeMenuBar
 
     private const int ID_DEBUG_ASSET_VIEWER = 2001;
     private const int ID_DEBUG_SCRIPT_EDITOR = 2002;
+    private const int ID_DEBUG_SAVE_INSPECTOR = 2006;
+    private const int ID_DEBUG_ZONE_EDITOR = 2007;
     private const int ID_DEBUG_MAP_VIEWER = 2003;
     private const int ID_DEBUG_ENABLE_BOT = 2004;
     private const int ID_DEBUG_DISABLE_BOT = 2005;
@@ -88,6 +90,8 @@ public unsafe class NativeMenuBar
     public event Action? OnAssetViewer;
     public event Action? OnScriptEditor;
     public event Action? OnMapViewer;
+    public event Action? OnSaveInspector;
+    public event Action? OnZoneEditor;
     public event Action? OnEnableBot;
     public event Action? OnDisableBot;
     public event Action<int>? OnSetScale;
@@ -152,6 +156,8 @@ public unsafe class NativeMenuBar
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_ASSET_VIEWER, "Asset Viewer (F2)");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_SCRIPT_EDITOR, "Script Editor (F3)");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_MAP_VIEWER, "Map Viewer (F4)");
+        AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_SAVE_INSPECTOR, "Save Inspector (F8)");
+        AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_ZONE_EDITOR, "Zone Editor (F9)");
         AppendMenuW(debugMenu, MF_SEPARATOR, UIntPtr.Zero, "");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_ENABLE_BOT, "Enable Bot");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_DISABLE_BOT, "Disable Bot");
@@ -248,6 +254,12 @@ public unsafe class NativeMenuBar
                 return true;
             case ID_DEBUG_MAP_VIEWER:
                 OnMapViewer?.Invoke();
+                return true;
+            case ID_DEBUG_SAVE_INSPECTOR:
+                OnSaveInspector?.Invoke();
+                return true;
+            case ID_DEBUG_ZONE_EDITOR:
+                OnZoneEditor?.Invoke();
                 return true;
             case ID_DEBUG_ENABLE_BOT:
                 OnEnableBot?.Invoke();

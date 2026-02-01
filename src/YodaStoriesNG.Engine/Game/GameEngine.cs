@@ -27,6 +27,8 @@ public unsafe class GameEngine : IDisposable
     private DebugMapWindow? _debugMapWindow;
     private ScriptEditorWindow? _scriptViewer;
     private AssetViewerWindow? _assetViewer;
+    private SaveGameInspector? _saveInspector;
+    private ZoneEditorWindow? _zoneEditor;
     private ControlsWindow? _controlsWindow;
     private AboutWindow? _aboutWindow;
     private ScoreWindow? _scoreWindow;
@@ -268,6 +270,8 @@ public unsafe class GameEngine : IDisposable
         _menuBar.OnAssetViewer += () => _assetViewer?.Toggle();
         _menuBar.OnScriptEditor += () => _scriptViewer?.Toggle();
         _menuBar.OnMapViewer += () => _debugMapWindow?.Toggle();
+        _menuBar.OnSaveInspector += () => _saveInspector?.Toggle();
+        _menuBar.OnZoneEditor += () => _zoneEditor?.Toggle();
         _menuBar.OnEnableBot += EnableBot;
         _menuBar.OnDisableBot += DisableBot;
         _menuBar.OnSetScale += SetGraphicsScale;
@@ -652,6 +656,9 @@ public unsafe class GameEngine : IDisposable
         _scriptViewer.OnTeleportToZone += TeleportToZoneFromEditor;
         _scriptViewer.OnJumpToBot += JumpToBotZone;
         _assetViewer = new AssetViewerWindow(_gameData!);
+        _saveInspector = new SaveGameInspector();
+        _zoneEditor = new ZoneEditorWindow(_state, _gameData!);
+        _zoneEditor.OnTeleportToZone += TeleportToZoneFromEditor;
 
         // Initialize bot and auto-start for debugging
         if (_worldGenerator != null)
@@ -991,6 +998,18 @@ public unsafe class GameEngine : IDisposable
                 if (_assetViewer.HandleEvent(&evtCopy))
                     continue;
             }
+            if (_saveInspector != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_saveInspector.HandleEvent(&evtCopy))
+                    continue;
+            }
+            if (_zoneEditor != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_zoneEditor.HandleEvent(&evtCopy))
+                    continue;
+            }
             if (_controlsWindow != null)
             {
                 SDLEvent evtCopy = evt;
@@ -1280,6 +1299,14 @@ public unsafe class GameEngine : IDisposable
 
             case 1073741888:  // F7 - Scale 4x
                 SetGraphicsScale(4);
+                break;
+
+            case 1073741889:  // F8 - Save Game Inspector
+                _saveInspector?.Toggle();
+                break;
+
+            case 1073741890:  // F9 - Zone Editor
+                _zoneEditor?.Toggle();
                 break;
 
             case SDLK_ESCAPE:
@@ -3767,6 +3794,8 @@ public unsafe class GameEngine : IDisposable
         _debugMapWindow?.Render();
         _scriptViewer?.Render();
         _assetViewer?.Render();
+        _saveInspector?.Render();
+        _zoneEditor?.Render();
         _controlsWindow?.Render();
         _aboutWindow?.Render();
         _scoreWindow?.Render();

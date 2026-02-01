@@ -167,6 +167,41 @@ public class MissionSolver
                 return CreateTalkToYodaObjective(world);
 
             case MissionPhase.TravelToPlanet:
+                // Check for R2D2 before leaving Dagobah
+                Console.WriteLine($"[BOT] TravelToPlanet phase. HasLocator={_state.HasLocator}");
+                if (!_state.HasLocator)
+                {
+                    Console.WriteLine("[BOT] Don't have locator, searching for R2D2...");
+                    var (locatorZoneId, locator) = FindLocatorInDagobah();
+                    if (locator != null && locatorZoneId.HasValue)
+                    {
+                        // If R2D2 is in a different zone, go there first
+                        if (locatorZoneId.Value != _state.CurrentZoneId)
+                        {
+                            Console.WriteLine($"[BOT] Must get R2D2 before leaving! R2D2 is in zone {locatorZoneId.Value}, we're in {_state.CurrentZoneId}");
+                            return new BotObjective
+                            {
+                                Type = ObjectiveType.ChangeZone,
+                                Description = $"Go get R2D2 first (zone {locatorZoneId.Value})",
+                                TargetZoneId = locatorZoneId.Value
+                            };
+                        }
+
+                        Console.WriteLine($"[BOT] R2D2 is in our zone at ({locator.X},{locator.Y})");
+                        return new BotObjective
+                        {
+                            Type = ObjectiveType.PickupItem,
+                            Description = "Pick up R2D2 before leaving",
+                            TargetX = locator.X,
+                            TargetY = locator.Y
+                        };
+                    }
+                    else
+                    {
+                        Console.WriteLine("[BOT] WARNING: Could not find R2D2 anywhere on Dagobah!");
+                    }
+                }
+                Console.WriteLine("[BOT] Proceeding to use X-Wing");
                 return new BotObjective
                 {
                     Type = ObjectiveType.UseXWing,
@@ -196,6 +231,34 @@ public class MissionSolver
     {
         if (world == null)
             return new BotObjective { Type = ObjectiveType.Explore };
+
+        // PRIORITY: Pick up R2D2/Locator first if we don't have it (it's on Dagobah!)
+        if (!_state.HasLocator)
+        {
+            var (locatorZoneId, locator) = FindLocatorInDagobah();
+            if (locator != null && locatorZoneId.HasValue)
+            {
+                // If R2D2 is in a different zone, go there first
+                if (locatorZoneId.Value != _state.CurrentZoneId)
+                {
+                    Console.WriteLine($"[BOT] R2D2 is in zone {locatorZoneId.Value}, navigating there");
+                    return new BotObjective
+                    {
+                        Type = ObjectiveType.ChangeZone,
+                        Description = $"Go to R2D2's zone ({locatorZoneId.Value})",
+                        TargetZoneId = locatorZoneId.Value
+                    };
+                }
+
+                return new BotObjective
+                {
+                    Type = ObjectiveType.PickupItem,
+                    Description = "Pick up R2D2 (Locator)",
+                    TargetX = locator.X,
+                    TargetY = locator.Y
+                };
+            }
+        }
 
         // Find Yoda NPC
         var yoda = FindYodaNpc();
@@ -550,6 +613,69 @@ public class MissionSolver
     }
 
     /// <summary>
+    /// Finds the locator/R2D2 item across all Dagobah zones.
+    /// Returns (zoneId, object) or (null, null) if not found.
+    /// </summary>
+    private (int? zoneId, ZoneObject? obj) FindLocatorInDagobah()
+    {
+        var world = _worldGenerator.CurrentWorld;
+        if (world == null)
+        {
+            Console.WriteLine("[BOT] FindLocatorInDagobah: No world!");
+            return (null, null);
+        }
+
+        Console.WriteLine($"[BOT] Searching for R2D2 in {world.DagobahZones.Count} Dagobah zones: [{string.Join(", ", world.DagobahZones)}]");
+
+        // First check current zone
+        var localLocator = FindLocatorItem();
+        if (localLocator != null)
+        {
+            Console.WriteLine($"[BOT] R2D2 found in current zone {_state.CurrentZoneId}");
+            return (_state.CurrentZoneId, localLocator);
+        }
+
+        // Search all Dagobah zones
+        foreach (var dagobahZoneId in world.DagobahZones)
+        {
+            if (dagobahZoneId < 0 || dagobahZoneId >= _gameData.Zones.Count)
+            {
+                Console.WriteLine($"[BOT] Invalid zone ID {dagobahZoneId}");
+                continue;
+            }
+
+            var zone = _gameData.Zones[dagobahZoneId];
+            Console.WriteLine($"[BOT] Checking zone {dagobahZoneId}: {zone.Objects.Count} objects");
+
+            foreach (var obj in zone.Objects)
+            {
+                if (obj.Type == ZoneObjectType.LocatorItem)
+                {
+                    Console.WriteLine($"[BOT] Found LocatorItem object in zone {dagobahZoneId} at ({obj.X},{obj.Y})");
+
+                    // Skip if already collected
+                    if (_collectedItems.Contains((dagobahZoneId, obj.X, obj.Y)))
+                    {
+                        Console.WriteLine($"[BOT] Already in _collectedItems, skipping");
+                        continue;
+                    }
+                    if (_state.IsObjectCollected(dagobahZoneId, obj.X, obj.Y))
+                    {
+                        Console.WriteLine($"[BOT] Already collected in state, skipping");
+                        continue;
+                    }
+
+                    Console.WriteLine($"[BOT] Found R2D2 in Dagobah zone {dagobahZoneId} at ({obj.X},{obj.Y})");
+                    return (dagobahZoneId, obj);
+                }
+            }
+        }
+
+        Console.WriteLine("[BOT] No R2D2 found in any Dagobah zone!");
+        return (null, null);
+    }
+
+    /// <summary>
     /// Finds an item we haven't picked up yet (either zone objects or tile items).
     /// </summary>
     private ZoneObject? FindUnpickedItem()
@@ -739,6 +865,77 @@ public class MissionSolver
         if (connections.East == targetZoneId) return Direction.Right;
         if (connections.West == targetZoneId) return Direction.Left;
 
+        return null;
+    }
+
+    /// <summary>
+    /// Finds the direction to move to reach a non-adjacent target zone via BFS pathfinding.
+    /// Returns the direction to the next zone on the path to the target.
+    /// </summary>
+    public Direction? GetDirectionTowardZone(int targetZoneId)
+    {
+        var world = _worldGenerator.CurrentWorld;
+        if (world == null) return null;
+
+        // First check if directly adjacent
+        var direct = GetDirectionToAdjacentZone(targetZoneId);
+        if (direct.HasValue) return direct;
+
+        // BFS to find path from current zone to target zone
+        var queue = new Queue<(int zoneId, Direction firstStep)>();
+        var visited = new HashSet<int> { _state.CurrentZoneId };
+
+        // Add initial adjacent zones with their directions
+        if (world.Connections.TryGetValue(_state.CurrentZoneId, out var startConnections))
+        {
+            if (startConnections.North.HasValue && !IsExitBlocked(Direction.Up))
+            {
+                queue.Enqueue((startConnections.North.Value, Direction.Up));
+                visited.Add(startConnections.North.Value);
+            }
+            if (startConnections.South.HasValue && !IsExitBlocked(Direction.Down))
+            {
+                queue.Enqueue((startConnections.South.Value, Direction.Down));
+                visited.Add(startConnections.South.Value);
+            }
+            if (startConnections.East.HasValue && !IsExitBlocked(Direction.Right))
+            {
+                queue.Enqueue((startConnections.East.Value, Direction.Right));
+                visited.Add(startConnections.East.Value);
+            }
+            if (startConnections.West.HasValue && !IsExitBlocked(Direction.Left))
+            {
+                queue.Enqueue((startConnections.West.Value, Direction.Left));
+                visited.Add(startConnections.West.Value);
+            }
+        }
+
+        while (queue.Count > 0)
+        {
+            var (currentZone, firstStep) = queue.Dequeue();
+
+            // Found target!
+            if (currentZone == targetZoneId)
+            {
+                Console.WriteLine($"[BOT] Path to zone {targetZoneId}: go {firstStep} first");
+                return firstStep;
+            }
+
+            // Expand neighbors
+            if (world.Connections.TryGetValue(currentZone, out var connections))
+            {
+                foreach (var neighbor in new[] { connections.North, connections.South, connections.East, connections.West })
+                {
+                    if (neighbor.HasValue && !visited.Contains(neighbor.Value))
+                    {
+                        visited.Add(neighbor.Value);
+                        queue.Enqueue((neighbor.Value, firstStep)); // Keep tracking the first step
+                    }
+                }
+            }
+        }
+
+        Console.WriteLine($"[BOT] No path found to zone {targetZoneId}");
         return null;
     }
 
