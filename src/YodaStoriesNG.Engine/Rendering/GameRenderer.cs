@@ -26,6 +26,10 @@ public unsafe class GameRenderer : IDisposable
     private readonly TileRenderer _tileRenderer;
     private readonly BitmapFont _font;
 
+    // Palette animation support
+    private HashSet<int> _animatedTileIds = new();
+    private uint[] _atlasPixels = Array.Empty<uint>();
+
     // Screen dimensions - Widescreen layout with HUD on right side
     public const int ViewportTilesX = 9;
     public const int ViewportTilesY = 9;
@@ -213,17 +217,46 @@ public unsafe class GameRenderer : IDisposable
 
         // Calculate atlas dimensions (aim for roughly square)
         _tilesPerRow = (int)Math.Ceiling(Math.Sqrt(_gameData.Tiles.Count));
-        var (pixels, width, height) = _tileRenderer.CreateTileAtlas(_gameData.Tiles, _tilesPerRow);
-        _atlasWidth = width;
-        _atlasHeight = height;
+        var tilesPerColumn = (_gameData.Tiles.Count + _tilesPerRow - 1) / _tilesPerRow;
+        _atlasWidth = _tilesPerRow * Tile.Width;
+        _atlasHeight = tilesPerColumn * Tile.Height;
 
-        // Create SDL texture
+        // Create pixel buffer and track animated tiles
+        _atlasPixels = new uint[_atlasWidth * _atlasHeight];
+        _animatedTileIds.Clear();
+
+        for (int tileIndex = 0; tileIndex < _gameData.Tiles.Count; tileIndex++)
+        {
+            var tile = _gameData.Tiles[tileIndex];
+            var tileX = (tileIndex % _tilesPerRow) * Tile.Width;
+            var tileY = (tileIndex / _tilesPerRow) * Tile.Height;
+            bool hasAnimatedPixel = false;
+
+            for (int py = 0; py < Tile.Height; py++)
+            {
+                for (int px = 0; px < Tile.Width; px++)
+                {
+                    var srcIndex = py * Tile.Width + px;
+                    var dstIndex = (tileY + py) * _atlasWidth + (tileX + px);
+                    var paletteIndex = tile.PixelData[srcIndex];
+                    _atlasPixels[dstIndex] = Palette.GetColor(paletteIndex);
+
+                    if (Palette.IsAnimatedIndex(paletteIndex))
+                        hasAnimatedPixel = true;
+                }
+            }
+
+            if (hasAnimatedPixel)
+                _animatedTileIds.Add(tileIndex);
+        }
+
+        // Create SDL texture with STREAMING access for animated updates
         _tileAtlas = SDL.CreateTexture(
             _renderer,
             (uint)SDLPixelFormatEnum.Argb8888,
-            (int)SDLTextureAccess.Static,
-            width,
-            height);
+            (int)SDLTextureAccess.Streaming,
+            _atlasWidth,
+            _atlasHeight);
 
         if (_tileAtlas == null)
         {
@@ -235,12 +268,12 @@ public unsafe class GameRenderer : IDisposable
         SDL.SetTextureBlendMode(_tileAtlas, SDLBlendMode.Blend);
 
         // Upload pixel data
-        fixed (uint* pixelPtr = pixels)
+        fixed (uint* pixelPtr = _atlasPixels)
         {
-            SDL.UpdateTexture(_tileAtlas, null, pixelPtr, width * 4);
+            SDL.UpdateTexture(_tileAtlas, null, pixelPtr, _atlasWidth * 4);
         }
 
-        Console.WriteLine($"Created tile atlas: {width}x{height} ({_gameData.Tiles.Count} tiles, {_tilesPerRow} per row)");
+        Console.WriteLine($"Created tile atlas: {_atlasWidth}x{_atlasHeight} ({_gameData.Tiles.Count} tiles, {_animatedTileIds.Count} animated)");
     }
 
     /// <summary>
@@ -260,6 +293,44 @@ public unsafe class GameRenderer : IDisposable
 
         // Create new atlas
         CreateTileAtlas();
+    }
+
+    /// <summary>
+    /// Refreshes tiles that use animated palette colors.
+    /// Call this when Palette.UpdateAnimation() returns true.
+    /// </summary>
+    public void RefreshAnimatedTiles()
+    {
+        if (_tileAtlas == null || _animatedTileIds.Count == 0)
+            return;
+
+        // Update only tiles that have animated palette indices
+        foreach (var tileIndex in _animatedTileIds)
+        {
+            var tile = _gameData.Tiles[tileIndex];
+            var tileX = (tileIndex % _tilesPerRow) * Tile.Width;
+            var tileY = (tileIndex / _tilesPerRow) * Tile.Height;
+
+            for (int py = 0; py < Tile.Height; py++)
+            {
+                for (int px = 0; px < Tile.Width; px++)
+                {
+                    var srcIndex = py * Tile.Width + px;
+                    var dstIndex = (tileY + py) * _atlasWidth + (tileX + px);
+                    var paletteIndex = tile.PixelData[srcIndex];
+                    _atlasPixels[dstIndex] = Palette.GetColor(paletteIndex);
+                }
+            }
+
+            // Update just this tile's region in the texture
+            var rect = new SDLRect { X = tileX, Y = tileY, W = Tile.Width, H = Tile.Height };
+            fixed (uint* pixelPtr = _atlasPixels)
+            {
+                // Calculate pointer to start of this tile's region
+                uint* tilePtr = pixelPtr + (tileY * _atlasWidth + tileX);
+                SDL.UpdateTexture(_tileAtlas, &rect, tilePtr, _atlasWidth * 4);
+            }
+        }
     }
 
     /// <summary>

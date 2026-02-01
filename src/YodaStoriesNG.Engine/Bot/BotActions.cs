@@ -235,6 +235,23 @@ public class BotActions
     }
 
     /// <summary>
+    /// Walks to a specific position (e.g., to collect R2D2 NPC after talking).
+    /// </summary>
+    public bool WalkToPosition(int x, int y)
+    {
+        if (_state.PlayerX != x || _state.PlayerY != y)
+        {
+            _actionState = BotActionState.MovingToItem;
+            CurrentActionDescription = $"Walking to ({x},{y})";
+            return MoveTo(x, y);
+        }
+
+        // Already at the position
+        _actionState = BotActionState.Completed;
+        return true;
+    }
+
+    /// <summary>
     /// Pushes an object in a direction.
     /// </summary>
     public bool PushObject(int x, int y, Direction dir)

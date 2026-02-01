@@ -611,9 +611,10 @@ public unsafe class GameEngine : IDisposable
         _state.SelectedWeapon = startingWeapon;
         InitializeWeaponAmmo(startingWeapon);
 
-        // Give player R2D2/Locator automatically (original game does this at start)
-        // R2D2 is not placed as a zone object in Dagobah - it's given at game start
+        // Give player R2D2/Locator automatically at game start
+        // TODO: Implement proper R2D2 NPC spawning once we find the correct R2D2 sprite tile ID
         _state.HasLocator = true;
+        _state.AddItem(WorldGenerator.TILE_LOCATOR);
 
         // Generate the world with selected size
         _worldGenerator = new WorldGenerator(_gameData!);
@@ -890,6 +891,9 @@ public unsafe class GameEngine : IDisposable
 
         // Spawn Yoda if this is his zone
         SpawnYodaIfNeeded(zoneId);
+
+        // TODO: Spawn R2D2 properly once we find the correct sprite tile
+        // SpawnR2D2IfNeeded(zoneId);
 
         // Check for X-Wing in this zone
         CheckForXWing(zoneId);
@@ -1645,11 +1649,18 @@ public unsafe class GameEngine : IDisposable
         }
 
         // Check collision with NPCs
+        NPC? r2d2ToCollect = null;
         foreach (var npc in _state.ZoneNPCs)
         {
             if (npc.IsEnabled && npc.IsAlive && npc.X == newX && npc.Y == newY)
             {
-                // Can't walk through NPCs
+                // Special case: R2D2 that's ready to collect can be walked over
+                if (npc.IsReadyToCollect && IsR2D2Character(npc.CharacterId))
+                {
+                    r2d2ToCollect = npc;
+                    continue;
+                }
+                // Can't walk through other NPCs
                 return;
             }
         }
@@ -1661,6 +1672,12 @@ public unsafe class GameEngine : IDisposable
         // Move player
         _state.PlayerX = newX;
         _state.PlayerY = newY;
+
+        // Collect R2D2 if we walked over it
+        if (r2d2ToCollect != null)
+        {
+            CollectR2D2(r2d2ToCollect);
+        }
 
         // Pull block if shift is held
         if (tryPull)
@@ -2650,6 +2667,24 @@ public unsafe class GameEngine : IDisposable
                             _messages.ShowDialogue("Yoda", "Strong in the Force, you are.");
                         }
                     }
+                    // Check if NPC is R2D2 (by name containing "r2")
+                    else if (IsR2D2Character(npc.CharacterId) && !_state.HasLocator)
+                    {
+                        if (!npc.IsReadyToCollect)
+                        {
+                            // First interaction - R2D2 starts flashing, ready to collect
+                            npc.IsReadyToCollect = true;
+                            _messages.ShowDialogue("R2-D2", "*beep boop whistle* I will join you on your mission!");
+                            _messages.ShowMessage("Walk over R2-D2 to add it to your inventory.", MessageType.Info);
+                            _sounds?.PlaySound(SoundManager.SoundPickup);
+                            Console.WriteLine($"R2D2 at ({npc.X},{npc.Y}) is now ready to collect");
+                        }
+                        else
+                        {
+                            // Already ready - remind player to walk over
+                            _messages.ShowDialogue("R2-D2", "*excited beeps* Walk over me to pick me up!");
+                        }
+                    }
                     // Check if NPC has an item to give (from IZAX data)
                     else if (npc.CarriedItemId.HasValue && !npc.HasGivenItem)
                     {
@@ -3150,6 +3185,68 @@ public unsafe class GameEngine : IDisposable
     }
 
     /// <summary>
+    /// Spawns R2D2 as an NPC in ANY Dagobah zone.
+    /// R2D2 must be talked to, then walked over to collect.
+    /// </summary>
+    private void SpawnR2D2IfNeeded(int zoneId)
+    {
+        // Don't spawn if player already has the locator
+        if (_state.HasLocator)
+        {
+            Console.WriteLine($"  R2D2: Player already has locator, not spawning");
+            return;
+        }
+
+        if (_worldGenerator?.CurrentWorld == null) return;
+
+        // Only spawn R2D2 in Dagobah zones
+        if (!_worldGenerator.CurrentWorld.DagobahZones.Contains(zoneId))
+        {
+            Console.WriteLine($"  R2D2: Zone {zoneId} is not a Dagobah zone");
+            return;
+        }
+
+        // Check if R2D2 is already spawned in this zone
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (IsR2D2Character(npc.CharacterId))
+            {
+                Console.WriteLine($"  R2D2: Already spawned in this zone at ({npc.X},{npc.Y})");
+                return;
+            }
+        }
+
+        var zone = _state.CurrentZone;
+        if (zone == null) return;
+
+        // Find a walkable position for R2D2 near player start
+        int targetX = _state.PlayerX + 2;
+        int targetY = _state.PlayerY;
+        var (finalX, finalY) = FindWalkablePosition(zone, targetX, targetY);
+
+        Console.WriteLine($"  *** SPAWNING R2D2 at ({finalX}, {finalY}) in Dagobah zone {zoneId} ***");
+
+        // Create R2D2 as a friendly NPC using the locator tile ID for rendering
+        var r2d2 = new NPC
+        {
+            CharacterId = WorldGenerator.TILE_LOCATOR, // Uses tile 512 for rendering
+            X = finalX,
+            Y = finalY,
+            StartX = finalX,
+            StartY = finalY,
+            Direction = Direction.Down,
+            Health = 999,
+            MaxHealth = 999,
+            IsEnabled = true,
+            IsHostile = false,
+            Behavior = NPCBehavior.Stationary,
+            Damage = 0
+        };
+        _state.ZoneNPCs.Add(r2d2);
+        Console.WriteLine($"  R2D2 spawned! ZoneNPCs now has {_state.ZoneNPCs.Count} NPCs");
+    }
+
+    /// <summary>
     /// Finds a walkable position near the target coordinates.
     /// </summary>
     private (int x, int y) FindWalkablePosition(Zone zone, int targetX, int targetY)
@@ -3360,8 +3457,8 @@ public unsafe class GameEngine : IDisposable
         // Update palette animation (even during title screen for visual effects)
         if (Palette.UpdateAnimation(deltaTime))
         {
-            // Palette colors changed - renderer will pick this up automatically
-            // since it reads from Palette.Colors which is now updated
+            // Palette colors changed - refresh animated tiles in the renderer
+            _renderer?.RefreshAnimatedTiles();
         }
 
         if (_showingTitleScreen || _state.IsPaused)
@@ -4022,6 +4119,56 @@ public unsafe class GameEngine : IDisposable
                 return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Checks if a character is R2-D2 (by tile ID or character name).
+    /// </summary>
+    private bool IsR2D2Character(int characterId)
+    {
+        // R2D2 uses the locator tile ID directly
+        if (characterId == WorldGenerator.TILE_LOCATOR)
+            return true;
+
+        // Also check by character name if it's a valid character
+        if (characterId >= 0 && characterId < _gameData!.Characters.Count)
+        {
+            var character = _gameData.Characters[characterId];
+            var nameLower = character.Name.ToLowerInvariant();
+
+            // Check for R2 variants in name
+            if (nameLower.Contains("r2") ||
+                nameLower.Contains("r-2") ||
+                nameLower.Contains("artoo") ||
+                nameLower.Contains("locator"))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Collects R2D2 NPC, adding the locator to the player's inventory.
+    /// </summary>
+    private void CollectR2D2(NPC r2d2)
+    {
+        // Add locator item to inventory
+        _state.AddItem(WorldGenerator.TILE_LOCATOR);
+        _state.HasLocator = true;
+
+        // Disable the NPC (collected)
+        r2d2.IsEnabled = false;
+        r2d2.Health = 0; // This makes IsAlive return false
+
+        // Show pickup messages
+        _messages.ShowDialogue("R2-D2", "*happy beeps* I'm ready to help with your mission!");
+        _messages.ShowPickup("R2-D2 (Locator)");
+        _messages.ShowMessage("Use the locator from your inventory for hints!", MessageType.Info);
+        _sounds?.PlaySound(SoundManager.SoundPickup);
+
+        Console.WriteLine($"Collected R2D2 at ({r2d2.X},{r2d2.Y}), HasLocator={_state.HasLocator}");
     }
 
     /// <summary>

@@ -56,6 +56,12 @@ class Program
             gameData = parser.Parse();
         }
 
+        // Load the color palette from the DAW file
+        if (gameData.Palette.Length > 0)
+        {
+            Palette.LoadFromStupData(gameData.Palette);
+        }
+
         Console.WriteLine();
         Console.WriteLine($"Summary: {gameData.Tiles.Count} tiles, {gameData.Zones.Count} zones, {gameData.Characters.Count} characters, {gameData.Puzzles.Count} puzzles");
         Console.WriteLine();
@@ -219,6 +225,12 @@ class Program
 
                 // Update game state
                 gameEngine.Update(1.0 / 60.0);
+
+                // Update palette animation
+                if (Palette.UpdateAnimation(1.0 / 60.0))
+                {
+                    gameRenderer.RefreshAnimatedTiles();
+                }
 
                 // Render
                 SDL.SetRenderDrawColor(renderer, 0, 0, 0, 255);

@@ -171,30 +171,51 @@ public class MissionSolver
                 Console.WriteLine($"[BOT] TravelToPlanet phase. HasLocator={_state.HasLocator}");
                 if (!_state.HasLocator)
                 {
-                    Console.WriteLine("[BOT] Don't have locator, searching for R2D2...");
-                    var (locatorZoneId, locator) = FindLocatorInDagobah();
-                    if (locator != null && locatorZoneId.HasValue)
+                    Console.WriteLine("[BOT] Don't have locator, searching for R2D2 NPC...");
+
+                    // First check if R2D2 NPC is in current zone
+                    var r2d2Npc = FindR2D2Npc();
+                    if (r2d2Npc != null)
                     {
-                        // If R2D2 is in a different zone, go there first
-                        if (locatorZoneId.Value != _state.CurrentZoneId)
+                        Console.WriteLine($"[BOT] R2D2 NPC found at ({r2d2Npc.X},{r2d2Npc.Y}), IsReadyToCollect={r2d2Npc.IsReadyToCollect}");
+                        if (r2d2Npc.IsReadyToCollect)
                         {
-                            Console.WriteLine($"[BOT] Must get R2D2 before leaving! R2D2 is in zone {locatorZoneId.Value}, we're in {_state.CurrentZoneId}");
+                            // Walk over R2D2 to collect it
+                            return new BotObjective
+                            {
+                                Type = ObjectiveType.WalkToPosition,
+                                Description = "Walk over R2D2 to collect it",
+                                TargetX = r2d2Npc.X,
+                                TargetY = r2d2Npc.Y
+                            };
+                        }
+                        else
+                        {
+                            // Talk to R2D2 to make it ready to collect
+                            return new BotObjective
+                            {
+                                Type = ObjectiveType.TalkToNpc,
+                                Description = "Talk to R2D2",
+                                TargetX = r2d2Npc.X,
+                                TargetY = r2d2Npc.Y
+                            };
+                        }
+                    }
+
+                    // Search other Dagobah zones for R2D2
+                    var (r2d2ZoneId, foundR2D2) = FindR2D2InDagobah();
+                    if (foundR2D2 != null && r2d2ZoneId.HasValue)
+                    {
+                        if (r2d2ZoneId.Value != _state.CurrentZoneId)
+                        {
+                            Console.WriteLine($"[BOT] Must get R2D2 before leaving! R2D2 is in zone {r2d2ZoneId.Value}, we're in {_state.CurrentZoneId}");
                             return new BotObjective
                             {
                                 Type = ObjectiveType.ChangeZone,
-                                Description = $"Go get R2D2 first (zone {locatorZoneId.Value})",
-                                TargetZoneId = locatorZoneId.Value
+                                Description = $"Go get R2D2 first (zone {r2d2ZoneId.Value})",
+                                TargetZoneId = r2d2ZoneId.Value
                             };
                         }
-
-                        Console.WriteLine($"[BOT] R2D2 is in our zone at ({locator.X},{locator.Y})");
-                        return new BotObjective
-                        {
-                            Type = ObjectiveType.PickupItem,
-                            Description = "Pick up R2D2 before leaving",
-                            TargetX = locator.X,
-                            TargetY = locator.Y
-                        };
                     }
                     else
                     {
@@ -235,28 +256,50 @@ public class MissionSolver
         // PRIORITY: Pick up R2D2/Locator first if we don't have it (it's on Dagobah!)
         if (!_state.HasLocator)
         {
-            var (locatorZoneId, locator) = FindLocatorInDagobah();
-            if (locator != null && locatorZoneId.HasValue)
+            // First check if R2D2 NPC is in current zone
+            var r2d2Npc = FindR2D2Npc();
+            if (r2d2Npc != null)
             {
-                // If R2D2 is in a different zone, go there first
-                if (locatorZoneId.Value != _state.CurrentZoneId)
+                Console.WriteLine($"[BOT] R2D2 NPC found at ({r2d2Npc.X},{r2d2Npc.Y}), IsReadyToCollect={r2d2Npc.IsReadyToCollect}");
+                if (r2d2Npc.IsReadyToCollect)
                 {
-                    Console.WriteLine($"[BOT] R2D2 is in zone {locatorZoneId.Value}, navigating there");
+                    // Walk over R2D2 to collect it
+                    return new BotObjective
+                    {
+                        Type = ObjectiveType.WalkToPosition,
+                        Description = "Walk over R2D2 to collect it",
+                        TargetX = r2d2Npc.X,
+                        TargetY = r2d2Npc.Y
+                    };
+                }
+                else
+                {
+                    // Talk to R2D2 to make it ready to collect
+                    return new BotObjective
+                    {
+                        Type = ObjectiveType.TalkToNpc,
+                        Description = "Talk to R2D2",
+                        TargetNpc = r2d2Npc,
+                        TargetX = r2d2Npc.X,
+                        TargetY = r2d2Npc.Y
+                    };
+                }
+            }
+
+            // Search other Dagobah zones for R2D2
+            var (r2d2ZoneId, foundR2D2) = FindR2D2InDagobah();
+            if (foundR2D2 != null && r2d2ZoneId.HasValue)
+            {
+                if (r2d2ZoneId.Value != _state.CurrentZoneId)
+                {
+                    Console.WriteLine($"[BOT] R2D2 is in zone {r2d2ZoneId.Value}, navigating there");
                     return new BotObjective
                     {
                         Type = ObjectiveType.ChangeZone,
-                        Description = $"Go to R2D2's zone ({locatorZoneId.Value})",
-                        TargetZoneId = locatorZoneId.Value
+                        Description = $"Go to R2D2's zone ({r2d2ZoneId.Value})",
+                        TargetZoneId = r2d2ZoneId.Value
                     };
                 }
-
-                return new BotObjective
-                {
-                    Type = ObjectiveType.PickupItem,
-                    Description = "Pick up R2D2 (Locator)",
-                    TargetX = locator.X,
-                    TargetY = locator.Y
-                };
             }
         }
 
@@ -301,16 +344,33 @@ public class MissionSolver
         // Priority 0: Get the locator/R2D2 if we don't have it (highest priority after safety)
         if (!_state.HasLocator)
         {
-            var locator = FindLocatorItem();
-            if (locator != null)
+            var r2d2Npc = FindR2D2Npc();
+            if (r2d2Npc != null)
             {
-                return new BotObjective
+                Console.WriteLine($"[BOT] R2D2 NPC found at ({r2d2Npc.X},{r2d2Npc.Y}), IsReadyToCollect={r2d2Npc.IsReadyToCollect}");
+                if (r2d2Npc.IsReadyToCollect)
                 {
-                    Type = ObjectiveType.PickupItem,
-                    Description = "Pick up R2D2 (Locator)",
-                    TargetX = locator.X,
-                    TargetY = locator.Y
-                };
+                    // Walk over R2D2 to collect it
+                    return new BotObjective
+                    {
+                        Type = ObjectiveType.WalkToPosition,
+                        Description = "Walk over R2D2 to collect it",
+                        TargetX = r2d2Npc.X,
+                        TargetY = r2d2Npc.Y
+                    };
+                }
+                else
+                {
+                    // Talk to R2D2 to make it ready to collect
+                    return new BotObjective
+                    {
+                        Type = ObjectiveType.TalkToNpc,
+                        Description = "Talk to R2D2",
+                        TargetNpc = r2d2Npc,
+                        TargetX = r2d2Npc.X,
+                        TargetY = r2d2Npc.Y
+                    };
+                }
             }
         }
 
@@ -590,7 +650,49 @@ public class MissionSolver
     }
 
     /// <summary>
-    /// Finds the locator/R2D2 item in the current zone.
+    /// Checks if a character is R2D2 (by tile ID or character name).
+    /// </summary>
+    private bool IsR2D2Character(int characterId)
+    {
+        // R2D2 uses the locator tile ID directly
+        if (characterId == WorldGenerator.TILE_LOCATOR)
+            return true;
+
+        // Also check by character name if it's a valid character
+        if (characterId >= 0 && characterId < _gameData.Characters.Count)
+        {
+            var character = _gameData.Characters[characterId];
+            var nameLower = character.Name.ToLowerInvariant();
+
+            if (nameLower.Contains("r2") ||
+                nameLower.Contains("r-2") ||
+                nameLower.Contains("artoo") ||
+                nameLower.Contains("locator"))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Finds the R2D2 NPC in the current zone.
+    /// </summary>
+    public NPC? FindR2D2Npc()
+    {
+        foreach (var npc in _state.ZoneNPCs)
+        {
+            if (npc.IsEnabled && npc.IsAlive && IsR2D2Character(npc.CharacterId))
+            {
+                return npc;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Finds the locator/R2D2 item in the current zone (legacy zone object search).
     /// </summary>
     private ZoneObject? FindLocatorItem()
     {
@@ -613,8 +715,70 @@ public class MissionSolver
     }
 
     /// <summary>
+    /// Finds R2D2 NPC across all Dagobah zones.
+    /// Returns (zoneId, npc) or (null, null) if not found.
+    /// </summary>
+    private (int? zoneId, NPC? npc) FindR2D2InDagobah()
+    {
+        var world = _worldGenerator.CurrentWorld;
+        if (world == null)
+        {
+            Console.WriteLine("[BOT] FindR2D2InDagobah: No world!");
+            return (null, null);
+        }
+
+        Console.WriteLine($"[BOT] Searching for R2D2 NPC in {world.DagobahZones.Count} Dagobah zones: [{string.Join(", ", world.DagobahZones)}]");
+
+        // First check current zone for R2D2 NPC
+        var localR2D2 = FindR2D2Npc();
+        if (localR2D2 != null)
+        {
+            Console.WriteLine($"[BOT] R2D2 NPC found in current zone {_state.CurrentZoneId} at ({localR2D2.X},{localR2D2.Y})");
+            return (_state.CurrentZoneId, localR2D2);
+        }
+
+        // Search all Dagobah zones for R2D2 NPC (check zone objects for PuzzleNPC type)
+        foreach (var dagobahZoneId in world.DagobahZones)
+        {
+            if (dagobahZoneId < 0 || dagobahZoneId >= _gameData.Zones.Count)
+            {
+                Console.WriteLine($"[BOT] Invalid zone ID {dagobahZoneId}");
+                continue;
+            }
+
+            var zone = _gameData.Zones[dagobahZoneId];
+
+            foreach (var obj in zone.Objects)
+            {
+                if (obj.Type == ZoneObjectType.PuzzleNPC)
+                {
+                    // Check if this NPC is R2D2
+                    if (IsR2D2Character(obj.Argument))
+                    {
+                        Console.WriteLine($"[BOT] Found R2D2 NPC object in zone {dagobahZoneId} at ({obj.X},{obj.Y}), CharId={obj.Argument}");
+                        // Create a temporary NPC object to return the position
+                        var npc = new NPC
+                        {
+                            CharacterId = obj.Argument,
+                            X = obj.X,
+                            Y = obj.Y,
+                            IsEnabled = true,
+                            Health = 100 // IsAlive is computed from Health > 0
+                        };
+                        return (dagobahZoneId, npc);
+                    }
+                }
+            }
+        }
+
+        Console.WriteLine("[BOT] No R2D2 NPC found in any Dagobah zone!");
+        return (null, null);
+    }
+
+    /// <summary>
     /// Finds the locator/R2D2 item across all Dagobah zones.
     /// Returns (zoneId, object) or (null, null) if not found.
+    /// LEGACY: Also checks for zone object type LocatorItem.
     /// </summary>
     private (int? zoneId, ZoneObject? obj) FindLocatorInDagobah()
     {
@@ -1031,7 +1195,8 @@ public enum ObjectiveType
     EnterDoor,
     PushObject,
     Explore,
-    FindNpc
+    FindNpc,
+    WalkToPosition  // Walk to a specific position (e.g., to collect R2D2 after talking)
 }
 
 /// <summary>

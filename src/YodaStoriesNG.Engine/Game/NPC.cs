@@ -50,6 +50,9 @@ public class NPC
     public int CarriedItemQuantity { get; set; } = 1;
     public bool HasGivenItem { get; set; } = false;  // Track if item was already given
 
+    // R2D2/collectible state - when true, NPC flashes and can be walked over to collect
+    public bool IsReadyToCollect { get; set; } = false;
+
     /// <summary>
     /// Creates an NPC from a zone object.
     /// </summary>

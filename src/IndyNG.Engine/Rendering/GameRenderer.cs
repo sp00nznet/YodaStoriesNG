@@ -18,6 +18,10 @@ public unsafe class GameRenderer : IDisposable
     private int _atlasHeight;
     private int _tilesPerRow;
 
+    // Palette animation support
+    private HashSet<int> _animatedTileIds = new();
+    private uint[] _atlasPixels = Array.Empty<uint>();
+
     private const int TILE_SIZE = 32;
 
     public GameRenderer(SDLRenderer* renderer, GameData gameData, int scale)
@@ -37,7 +41,7 @@ public unsafe class GameRenderer : IDisposable
             return;
         }
 
-        // Calculate atlas dimensions (power of 2)
+        // Calculate atlas dimensions
         _tilesPerRow = 32; // 32 tiles per row
         int rows = (_gameData.Tiles.Count + _tilesPerRow - 1) / _tilesPerRow;
         _atlasWidth = _tilesPerRow * TILE_SIZE;
@@ -45,11 +49,42 @@ public unsafe class GameRenderer : IDisposable
 
         Console.WriteLine($"Creating tile atlas: {_atlasWidth}x{_atlasHeight} ({_gameData.Tiles.Count} tiles)");
 
-        // Create texture (ARGB8888 format to match our palette)
+        // Create pixel buffer and track animated tiles
+        _atlasPixels = new uint[_atlasWidth * _atlasHeight];
+        _animatedTileIds.Clear();
+
+        // Copy tiles to atlas using the loaded palette
+        for (int i = 0; i < _gameData.Tiles.Count; i++)
+        {
+            var tile = _gameData.Tiles[i];
+            int atlasX = (i % _tilesPerRow) * TILE_SIZE;
+            int atlasY = (i / _tilesPerRow) * TILE_SIZE;
+            bool hasAnimatedPixel = false;
+
+            for (int y = 0; y < TILE_SIZE; y++)
+            {
+                for (int x = 0; x < TILE_SIZE; x++)
+                {
+                    int srcIdx = y * TILE_SIZE + x;
+                    int dstIdx = (atlasY + y) * _atlasWidth + (atlasX + x);
+
+                    byte colorIdx = tile.PixelData[srcIdx];
+                    _atlasPixels[dstIdx] = Palette.GetColor(colorIdx);
+
+                    if (Palette.IsAnimatedIndex(colorIdx))
+                        hasAnimatedPixel = true;
+                }
+            }
+
+            if (hasAnimatedPixel)
+                _animatedTileIds.Add(i);
+        }
+
+        // Create texture with STREAMING access for animated updates
         _tileAtlas = SDL.CreateTexture(
             _renderer,
             (uint)SDLPixelFormatEnum.Argb8888,
-            (int)SDLTextureAccess.Static,
+            (int)SDLTextureAccess.Streaming,
             _atlasWidth, _atlasHeight);
 
         if (_tileAtlas == null)
@@ -60,28 +95,30 @@ public unsafe class GameRenderer : IDisposable
 
         SDL.SetTextureBlendMode(_tileAtlas, SDLBlendMode.Blend);
 
-        // Create pixel buffer
-        var pixels = new uint[_atlasWidth * _atlasHeight];
-
-        // Use the standard Desktop Adventures palette, slightly darkened for Indiana Jones
-        // Build adjusted palette (reduce brightness by ~15%)
-        uint[] adjustedPalette = new uint[256];
-        for (int i = 0; i < 256; i++)
+        // Upload to texture
+        fixed (uint* pixelPtr = _atlasPixels)
         {
-            uint color = Palette.GetColor((byte)i);
-            byte a = (byte)((color >> 24) & 0xFF);
-            byte r = (byte)(((color >> 16) & 0xFF) * 85 / 100);  // Reduce to 85%
-            byte g = (byte)(((color >> 8) & 0xFF) * 85 / 100);
-            byte b = (byte)((color & 0xFF) * 85 / 100);
-            adjustedPalette[i] = (uint)((a << 24) | (r << 16) | (g << 8) | b);
+            SDL.UpdateTexture(_tileAtlas, null, pixelPtr, _atlasWidth * 4);
         }
 
-        // Copy tiles to atlas
-        for (int i = 0; i < _gameData.Tiles.Count; i++)
+        Console.WriteLine($"Tile atlas created successfully ({_animatedTileIds.Count} animated tiles)");
+    }
+
+    /// <summary>
+    /// Refreshes tiles that use animated palette colors.
+    /// Call this when Palette.UpdateAnimation() returns true.
+    /// </summary>
+    public void RefreshAnimatedTiles()
+    {
+        if (_tileAtlas == null || _animatedTileIds.Count == 0)
+            return;
+
+        // Update only tiles that have animated palette indices
+        foreach (var tileIndex in _animatedTileIds)
         {
-            var tile = _gameData.Tiles[i];
-            int atlasX = (i % _tilesPerRow) * TILE_SIZE;
-            int atlasY = (i / _tilesPerRow) * TILE_SIZE;
+            var tile = _gameData.Tiles[tileIndex];
+            int atlasX = (tileIndex % _tilesPerRow) * TILE_SIZE;
+            int atlasY = (tileIndex / _tilesPerRow) * TILE_SIZE;
 
             for (int y = 0; y < TILE_SIZE; y++)
             {
@@ -91,18 +128,19 @@ public unsafe class GameRenderer : IDisposable
                     int dstIdx = (atlasY + y) * _atlasWidth + (atlasX + x);
 
                     byte colorIdx = tile.PixelData[srcIdx];
-                    pixels[dstIdx] = adjustedPalette[colorIdx];
+                    _atlasPixels[dstIdx] = Palette.GetColor(colorIdx);
                 }
             }
-        }
 
-        // Upload to texture
-        fixed (uint* pixelPtr = pixels)
-        {
-            SDL.UpdateTexture(_tileAtlas, null, pixelPtr, _atlasWidth * 4);
+            // Update just this tile's region in the texture
+            var rect = new SDLRect { X = atlasX, Y = atlasY, W = TILE_SIZE, H = TILE_SIZE };
+            fixed (uint* pixelPtr = _atlasPixels)
+            {
+                // Calculate pointer to start of this tile's region
+                uint* tilePtr = pixelPtr + (atlasY * _atlasWidth + atlasX);
+                SDL.UpdateTexture(_tileAtlas, &rect, tilePtr, _atlasWidth * 4);
+            }
         }
-
-        Console.WriteLine("Tile atlas created successfully");
     }
 
     public void Render(GameEngine engine)

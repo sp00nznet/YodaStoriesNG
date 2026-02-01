@@ -306,6 +306,16 @@ public class MissionBot
                 _currentState = BotState.Combat;
                 break;
 
+            case ObjectiveType.WalkToPosition:
+                // Walk directly to a position (e.g., to collect R2D2 after talking)
+                Console.WriteLine($"[BOT] Walking to position ({objective.TargetX},{objective.TargetY})");
+                if (!_actions.WalkToPosition(objective.TargetX, objective.TargetY))
+                {
+                    _solver.MarkUnreachable(objective.TargetX, objective.TargetY);
+                    _currentState = BotState.ThinkingAboutObjective;
+                }
+                break;
+
             case ObjectiveType.Explore:
             default:
                 _currentState = BotState.Exploring;
