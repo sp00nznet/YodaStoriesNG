@@ -7,7 +7,6 @@ variables:
   DOTNET_VERSION: "8.0"
   PROJECT_YODA: "src/YodaStoriesNG.Engine/YodaStoriesNG.Engine.csproj"
   PROJECT_INDY: "src/IndyNG.Engine/IndyNG.Engine.csproj"
-  RELEASE_PATH: "/mnt/releases"
   NFS_SERVER: "192.168.100.22"
   NFS_SHARE: "/pool/releases/YodaStoriesNG"
 
@@ -77,12 +76,6 @@ package:
     - cd publish/linux && zip -r ../../YodaStoriesNG-linux-x64-$VERSION.zip . && cd ../..
     # Create macOS zip
     - cd publish/macos && zip -r ../../YodaStoriesNG-macos-x64-$VERSION.zip . && cd ../..
-    # Create combined release zip
-    - mkdir -p release
-    - cp publish/windows/YodaStoriesNG/* release/ 2>/dev/null || true
-    - cp publish/windows/IndyNG/* release/ 2>/dev/null || true
-    - mv release YodaStoriesNG-$VERSION
-    - zip -r YodaStoriesNG-$VERSION.zip YodaStoriesNG-$VERSION
     - ls -la *.zip
   artifacts:
     paths:
@@ -90,26 +83,59 @@ package:
       - version.env
     expire_in: 1 month
 
-# Deploy to NFS share
-deploy:
+# Deploy Windows build
+deploy:windows:
+  stage: deploy
+  tags:
+    - win10
+    - shell
+  needs:
+    - package
+  script:
+    - $mountPath = "Z:"
+    - if (!(Test-Path $mountPath)) { net use $mountPath "\\$env:NFS_SERVER\pool\releases\YodaStoriesNG" }
+    - Copy-Item -Path "*.zip" -Destination $mountPath -Force
+    - Get-ChildItem $mountPath
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: on_success
+    - when: manual
+
+# Deploy Linux build
+deploy:linux:
   stage: deploy
   tags:
     - debian
   needs:
     - package
-  before_script:
-    - source version.env
   script:
-    - mkdir -p $RELEASE_PATH
-    - mount -t nfs $NFS_SERVER:$NFS_SHARE $RELEASE_PATH
-    - cp -v *.zip $RELEASE_PATH/
-    - chmod 755 $RELEASE_PATH/*.zip
-    - ls -la $RELEASE_PATH/
-    - umount $RELEASE_PATH
+    - mkdir -p /mnt/releases
+    - mount -t nfs ${NFS_SERVER}:${NFS_SHARE} /mnt/releases
+    - cp -v *.zip /mnt/releases/
+    - chmod 755 /mnt/releases/*.zip
+    - ls -la /mnt/releases/
+    - umount /mnt/releases
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
       when: on_success
     - when: manual
-  environment:
-    name: production
-    url: http://$NFS_SERVER$NFS_SHARE
+
+# Deploy macOS build
+deploy:macos:
+  stage: deploy
+  tags:
+    - darwin
+    - shell
+  needs:
+    - package
+  script:
+    - mkdir -p /tmp/releases
+    - mount -t nfs ${NFS_SERVER}:${NFS_SHARE} /tmp/releases
+    - cp -v *.zip /tmp/releases/
+    - chmod 755 /tmp/releases/*.zip
+    - ls -la /tmp/releases/
+    - umount /tmp/releases
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: on_success
+    - when: manual
