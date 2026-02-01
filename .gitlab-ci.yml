@@ -7,8 +7,6 @@ variables:
   DOTNET_VERSION: "8.0"
   PROJECT_YODA: "src/YodaStoriesNG.Engine/YodaStoriesNG.Engine.csproj"
   PROJECT_INDY: "src/IndyNG.Engine/IndyNG.Engine.csproj"
-  NFS_SERVER: "192.168.100.22"
-  NFS_SHARE: "\\\\192.168.100.22\\pool\\releases\\YodaStoriesNG"
 
 # Build all platforms on Windows runner
 build:
@@ -44,7 +42,6 @@ package:
     - build
   script:
     - $VERSION = Get-Date -Format "yyyyMMdd-HHmmss"
-    - echo "VERSION=$VERSION" | Out-File -FilePath version.env -Encoding utf8
     # Create Windows zip
     - Compress-Archive -Path publish/windows/* -DestinationPath "YodaStoriesNG-windows-x64-$VERSION.zip"
     # Create Linux zip
@@ -55,7 +52,6 @@ package:
   artifacts:
     paths:
       - "*.zip"
-      - version.env
     expire_in: 1 month
 
 # Deploy to network share
@@ -67,11 +63,14 @@ deploy:
   needs:
     - package
   script:
-    - $sharePath = $env:NFS_SHARE
-    - if (!(Test-Path $sharePath)) { New-PSDrive -Name "R" -PSProvider FileSystem -Root $sharePath -ErrorAction Stop }
-    - Copy-Item -Path "*.zip" -Destination $sharePath -Force
-    - Get-ChildItem $sharePath
+    - 'net use R: \\192.168.100.22\releases gitlab /user:root'
+    - 'New-Item -ItemType Directory -Force -Path "R:\$env:CI_PROJECT_NAME\$env:CI_COMMIT_REF_NAME"'
+    - 'Copy-Item -Path *.zip -Destination "R:\$env:CI_PROJECT_NAME\$env:CI_COMMIT_REF_NAME" -Force'
+    - 'Get-ChildItem "R:\$env:CI_PROJECT_NAME\$env:CI_COMMIT_REF_NAME"'
+    - 'net use R: /delete'
   rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "web"
     - if: $CI_COMMIT_BRANCH == "main"
-      when: on_success
-    - when: manual
+      when: manual
+      allow_failure: true
