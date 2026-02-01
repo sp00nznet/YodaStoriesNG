@@ -18,16 +18,19 @@ Yoda Stories NG is a fan-made recreation of the classic LucasArts Desktop Advent
 - **Complete data file parsing** - Reads original game assets with automatic game type detection
 - **Procedural world generation** - Each playthrough generates a unique 10x10 or 15x15 world map
 - **15 mission cycle** - Full mission progression with item chains and NPC puzzles
-- **Combat system** - Melee and ranged weapons with NPC AI
+- **Combat system** - Melee and ranged weapons with NPC AI and ammo system
 - **Score system** - Force Factor (Yoda) / Indy Quotient (Indy) end-game scoring
 - **Color palette animation** - Authentic animated water, lava, and fire effects
 - **R2D2 help system** - Context-sensitive hints from your droid companion
 - **Save/Load system** - JSON-based save files with full game state
-- **Widescreen UI** - Modern layout with sidebar HUD
+- **Save Game Editor** - Inspect and modify save files, add items to inventory
+- **Native menu bar** - Windows-style menu integration
+- **Widescreen UI** - Modern layout with sidebar HUD and inventory scrolling
 - **Xbox controller support** - Full gamepad controls
 - **Configurable graphics** - 2x and 4x scaling options
 - **Automated Mission Bot** - AI-powered gameplay with A* pathfinding
 - **Complete script engine** - All 30+ condition and instruction opcodes implemented
+- **CI/CD Pipeline** - Automated builds for Windows, Linux, and macOS
 
 ## Screenshots
 
@@ -248,36 +251,46 @@ The bot displays its current task in the HUD when active.
 ```
 YodaStoriesNG/
 ├── src/
-│   └── YodaStoriesNG.Engine/
-│       ├── Audio/           # Sound playback
-│       ├── Bot/             # Automated mission bot
-│       │   ├── MissionBot.cs
-│       │   ├── BotActions.cs
-│       │   ├── MissionSolver.cs
-│       │   └── Pathfinder.cs
-│       ├── Data/            # Game data structures
-│       ├── Debug/           # Debug tools
-│       ├── Game/            # Core game logic
-│       │   ├── GameEngine.cs
-│       │   ├── GameState.cs
-│       │   ├── WorldGenerator.cs
-│       │   ├── MapGenerator.cs
-│       │   ├── ActionExecutor.cs
-│       │   ├── SaveGameManager.cs
-│       │   └── NPC.cs
-│       ├── Parsing/         # DTA file parser
-│       ├── Rendering/       # SDL2 renderer
-│       │   ├── GameRenderer.cs
-│       │   ├── TileRenderer.cs
-│       │   └── BitmapFont.cs
-│       └── UI/              # UI components
-│           ├── MenuBar.cs
-│           ├── TitleScreen.cs
-│           ├── ControlsWindow.cs
-│           ├── DebugMapWindow.cs
-│           ├── ScriptEditorWindow.cs
-│           ├── AssetViewerWindow.cs
-│           └── ScoreWindow.cs
+│   ├── YodaStoriesNG.Engine/    # Star Wars: Yoda Stories
+│   │   ├── Audio/               # Sound playback
+│   │   ├── Bot/                 # Automated mission bot
+│   │   │   ├── MissionBot.cs
+│   │   │   ├── BotActions.cs
+│   │   │   ├── MissionSolver.cs
+│   │   │   └── Pathfinder.cs
+│   │   ├── Data/                # Game data structures
+│   │   ├── Debug/               # Debug tools
+│   │   ├── Game/                # Core game logic
+│   │   │   ├── GameEngine.cs
+│   │   │   ├── GameState.cs
+│   │   │   ├── WorldGenerator.cs
+│   │   │   ├── MapGenerator.cs
+│   │   │   ├── ActionExecutor.cs
+│   │   │   ├── SaveGameManager.cs
+│   │   │   └── NPC.cs
+│   │   ├── Parsing/             # DTA file parser
+│   │   ├── Rendering/           # SDL2 renderer
+│   │   │   ├── GameRenderer.cs
+│   │   │   ├── TileRenderer.cs
+│   │   │   ├── Palette.cs       # Palette animation
+│   │   │   └── BitmapFont.cs
+│   │   └── UI/                  # UI components
+│   │       ├── MenuBar.cs
+│   │       ├── TitleScreen.cs
+│   │       ├── SaveGameEditor.cs
+│   │       ├── ControlsWindow.cs
+│   │       ├── DebugMapWindow.cs
+│   │       ├── ScriptEditorWindow.cs
+│   │       ├── AssetViewerWindow.cs
+│   │       └── ScoreWindow.cs
+│   │
+│   └── IndyNG.Engine/           # Indiana Jones Desktop Adventures
+│       ├── Data/                # Game data structures
+│       ├── Game/                # Game logic
+│       ├── Parsing/             # DAW file parser
+│       └── Rendering/           # Renderer with palette support
+│
+├── .gitlab-ci.yml               # CI/CD pipeline
 └── README.md
 ```
 
@@ -330,6 +343,24 @@ Zone behavior is driven by IACT scripts. All 30+ opcodes are fully implemented.
 - `EnableMonster`, `DisableMonster`, `EnableHotspot` - Entity control
 - `MarkAsSolved`, `WinGame`, `LoseGame` - Game flow
 - `SetCounter`, `RollDice`, `AddHealth` - Game variables
+
+## CI/CD Pipeline
+
+The project includes a GitLab CI pipeline (`.gitlab-ci.yml`) that:
+
+- **Builds** self-contained executables for all platforms from a single Windows runner
+- **Packages** each platform into distributable zip files
+- **Deploys** to a network share for release distribution
+
+### Build Artifacts
+
+| Platform | Runtime | Output |
+|----------|---------|--------|
+| Windows | `win-x64` | `YodaStoriesNG-windows-x64-{version}.zip` |
+| Linux | `linux-x64` | `YodaStoriesNG-linux-x64-{version}.zip` |
+| macOS | `osx-x64` | `YodaStoriesNG-macos-x64-{version}.zip` |
+
+Each zip contains self-contained single-file executables for both Yoda Stories and Indiana Jones engines.
 
 ## Contributing
 
