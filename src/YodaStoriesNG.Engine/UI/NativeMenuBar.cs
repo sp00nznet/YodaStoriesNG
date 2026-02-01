@@ -156,7 +156,7 @@ public unsafe class NativeMenuBar
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_ASSET_VIEWER, "Asset Viewer (F2)");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_SCRIPT_EDITOR, "Script Editor (F3)");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_MAP_VIEWER, "Map Viewer (F4)");
-        AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_SAVE_INSPECTOR, "Save Inspector (F8)");
+        AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_SAVE_INSPECTOR, "Save Editor (F8)");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_ZONE_EDITOR, "Zone Editor (F9)");
         AppendMenuW(debugMenu, MF_SEPARATOR, UIntPtr.Zero, "");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_ENABLE_BOT, "Enable Bot");

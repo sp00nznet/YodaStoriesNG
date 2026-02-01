@@ -5,9 +5,9 @@ using YodaStoriesNG.Engine.Rendering;
 namespace YodaStoriesNG.Engine.UI;
 
 /// <summary>
-/// Debug window for inspecting and editing saved game state.
+/// Debug window for editing saved game state.
 /// </summary>
-public unsafe class SaveGameInspector
+public unsafe class SaveGameEditor
 {
     private SDLWindow* _window;
     private SDLRenderer* _renderer;
@@ -50,14 +50,14 @@ public unsafe class SaveGameInspector
         if (_isOpen) return;
 
         _window = SDL.CreateWindow(
-            "Save Game Inspector",
+            "Save Game Editor",
             100, 100,
             WindowWidth, WindowHeight,
             (uint)(SDLWindowFlags.Shown | SDLWindowFlags.Resizable));
 
         if (_window == null)
         {
-            Console.WriteLine("Failed to create Save Game Inspector window");
+            Console.WriteLine("Failed to create Save Game Editor window");
             return;
         }
 
@@ -627,6 +627,18 @@ public unsafe class SaveGameInspector
                     idx);
             }
         }
+        // Add new item button
+        RenderEditableLine(ref y, x, lh, "  [+] Add Item", "(tile ID)",
+            () => "",
+            v => {
+                if (int.TryParse(v, out var val) && val > 0 && val < 65535)
+                {
+                    save.Inventory ??= new List<int>();
+                    save.Inventory.Add(val);
+                    _hasUnsavedChanges = true;
+                }
+            },
+            -100);  // Special index for add
         y += lh;
 
         RenderSection(ref y, lh, $"Weapons ({save.Weapons?.Count ?? 0})");
@@ -648,6 +660,18 @@ public unsafe class SaveGameInspector
                     idx + 1000);  // Offset to avoid collision with inventory indices
             }
         }
+        // Add new weapon button
+        RenderEditableLine(ref y, x, lh, "  [+] Add Weapon", "(tile ID)",
+            () => "",
+            v => {
+                if (int.TryParse(v, out var val) && val > 0 && val < 65535)
+                {
+                    save.Weapons ??= new List<int>();
+                    save.Weapons.Add(val);
+                    _hasUnsavedChanges = true;
+                }
+            },
+            -101);  // Special index for add weapon
 
         return y;
     }

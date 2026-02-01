@@ -27,7 +27,7 @@ public unsafe class GameEngine : IDisposable
     private DebugMapWindow? _debugMapWindow;
     private ScriptEditorWindow? _scriptViewer;
     private AssetViewerWindow? _assetViewer;
-    private SaveGameInspector? _saveInspector;
+    private SaveGameEditor? _saveInspector;
     private ZoneEditorWindow? _zoneEditor;
     private ControlsWindow? _controlsWindow;
     private AboutWindow? _aboutWindow;
@@ -660,7 +660,7 @@ public unsafe class GameEngine : IDisposable
         _scriptViewer.OnTeleportToZone += TeleportToZoneFromEditor;
         _scriptViewer.OnJumpToBot += JumpToBotZone;
         _assetViewer = new AssetViewerWindow(_gameData!);
-        _saveInspector = new SaveGameInspector();
+        _saveInspector = new SaveGameEditor();
         _zoneEditor = new ZoneEditorWindow(_state, _gameData!);
         _zoneEditor.OnTeleportToZone += TeleportToZoneFromEditor;
 
