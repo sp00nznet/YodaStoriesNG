@@ -611,10 +611,9 @@ public unsafe class GameEngine : IDisposable
         _state.SelectedWeapon = startingWeapon;
         InitializeWeaponAmmo(startingWeapon);
 
-        // Give player R2D2/Locator automatically at game start
-        // TODO: Implement proper R2D2 NPC spawning once we find the correct R2D2 sprite tile ID
-        _state.HasLocator = true;
-        _state.AddItem(WorldGenerator.TILE_LOCATOR);
+        // R2D2/Locator will be spawned in Dagobah zones and must be collected by the player
+        // Player starts without the locator
+        _state.HasLocator = false;
 
         // Generate the world with selected size
         _worldGenerator = new WorldGenerator(_gameData!);
@@ -892,8 +891,8 @@ public unsafe class GameEngine : IDisposable
         // Spawn Yoda if this is his zone
         SpawnYodaIfNeeded(zoneId);
 
-        // TODO: Spawn R2D2 properly once we find the correct sprite tile
-        // SpawnR2D2IfNeeded(zoneId);
+        // Spawn R2D2 in Dagobah zones (player must talk to R2 then walk over to collect)
+        SpawnR2D2IfNeeded(zoneId);
 
         // Check for X-Wing in this zone
         CheckForXWing(zoneId);
