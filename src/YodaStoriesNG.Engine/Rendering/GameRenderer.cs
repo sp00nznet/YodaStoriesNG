@@ -111,6 +111,52 @@ public unsafe class GameRenderer : IDisposable
     }
 
     /// <summary>
+    /// Gets the inventory slot index at the given screen position.
+    /// Returns null if not over an inventory slot.
+    /// </summary>
+    public int? GetInventorySlotAtPosition(int screenX, int screenY, int inventoryCount)
+    {
+        // Convert screen coordinates to logical coordinates
+        int logicalX = screenX * 2 / _currentScale;
+        int logicalY = screenY * 2 / _currentScale;
+
+        // Check if over sidebar
+        if (logicalX < GameAreaWidth) return null;
+
+        // Inventory grid layout (matches RenderHUD)
+        int hudX = GameAreaWidth;
+        int slotSize = 48;
+        int slotPadding = 2;
+        int gridStartX = hudX + 10;
+
+        // Calculate grid start Y (after health, weapon sections)
+        // Health: 15 + 18 + 45 = 78
+        // Weapon section: 18 + 32 + 15 = 65
+        // Inventory header: 16
+        int gridStartY = 78 + 65 + 16;
+
+        // Check if click is in grid area
+        int relX = logicalX - gridStartX;
+        int relY = logicalY - gridStartY;
+
+        if (relX < 0 || relY < 0) return null;
+
+        // Calculate which cell was clicked
+        int col = relX / (slotSize + slotPadding);
+        int row = relY / (slotSize + slotPadding);
+
+        if (col >= 4) return null;  // Only 4 columns
+
+        // Calculate slot index with scroll offset
+        int slotIndex = (row * 4 + col) + _inventoryScrollOffset;
+
+        if (slotIndex >= 0 && slotIndex < inventoryCount)
+            return slotIndex;
+
+        return null;
+    }
+
+    /// <summary>
     /// Sets the window scale (1x, 2x or 4x).
     /// </summary>
     public void SetWindowScale(int scale)

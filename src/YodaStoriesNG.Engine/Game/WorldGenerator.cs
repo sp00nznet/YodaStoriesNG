@@ -41,7 +41,7 @@ public class WorldGenerator
 
     // Special item tile IDs (from original game)
     public const int TILE_THE_FORCE = 511;      // The Force - guaranteed weapon
-    public const int TILE_LOCATOR = 512;        // Locator/Map item
+    public const int TILE_LOCATOR = 794;        // R2-D2 / Locator item (tile 794 is the actual R2D2 in zones)
     public const int TILE_LIGHTSABER = 510;     // Lightsaber
 
     // The generated world

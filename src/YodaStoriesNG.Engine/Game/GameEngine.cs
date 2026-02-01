@@ -891,8 +891,7 @@ public unsafe class GameEngine : IDisposable
         // Spawn Yoda if this is his zone
         SpawnYodaIfNeeded(zoneId);
 
-        // Spawn R2D2 in Dagobah zones (player must talk to R2 then walk over to collect)
-        SpawnR2D2IfNeeded(zoneId);
+        // R2D2 exists as tile 794 in the zone - no need to spawn, just detect when player steps on it
 
         // Check for X-Wing in this zone
         CheckForXWing(zoneId);
@@ -1096,6 +1095,10 @@ public unsafe class GameEngine : IDisposable
                             _renderer.ScrollInventoryDown(_state.Inventory.Count);
                     }
                     break;
+
+                case SDLEventType.Mousebuttondown:
+                    HandleMouseClick(evt.Button.X, evt.Button.Y, evt.Button.Button);
+                    break;
             }
         }
 
@@ -1215,6 +1218,32 @@ public unsafe class GameEngine : IDisposable
             // Movement rate based on stick magnitude
             var magnitude = Math.Max(Math.Abs(leftX), Math.Abs(leftY));
             _controllerMoveTimer = 0.15 - (magnitude / 32768.0) * 0.1;  // 0.05 to 0.15 seconds
+        }
+    }
+
+    private void HandleMouseClick(int x, int y, byte button)
+    {
+        // Only handle left click (button 1)
+        if (button != 1) return;
+
+        // Check if click is on inventory (in sidebar)
+        if (_renderer != null && _renderer.IsPointOverSidebar(x, y))
+        {
+            // Check if clicking on an inventory slot
+            int? clickedSlot = _renderer.GetInventorySlotAtPosition(x, y, _state.Inventory.Count);
+            if (clickedSlot.HasValue && clickedSlot.Value < _state.Inventory.Count)
+            {
+                var itemId = _state.Inventory[clickedSlot.Value];
+
+                // Select the item
+                _state.SelectedItem = itemId;
+
+                // If it's R2D2/Locator, use it immediately
+                if (IsLocatorTile(itemId) && _state.HasLocator)
+                {
+                    ShowLocatorHint();
+                }
+            }
         }
     }
 
@@ -1717,6 +1746,28 @@ public unsafe class GameEngine : IDisposable
                     _messages.ShowPickup(itemName);
                     _sounds?.PlaySound(SoundManager.SoundPickup);
                     Console.WriteLine($"Auto-picked up tile item {objTile} ({itemName}) at ({newX},{newY})");
+                }
+            }
+
+            // Special case: R2D2 (tile 794) - collect when stepped on
+            if (objTile == WorldGenerator.TILE_LOCATOR && !_state.HasLocator)
+            {
+                var key = $"{_state.CurrentZoneId}_{newX}_{newY}_r2d2";
+                if (!_state.CollectedObjects.Contains(key))
+                {
+                    // Collect R2D2
+                    _state.AddItem(WorldGenerator.TILE_LOCATOR);
+                    _state.HasLocator = true;
+                    _state.CollectedObjects.Add(key);
+
+                    // Remove from map
+                    _state.CurrentZone.SetTile(newX, newY, 1, 0xFFFF);
+
+                    _messages.ShowDialogue("R2-D2", "*happy beeps* I'm ready to help with your mission!");
+                    _messages.ShowPickup("R2-D2 (Locator)");
+                    _messages.ShowMessage("Use R2-D2 from your inventory for hints!", MessageType.Info);
+                    _sounds?.PlaySound(SoundManager.SoundPickup);
+                    Console.WriteLine($"Collected R2D2 tile at ({newX},{newY})");
                 }
             }
         }
@@ -2529,9 +2580,7 @@ public unsafe class GameEngine : IDisposable
             {
                 // Hostile NPCs can't be talked to - let the attack handle them
                 if (npc.IsHostile)
-                {
                     return false;  // Fall through to attack
-                }
 
                 // Get NPC name
                 string npcName;
@@ -3191,12 +3240,10 @@ public unsafe class GameEngine : IDisposable
     {
         // Don't spawn if player already has the locator
         if (_state.HasLocator)
-        {
-            Console.WriteLine($"  R2D2: Player already has locator, not spawning");
             return;
-        }
 
-        if (_worldGenerator?.CurrentWorld == null) return;
+        if (_worldGenerator?.CurrentWorld == null)
+            return;
 
         // Only spawn R2D2 in Dagobah zones
         if (!_worldGenerator.CurrentWorld.DagobahZones.Contains(zoneId))
@@ -3225,10 +3272,11 @@ public unsafe class GameEngine : IDisposable
 
         Console.WriteLine($"  *** SPAWNING R2D2 at ({finalX}, {finalY}) in Dagobah zone {zoneId} ***");
 
-        // Create R2D2 as a friendly NPC using the locator tile ID for rendering
+        // Create R2D2 as a friendly NPC - Character 61 is "R2Unit"
+        const int R2D2_CHARACTER_ID = 61;
         var r2d2 = new NPC
         {
-            CharacterId = WorldGenerator.TILE_LOCATOR, // Uses tile 512 for rendering
+            CharacterId = R2D2_CHARACTER_ID, // Character 61 = R2Unit
             X = finalX,
             Y = finalY,
             StartX = finalX,
@@ -4102,6 +4150,10 @@ public unsafe class GameEngine : IDisposable
     /// </summary>
     private bool IsLocatorTile(int tileId)
     {
+        // Direct check for R2D2 tile (794)
+        if (tileId == WorldGenerator.TILE_LOCATOR)
+            return true;
+
         // Check by tile name
         var name = GetTileName(tileId);
         if (name != null)
@@ -4125,7 +4177,12 @@ public unsafe class GameEngine : IDisposable
     /// </summary>
     private bool IsR2D2Character(int characterId)
     {
-        // R2D2 uses the locator tile ID directly
+        // Character 61 is "R2Unit" - the R2D2 character
+        const int R2D2_CHARACTER_ID = 61;
+        if (characterId == R2D2_CHARACTER_ID)
+            return true;
+
+        // Legacy: also check tile 512 (TILE_LOCATOR) for backwards compatibility
         if (characterId == WorldGenerator.TILE_LOCATOR)
             return true;
 

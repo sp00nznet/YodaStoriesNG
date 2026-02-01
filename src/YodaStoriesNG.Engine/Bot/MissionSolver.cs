@@ -654,7 +654,12 @@ public class MissionSolver
     /// </summary>
     private bool IsR2D2Character(int characterId)
     {
-        // R2D2 uses the locator tile ID directly
+        // Character 61 is "R2Unit" - the R2D2 character
+        const int R2D2_CHARACTER_ID = 61;
+        if (characterId == R2D2_CHARACTER_ID)
+            return true;
+
+        // Legacy: also check tile 512 (TILE_LOCATOR) for backwards compatibility
         if (characterId == WorldGenerator.TILE_LOCATOR)
             return true;
 
