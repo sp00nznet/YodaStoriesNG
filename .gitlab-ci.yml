@@ -16,6 +16,8 @@ build:windows:
   tags:
     - win10
     - shell
+  before_script:
+    - $env:PATH = "C:\Program Files\dotnet;$env:PATH"
   script:
     - dotnet restore
     - dotnet publish $env:PROJECT_YODA -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/windows/YodaStoriesNG
@@ -91,6 +93,8 @@ deploy:windows:
     - shell
   needs:
     - package
+  before_script:
+    - $env:PATH = "C:\Program Files\dotnet;$env:PATH"
   script:
     - $mountPath = "Z:"
     - if (!(Test-Path $mountPath)) { net use $mountPath "\\$env:NFS_SERVER\pool\releases\YodaStoriesNG" }
