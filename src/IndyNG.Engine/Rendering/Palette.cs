@@ -9,15 +9,15 @@ public static class Palette
 {
     /// <summary>
     /// Animation cycle definition: start index, length, is fast (true) or slow (false)
-    /// Indiana Jones uses different animation ranges than Yoda Stories.
+    /// Indiana Jones color cycles from webfun reference documentation.
     /// </summary>
     private static readonly (int start, int length, bool fast)[] AnimationCycles = new[]
     {
-        (0x0A, 6, true),   // Water/blue effects
-        (0xE0, 5, true),   // Water
-        (0xE5, 9, true),   // More water
-        (0xEE, 6, false),  // Lava
-        (0xF4, 2, false),
+        (0xA0, 8, true),   // Fire/red effects (fast)
+        (0xE0, 5, true),   // Water (fast)
+        (0xE5, 9, true),   // More water (fast)
+        (0xEE, 6, false),  // Lava (slow)
+        (0xF4, 2, false),  // Additional effects (slow)
     };
 
     // Animation state
