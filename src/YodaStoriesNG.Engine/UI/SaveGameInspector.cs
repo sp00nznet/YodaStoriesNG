@@ -568,29 +568,33 @@ public unsafe class SaveGameInspector
         return y;
     }
 
-    private void RenderEditableLine(ref int y, int x, int lh, string name, string value, Func<string> getter, Action<string> setter)
+    private void RenderEditableLine(ref int y, int x, int lh, string name, string value, Func<string> getter, Action<string> setter, int fieldIndex = -1)
     {
-        bool isCurrentEdit = _isEditing && _editField == name && _editFieldIndex == -1;
+        bool isCurrentEdit = _isEditing && _editField == name && _editFieldIndex == fieldIndex;
 
         // Register as editable field
-        _currentFields.Add(new EditableField(name, y, -1, getter, setter));
+        _currentFields.Add(new EditableField(name, y, fieldIndex, getter, setter));
+
+        // Calculate label width for proper value positioning
+        int labelWidth = Math.Min(130, _font!.GetTextWidth(name + ":"));
+        int valueX = x + labelWidth + 5;
 
         if (isCurrentEdit)
         {
             // Render edit box
             SDL.SetRenderDrawColor(_renderer, 50, 60, 70, 255);
-            var editBox = new SDLRect { X = x + 100, Y = y - 2, W = 200, H = lh + 2 };
+            var editBox = new SDLRect { X = valueX - 2, Y = y - 2, W = 150, H = lh + 2 };
             SDL.RenderFillRect(_renderer, &editBox);
             SDL.SetRenderDrawColor(_renderer, 100, 150, 200, 255);
             SDL.RenderDrawRect(_renderer, &editBox);
 
-            _font!.RenderText(_renderer, $"{name}:", x, y, 1, 100, 180, 255, 255);
-            _font.RenderText(_renderer, _editBuffer, x + 105, y, 1, 255, 255, 255, 255);
+            _font.RenderText(_renderer, $"{name}:", x, y, 1, 100, 180, 255, 255);
+            _font.RenderText(_renderer, _editBuffer, valueX, y, 1, 255, 255, 255, 255);
 
             // Cursor
             if ((DateTime.Now.Millisecond / 500) % 2 == 0)
             {
-                int cursorX = x + 105 + (_font.GetTextWidth(_editBuffer.Substring(0, _editCursorPos)));
+                int cursorX = valueX + (_font.GetTextWidth(_editBuffer.Substring(0, _editCursorPos)));
                 SDL.SetRenderDrawColor(_renderer, 255, 255, 255, 255);
                 var cursor = new SDLRect { X = cursorX, Y = y, W = 1, H = 12 };
                 SDL.RenderFillRect(_renderer, &cursor);
@@ -599,8 +603,8 @@ public unsafe class SaveGameInspector
         else
         {
             // Render as clickable field
-            _font!.RenderText(_renderer, $"{name}:", x, y, 1, 100, 180, 255, 255);
-            _font.RenderText(_renderer, value, x + 105, y, 1, 255, 220, 100, 255);  // Yellow = editable
+            _font.RenderText(_renderer, $"{name}:", x, y, 1, 100, 180, 255, 255);
+            _font.RenderText(_renderer, value, valueX, y, 1, 255, 220, 100, 255);  // Yellow = editable
         }
         y += lh;
     }
@@ -608,14 +612,19 @@ public unsafe class SaveGameInspector
     private int RenderInventoryTab(int x, int y, int lh)
     {
         var save = _loadedSave!;
+        _currentFields.Clear();
 
-        RenderSection(ref y, lh, $"Inventory ({save.Inventory?.Count ?? 0} items)");
+        RenderSection(ref y, lh, $"Inventory ({save.Inventory?.Count ?? 0} items) - Click to edit");
         if (save.Inventory != null)
         {
             for (int i = 0; i < save.Inventory.Count; i++)
             {
-                string marker = save.SelectedItem == save.Inventory[i] ? " [SELECTED]" : "";
-                RenderLine(ref y, x, lh, $"  [{i}] Tile #{save.Inventory[i]}{marker}");
+                string marker = save.SelectedItem == save.Inventory[i] ? " [SEL]" : "";
+                int idx = i;
+                RenderEditableLine(ref y, x, lh, $"  Item[{i}]{marker}", save.Inventory[i].ToString(),
+                    () => save.Inventory[idx].ToString(),
+                    v => { if (int.TryParse(v, out var val)) save.Inventory[idx] = val; },
+                    idx);
             }
         }
         y += lh;
@@ -625,14 +634,18 @@ public unsafe class SaveGameInspector
         {
             for (int i = 0; i < save.Weapons.Count; i++)
             {
-                string marker = i == save.CurrentWeaponIndex ? " [EQUIPPED]" : "";
+                string marker = i == save.CurrentWeaponIndex ? " [EQ]" : "";
                 int weaponId = save.Weapons[i];
                 string ammoStr = "";
                 if (save.WeaponAmmo != null && save.WeaponAmmo.TryGetValue(weaponId, out var ammo))
                 {
-                    ammoStr = $" ({ammo.CurrentAmmo}/{ammo.MaxAmmo})";
+                    ammoStr = $" ammo:{ammo.CurrentAmmo}/{ammo.MaxAmmo}";
                 }
-                RenderLine(ref y, x, lh, $"  [{i}] Tile #{weaponId}{ammoStr}{marker}");
+                int idx = i;
+                RenderEditableLine(ref y, x, lh, $"  Wpn[{i}]{marker}", $"{weaponId}{ammoStr}",
+                    () => save.Weapons[idx].ToString(),
+                    v => { if (int.TryParse(v, out var val)) save.Weapons[idx] = val; },
+                    idx + 1000);  // Offset to avoid collision with inventory indices
             }
         }
 
@@ -730,13 +743,20 @@ public unsafe class SaveGameInspector
     private int RenderVariablesTab(int x, int y, int lh)
     {
         var save = _loadedSave!;
+        _currentFields.Clear();
 
         RenderSection(ref y, lh, $"Game Variables ({save.Variables?.Count ?? 0})");
         if (save.Variables != null && save.Variables.Count > 0)
         {
             foreach (var kvp in save.Variables.OrderBy(k => k.Key))
             {
-                RenderLine(ref y, x, lh, $"  Var[{kvp.Key}] = {kvp.Value}");
+                string name = GetVariableName(kvp.Key);
+                string displayName = name != null ? $"{name} [{kvp.Key}]" : $"Var[{kvp.Key}]";
+                int varId = kvp.Key;
+                RenderEditableLine(ref y, x, lh, displayName, kvp.Value.ToString(),
+                    () => save.Variables.TryGetValue(varId, out var v) ? v.ToString() : "0",
+                    v => { if (int.TryParse(v, out var val)) save.Variables[varId] = val; },
+                    varId);
             }
         }
         else
@@ -750,7 +770,11 @@ public unsafe class SaveGameInspector
         {
             foreach (var kvp in save.Counters.OrderBy(k => k.Key))
             {
-                RenderLine(ref y, x, lh, $"  Counter[{kvp.Key}] = {kvp.Value}");
+                int cntId = kvp.Key;
+                RenderEditableLine(ref y, x, lh, $"Counter[{kvp.Key}]", kvp.Value.ToString(),
+                    () => save.Counters.TryGetValue(cntId, out var v) ? v.ToString() : "0",
+                    v => { if (int.TryParse(v, out var val)) save.Counters[cntId] = val; },
+                    cntId + 10000);
             }
         }
         else
@@ -759,6 +783,23 @@ public unsafe class SaveGameInspector
         }
 
         return y;
+    }
+
+    private static string? GetVariableName(int varId)
+    {
+        // Known Yoda Stories variables
+        return varId switch
+        {
+            1 => "NPC_X",
+            2 => "NPC_Y",
+            3 => "NPC_CharId",
+            998 => "OnDagobah",
+            999 => "XWingAvail",
+            _ when varId >= 1000 && varId < 2000 => $"ZoneInit[{varId - 1000}]",
+            _ when varId >= 2000 && varId < 3000 => $"ZoneSolved[{varId - 2000}]",
+            _ when varId >= 3000 => $"Script[{varId - 3000}]",
+            _ => null
+        };
     }
 
     private void RenderSection(ref int y, int lh, string title)

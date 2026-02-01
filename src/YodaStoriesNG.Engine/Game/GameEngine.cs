@@ -611,6 +611,10 @@ public unsafe class GameEngine : IDisposable
         _state.SelectedWeapon = startingWeapon;
         InitializeWeaponAmmo(startingWeapon);
 
+        // Give player R2D2/Locator automatically (original game does this at start)
+        // R2D2 is not placed as a zone object in Dagobah - it's given at game start
+        _state.HasLocator = true;
+
         // Generate the world with selected size
         _worldGenerator = new WorldGenerator(_gameData!);
         _worldGenerator.DumpDagobahInfo();  // Debug: print Dagobah zone analysis
@@ -665,9 +669,9 @@ public unsafe class GameEngine : IDisposable
         {
             _bot = new MissionBot(_state, _gameData!, _worldGenerator);
             _bot.OnActionRequested += HandleBotAction;
-            // Auto-start bot for debugging zone transitions
-            _bot.Start();
-            _messages.ShowMessage("Bot AUTO-STARTED - Press B to disable", MessageType.System);
+            // Don't auto-start - let user enable with B key
+            // _bot.Start();
+            // _messages.ShowMessage("Bot AUTO-STARTED - Press B to disable", MessageType.System);
         }
     }
 
