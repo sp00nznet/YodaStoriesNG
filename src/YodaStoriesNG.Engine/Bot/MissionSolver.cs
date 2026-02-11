@@ -768,7 +768,7 @@ public class MissionSolver
                             X = obj.X,
                             Y = obj.Y,
                             IsEnabled = true,
-                            Health = 100 // IsAlive is computed from Health > 0
+                            Health = 256 // IsAlive is computed from Health > 0
                         };
                         return (dagobahZoneId, npc);
                     }

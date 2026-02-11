@@ -8,7 +8,9 @@ public enum NPCBehavior
     Stationary,  // Doesn't move
     Wandering,   // Moves randomly
     Chasing,     // Chases the player (enemy)
-    Fleeing      // Runs away from player
+    Fleeing,     // Runs away from player
+    Patrol,      // Follow waypoints in a cycle
+    Animation    // Cycle animation frames without moving
 }
 
 /// <summary>
@@ -22,8 +24,8 @@ public class NPC
     public int StartX { get; set; }  // Original spawn position
     public int StartY { get; set; }
     public Direction Direction { get; set; } = Direction.Down;
-    public int Health { get; set; } = 100;
-    public int MaxHealth { get; set; } = 100;
+    public int Health { get; set; } = 256;
+    public int MaxHealth { get; set; } = 256;
     public bool IsAlive => Health > 0;
     public bool IsEnabled { get; set; } = true;
     public bool IsHostile { get; set; } = false;
@@ -41,9 +43,24 @@ public class NPC
     public double MoveCooldown { get; set; } = 0.5;  // Time between moves
     public double AttackCooldown { get; set; } = 1.0;  // Time between attacks
 
+    // Stun (from The Force weapon)
+    public int StunTimer { get; set; }
+
     // Combat
     public int Damage { get; set; } = 10;
     public int AttackRange { get; set; } = 1;
+
+    // Ranged attack (from CHWP weapon data)
+    public bool HasRangedAttack { get; set; }
+    public int WeaponTileId { get; set; }  // Projectile visual tile from CHWP Reference
+
+    // Loot (from IZAX data)
+    public bool DropsLoot { get; set; }
+    public int LootItemId { get; set; } = -1;  // -1 means use zone's DropQuestItem hotspot
+
+    // Patrol waypoints (from IZAX entity Data field)
+    public (int X, int Y)[] Waypoints { get; set; } = Array.Empty<(int, int)>();
+    public int CurrentWaypoint { get; set; }
 
     // Item handoff (from IZAX data)
     public int? CarriedItemId { get; set; }  // Item this NPC will give when interacted with
@@ -66,8 +83,8 @@ public class NPC
             StartX = obj.X,
             StartY = obj.Y,
             Direction = Direction.Down,
-            Health = 100,
-            MaxHealth = 100,
+            Health = 256,
+            MaxHealth = 256,
             IsEnabled = true,
             Behavior = NPCBehavior.Wandering
         };

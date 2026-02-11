@@ -14,6 +14,7 @@ public class Projectile
     public bool IsActive { get; set; } = true;
     public int TileId { get; set; }  // Visual representation
     public ProjectileType Type { get; set; } = ProjectileType.Blaster;
+    public bool IsEnemyProjectile { get; set; }  // True = fired by NPC, damages hero
 
     /// <summary>
     /// Updates the projectile position.

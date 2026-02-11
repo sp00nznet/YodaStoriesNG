@@ -129,15 +129,17 @@ public unsafe class GameRenderer : IDisposable
         int slotPadding = 2;
         int gridStartX = hudX + 10;
 
-        // Calculate grid start Y (after health, weapon sections)
-        // Health: 15 + 18 + 45 = 78
-        // Weapon section: 18 + 32 + 15 = 65
+        // Calculate grid start Y (must match RenderHUD layout exactly)
+        // Health section: 15 (start) + 18 (label) + 45 (bar) = 78
+        // Weapon section: 18 (label) + 64 (slot: 32*2) + 15 (spacing) = 97
         // Inventory header: 16
-        int gridStartY = 78 + 65 + 16;
+        int gridStartY = 78 + 97 + 16;  // = 191
 
         // Check if click is in grid area
         int relX = logicalX - gridStartX;
         int relY = logicalY - gridStartY;
+
+        Console.WriteLine($"GetInventorySlotAtPosition: screen=({screenX},{screenY}), logical=({logicalX},{logicalY}), scale={_currentScale}, grid=({gridStartX},{gridStartY}), rel=({relX},{relY})");
 
         if (relX < 0 || relY < 0) return null;
 
@@ -150,10 +152,57 @@ public unsafe class GameRenderer : IDisposable
         // Calculate slot index with scroll offset
         int slotIndex = (row * 4 + col) + _inventoryScrollOffset;
 
+        Console.WriteLine($"  -> col={col}, row={row}, slotIndex={slotIndex}, inventoryCount={inventoryCount}");
+
         if (slotIndex >= 0 && slotIndex < inventoryCount)
             return slotIndex;
 
         return null;
+    }
+
+    /// <summary>
+    /// Checks if the given screen position is over the weapon slot.
+    /// </summary>
+    public bool IsPointOverWeaponSlot(int screenX, int screenY)
+    {
+        // Convert screen coordinates to logical coordinates
+        int logicalX = screenX * 2 / _currentScale;
+        int logicalY = screenY * 2 / _currentScale;
+
+        // Check if over sidebar
+        if (logicalX < GameAreaWidth) return false;
+
+        // Weapon slot layout (matches RenderHUD)
+        int hudX = GameAreaWidth;
+        int weaponSlotX = hudX + 10;
+        int weaponSlotY = 15 + 18 + 45 + 18;  // After health section + "WEAPON" label
+        int weaponSlotSize = Tile.Width * Scale;  // 32 * 2 = 64
+
+        // Check if click is within weapon slot bounds
+        return logicalX >= weaponSlotX && logicalX < weaponSlotX + weaponSlotSize &&
+               logicalY >= weaponSlotY && logicalY < weaponSlotY + weaponSlotSize;
+    }
+
+    /// <summary>
+    /// Renders a dragged item at the current mouse position.
+    /// </summary>
+    public void RenderDraggedItem(int tileId, int screenX, int screenY)
+    {
+        if (_tileAtlas == null || tileId < 0 || tileId >= _gameData.Tiles.Count)
+            return;
+
+        // Convert screen coordinates to logical coordinates
+        int logicalX = screenX * 2 / _currentScale;
+        int logicalY = screenY * 2 / _currentScale;
+
+        // Center the tile on the cursor
+        int drawX = logicalX - Tile.Width / 2;
+        int drawY = logicalY - Tile.Height / 2;
+
+        // Render with slight transparency
+        SDL.SetTextureAlphaMod(_tileAtlas, 180);
+        RenderTile(tileId, drawX, drawY);
+        SDL.SetTextureAlphaMod(_tileAtlas, 255);
     }
 
     /// <summary>
@@ -496,24 +545,61 @@ public unsafe class GameRenderer : IDisposable
         var borderRect = new SDLRect { X = hudX, Y = 0, W = 2, H = WindowHeight };
         SDL.RenderFillRect(_renderer, &borderRect);
 
-        // === HEALTH SECTION ===
+        // === HEALTH SECTION (3-life gauge: green -> yellow -> red -> black) ===
         var sectionY = 15;
-        _font.RenderText(_renderer, "HEALTH", hudX + 10, sectionY, 1, 200, 200, 200, 255);
+        int lives = (health + 255) / 256;  // 1-3 lives
+        string livesLabel = lives > 1 ? $"HEALTH ({lives} lives)" : "HEALTH";
+        _font.RenderText(_renderer, livesLabel, hudX + 10, sectionY, 1, 200, 200, 200, 255);
         sectionY += 18;
 
-        // Health bar background
-        SDL.SetRenderDrawColor(_renderer, 60, 20, 20, 255);
-        var healthBg = new SDLRect { X = hudX + 10, Y = sectionY, W = SidebarWidth - 20, H = 24 };
+        // Health bar background (black = dead)
+        SDL.SetRenderDrawColor(_renderer, 20, 20, 20, 255);
+        int barWidth = SidebarWidth - 20;
+        var healthBg = new SDLRect { X = hudX + 10, Y = sectionY, W = barWidth, H = 24 };
         SDL.RenderFillRect(_renderer, &healthBg);
 
-        // Health bar fill
-        var healthWidth = (int)((float)health / maxHealth * (SidebarWidth - 20));
-        SDL.SetRenderDrawColor(_renderer, 180, 40, 40, 255);
-        var healthRect = new SDLRect { X = hudX + 10, Y = sectionY, W = healthWidth, H = 24 };
-        SDL.RenderFillRect(_renderer, &healthRect);
+        // Draw 3-segment color gradient gauge
+        // Each segment = 256 HP. Segment 3 = green, Segment 2 = yellow, Segment 1 = red
+        if (health > 0)
+        {
+            float ratio = (float)health / maxHealth;
+            int fillWidth = (int)(ratio * barWidth);
+
+            // Determine color based on which life segment we're in
+            byte hR, hG, hB;
+            if (health > 512)
+            {
+                // Life 3: Green
+                hR = 40; hG = 200; hB = 40;
+            }
+            else if (health > 256)
+            {
+                // Life 2: Yellow
+                hR = 220; hG = 200; hB = 40;
+            }
+            else
+            {
+                // Life 1: Red
+                hR = 200; hG = 40; hB = 40;
+            }
+
+            SDL.SetRenderDrawColor(_renderer, hR, hG, hB, 255);
+            var healthRect = new SDLRect { X = hudX + 10, Y = sectionY, W = fillWidth, H = 24 };
+            SDL.RenderFillRect(_renderer, &healthRect);
+
+            // Draw segment dividers at 1/3 and 2/3
+            SDL.SetRenderDrawColor(_renderer, 0, 0, 0, 150);
+            SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
+            int seg1X = hudX + 10 + barWidth / 3;
+            int seg2X = hudX + 10 + barWidth * 2 / 3;
+            var div1 = new SDLRect { X = seg1X, Y = sectionY, W = 2, H = 24 };
+            var div2 = new SDLRect { X = seg2X, Y = sectionY, W = 2, H = 24 };
+            SDL.RenderFillRect(_renderer, &div1);
+            SDL.RenderFillRect(_renderer, &div2);
+        }
 
         // Health bar border
-        SDL.SetRenderDrawColor(_renderer, 200, 100, 100, 255);
+        SDL.SetRenderDrawColor(_renderer, 100, 100, 100, 255);
         SDL.RenderDrawRect(_renderer, &healthBg);
 
         // Health text centered

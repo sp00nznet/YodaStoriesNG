@@ -52,6 +52,13 @@ public unsafe class GameEngine : IDisposable
     private const double AnimationFrameTime = 0.15; // 150ms per animation frame
     private double _controllerMoveTimer = 0;  // Rate limit controller movement
 
+    // Drag and drop state
+    private bool _isDragging = false;
+    private int? _draggedItemId = null;
+    private int? _draggedFromSlot = null;  // Inventory slot index, or -1 for weapon slot
+    private int _dragStartX, _dragStartY;
+    private int _dragCurrentX, _dragCurrentY;
+
     /// <summary>
     /// Whether the bot is currently running.
     /// </summary>
@@ -108,13 +115,14 @@ public unsafe class GameEngine : IDisposable
     /// </summary>
     private (int maxAmmo, int damage, bool isSingleUse) GetWeaponConfig(int tileId)
     {
-        // Check if it's The Force - unlimited ammo
+        // Damage values scaled for 768 HP system (3 lives x 256 HP)
+        // Check if it's The Force - unlimited ammo, stun duration
         if (tileId == TILE_THE_FORCE)
-            return (-1, 75, false);  // -1 = unlimited
+            return (-1, 10, false);  // -1 = unlimited, damage = stun duration in ticks
 
         // Lightsabers - melee, no ammo
         if (tileId == TILE_BASIC_LIGHTSABER || tileId == TILE_UPGRADED_LIGHTSABER)
-            return (-1, 50, false);
+            return (-1, 200, false);
 
         // Check tile flags for weapon type
         if (tileId < _gameData!.Tiles.Count)
@@ -124,11 +132,11 @@ public unsafe class GameEngine : IDisposable
 
             // Heavy blaster - more damage, less ammo
             if ((flags & TileFlags.WeaponHeavyBlaster) != 0)
-                return (15, 75, false);
+                return (15, 300, false);
 
             // Light blaster - standard
             if ((flags & TileFlags.WeaponLightBlaster) != 0)
-                return (30, 50, false);
+                return (30, 200, false);
 
             // Generic weapon flag (pistols, etc)
             if ((flags & TileFlags.Weapon) != 0)
@@ -136,15 +144,15 @@ public unsafe class GameEngine : IDisposable
                 // Check for grenade-like items (single use)
                 var name = GetTileName(tileId).ToLower();
                 if (name.Contains("grenade") || name.Contains("bomb") || name.Contains("thermal"))
-                    return (1, 100, true);  // Single use, high damage
+                    return (1, 400, true);  // Single use, high damage
 
                 // Default ranged weapon
-                return (20, 50, false);
+                return (20, 200, false);
             }
         }
 
         // Default for unknown weapons
-        return (20, 50, false);
+        return (20, 200, false);
     }
 
 
@@ -620,6 +628,13 @@ public unsafe class GameEngine : IDisposable
         _worldGenerator.DumpDagobahInfo();  // Debug: print Dagobah zone analysis
         var world = _worldGenerator.GenerateWorld(_selectedWorldSize);
         Console.WriteLine($"Generated {_selectedWorldSize} world ({world.GridWidth}x{world.GridHeight} grid)");
+
+        // Wire up world data to action executor for puzzle conditions
+        if (_actionExecutor != null)
+        {
+            _actionExecutor.CurrentWorld = world;
+            _actionExecutor.CurrentMission = _worldGenerator.CurrentMission;
+        }
 
         // Welcome message - minimal startup hints (mission given by Yoda)
         _messages.ShowMessage("Find Yoda to receive your mission.", MessageType.System);
@@ -1097,7 +1112,15 @@ public unsafe class GameEngine : IDisposable
                     break;
 
                 case SDLEventType.Mousebuttondown:
-                    HandleMouseClick(evt.Button.X, evt.Button.Y, evt.Button.Button);
+                    HandleMouseDown(evt.Button.X, evt.Button.Y, evt.Button.Button);
+                    break;
+
+                case SDLEventType.Mousebuttonup:
+                    HandleMouseUp(evt.Button.X, evt.Button.Y, evt.Button.Button);
+                    break;
+
+                case SDLEventType.Mousemotion:
+                    HandleMouseMove(evt.Motion.X, evt.Motion.Y);
                     break;
             }
         }
@@ -1221,30 +1244,181 @@ public unsafe class GameEngine : IDisposable
         }
     }
 
-    private void HandleMouseClick(int x, int y, byte button)
+    private void HandleMouseDown(int x, int y, byte button)
     {
         // Only handle left click (button 1)
         if (button != 1) return;
 
+        if (_renderer == null) return;
+
+        // Check if click is on weapon slot
+        if (_renderer.IsPointOverWeaponSlot(x, y) && _state.SelectedWeapon.HasValue)
+        {
+            // Start dragging the equipped weapon
+            _isDragging = true;
+            _draggedItemId = _state.SelectedWeapon.Value;
+            _draggedFromSlot = -1;  // -1 indicates weapon slot
+            _dragStartX = x;
+            _dragStartY = y;
+            _dragCurrentX = x;
+            _dragCurrentY = y;
+            return;
+        }
+
         // Check if click is on inventory (in sidebar)
-        if (_renderer != null && _renderer.IsPointOverSidebar(x, y))
+        if (_renderer.IsPointOverSidebar(x, y))
         {
             // Check if clicking on an inventory slot
             int? clickedSlot = _renderer.GetInventorySlotAtPosition(x, y, _state.Inventory.Count);
+            Console.WriteLine($"MouseDown on sidebar: x={x}, y={y}, inventoryCount={_state.Inventory.Count}, clickedSlot={clickedSlot}");
             if (clickedSlot.HasValue && clickedSlot.Value < _state.Inventory.Count)
             {
                 var itemId = _state.Inventory[clickedSlot.Value];
 
-                // Select the item
-                _state.SelectedItem = itemId;
+                // Start dragging this item
+                _isDragging = true;
+                _draggedItemId = itemId;
+                _draggedFromSlot = clickedSlot.Value;
+                _dragStartX = x;
+                _dragStartY = y;
+                _dragCurrentX = x;
+                _dragCurrentY = y;
 
-                // If it's R2D2/Locator, use it immediately
-                if (IsLocatorTile(itemId) && _state.HasLocator)
+                // Also select the item
+                _state.SelectedItem = itemId;
+            }
+        }
+    }
+
+    private void HandleMouseUp(int x, int y, byte button)
+    {
+        // Only handle left click (button 1)
+        if (button != 1) return;
+
+        if (_isDragging && _draggedItemId.HasValue && _renderer != null)
+        {
+            int dragDist = Math.Abs(x - _dragStartX) + Math.Abs(y - _dragStartY);
+            bool wasActualDrag = dragDist >= 10;
+
+            // Check if dropped on weapon slot
+            if (_renderer.IsPointOverWeaponSlot(x, y))
+            {
+                if (wasActualDrag && IsWeaponTile(_draggedItemId.Value))
                 {
-                    ShowLocatorHint();
+                    // Dragging from inventory to weapon slot
+                    if (_draggedFromSlot.HasValue && _draggedFromSlot.Value >= 0)
+                    {
+                        // Swap: put currently equipped weapon in the inventory slot
+                        if (_state.SelectedWeapon.HasValue)
+                        {
+                            _state.Inventory[_draggedFromSlot.Value] = _state.SelectedWeapon.Value;
+                        }
+                        else
+                        {
+                            // No weapon equipped, just remove from inventory
+                            _state.Inventory.RemoveAt(_draggedFromSlot.Value);
+                        }
+                    }
+                    // Equip the new weapon
+                    _state.SelectedWeapon = _draggedItemId.Value;
+                    _messages.ShowMessage("Equipped weapon", MessageType.Info);
+                    _sounds?.PlaySound(SoundManager.SoundPickup);
+                }
+            }
+            // Check if dropped on inventory
+            else if (_renderer.IsPointOverSidebar(x, y))
+            {
+                int? targetSlot = _renderer.GetInventorySlotAtPosition(x, y, _state.Inventory.Count);
+                Console.WriteLine($"Drop on sidebar: targetSlot={targetSlot}, fromSlot={_draggedFromSlot}, wasActualDrag={wasActualDrag}");
+
+                if (wasActualDrag)
+                {
+                    // Dragging from weapon slot to inventory - unequip
+                    if (_draggedFromSlot.HasValue && _draggedFromSlot.Value == -1)
+                    {
+                        // Add the weapon to inventory
+                        _state.Inventory.Add(_draggedItemId.Value);
+                        _state.SelectedWeapon = null;
+                        _messages.ShowMessage("Unequipped weapon", MessageType.Info);
+                        _sounds?.PlaySound(SoundManager.SoundPickup);
+                    }
+                    // Dragging between inventory slots - swap
+                    else if (_draggedFromSlot.HasValue && _draggedFromSlot.Value >= 0 && targetSlot.HasValue)
+                    {
+                        int fromSlot = _draggedFromSlot.Value;
+                        int toSlot = targetSlot.Value;
+
+                        Console.WriteLine($"Drag: fromSlot={fromSlot}, toSlot={toSlot}, inventoryCount={_state.Inventory.Count}");
+
+                        // Clamp target slot to valid range
+                        if (toSlot >= _state.Inventory.Count)
+                            toSlot = _state.Inventory.Count - 1;
+
+                        if (toSlot >= 0 && toSlot < _state.Inventory.Count && fromSlot != toSlot)
+                        {
+                            // Swap the items
+                            var temp = _state.Inventory[toSlot];
+                            _state.Inventory[toSlot] = _state.Inventory[fromSlot];
+                            _state.Inventory[fromSlot] = temp;
+                            Console.WriteLine($"Swapped items: slot {fromSlot} <-> slot {toSlot}");
+                        }
+                    }
+                }
+                else
+                {
+                    // It was a click, not a drag - use item if it's R2D2
+                    if (IsLocatorTile(_draggedItemId.Value) && _state.HasLocator)
+                    {
+                        ShowLocatorHint();
+                    }
                 }
             }
         }
+
+        // End drag
+        _isDragging = false;
+        _draggedItemId = null;
+        _draggedFromSlot = null;
+    }
+
+    private void HandleMouseMove(int x, int y)
+    {
+        if (_isDragging)
+        {
+            _dragCurrentX = x;
+            _dragCurrentY = y;
+        }
+    }
+
+    /// <summary>
+    /// Checks if a tile is a weapon that can be equipped.
+    /// </summary>
+    private bool IsWeaponTile(int tileId)
+    {
+        if (tileId < 0 || tileId >= _gameData!.Tiles.Count)
+            return false;
+
+        var tile = _gameData.Tiles[tileId];
+
+        // Check for weapon flag
+        if ((tile.Flags & TileFlags.Weapon) != 0)
+            return true;
+
+        // Check known weapon tiles
+        if (tileId == TILE_BASIC_LIGHTSABER || tileId == TILE_UPGRADED_LIGHTSABER || tileId == TILE_THE_FORCE)
+            return true;
+
+        // Check by tile name
+        var name = GetTileName(tileId);
+        if (name != null)
+        {
+            var nameLower = name.ToLowerInvariant();
+            if (nameLower.Contains("blaster") || nameLower.Contains("saber") || nameLower.Contains("force") ||
+                nameLower.Contains("rifle") || nameLower.Contains("pistol") || nameLower.Contains("weapon"))
+                return true;
+        }
+
+        return false;
     }
 
     private void HandleKeyDown(int keyCode)
@@ -2860,7 +3034,7 @@ public unsafe class GameEngine : IDisposable
         }
 
         // Get damage from ammo state or use default
-        int damage = ammoState?.Damage ?? 50;
+        int damage = ammoState?.Damage ?? 200;
 
         // Determine projectile type
         var projType = ProjectileType.Blaster;
@@ -2925,7 +3099,7 @@ public unsafe class GameEngine : IDisposable
         _state.IsAttacking = true;
         _state.AttackTimer = 0.3;
 
-        // Calculate attack position based on facing direction
+        // Calculate primary attack position based on facing direction
         int targetX = _state.PlayerX;
         int targetY = _state.PlayerY;
 
@@ -2937,54 +3111,74 @@ public unsafe class GameEngine : IDisposable
             case Direction.Right: targetX++; break;
         }
 
-        Console.WriteLine($"Melee attack at ({targetX},{targetY}), {_state.ZoneNPCs.Count} NPCs in zone");
+        // 3-tile spread pattern: primary target + 2 diagonal offsets
+        // Example facing Right: (x+1,y), (x+1,y-1), (x+1,y+1)
+        var attackPositions = new List<(int X, int Y)> { (targetX, targetY) };
+        switch (_state.PlayerDirection)
+        {
+            case Direction.Up:
+            case Direction.Down:
+                attackPositions.Add((targetX - 1, targetY));
+                attackPositions.Add((targetX + 1, targetY));
+                break;
+            case Direction.Left:
+            case Direction.Right:
+                attackPositions.Add((targetX, targetY - 1));
+                attackPositions.Add((targetX, targetY + 1));
+                break;
+        }
 
-        // Check for NPC at or near target position (melee has some range)
+        Console.WriteLine($"Melee attack at ({targetX},{targetY}) +spread, {_state.ZoneNPCs.Count} NPCs in zone");
+
+        // Calculate damage - scaled for 768 HP system
+        int damage = _state.SelectedWeapon.HasValue ? 200 : 100;
+
+        bool hitAny = false;
         foreach (var npc in _state.ZoneNPCs)
         {
             if (!npc.IsEnabled || !npc.IsAlive)
                 continue;
 
-            // Calculate distance to NPC
-            var distX = Math.Abs(npc.X - targetX);
-            var distY = Math.Abs(npc.Y - targetY);
-            var dist = distX + distY;
-
-            Console.WriteLine($"  NPC at ({npc.X},{npc.Y}), dist={dist}");
-
-            // Hit if within melee range (1 tile from target, 2 tiles from player)
-            if (dist <= 1)
+            // Check all 3 attack positions
+            bool inRange = false;
+            foreach (var pos in attackPositions)
             {
-                // Calculate damage
-                int damage = _state.SelectedWeapon.HasValue ? 50 : 25;
-
-                bool killed = npc.TakeDamage(damage);
-                _state.AttackFlashTimer = 0.5;
-                _sounds?.PlaySound(SoundManager.SoundAttack);
-
-                // Get NPC name for message
-                var npcName = GetCharacterName(npc.CharacterId) ?? $"Target";
-
-                if (killed)
+                if (npc.X == pos.X && npc.Y == pos.Y)
                 {
-                    _messages.ShowCombat($"{npcName} defeated!");
-                    _sounds?.PlaySound(SoundManager.SoundDeath);
-                    Console.WriteLine($"  Killed NPC!");
+                    inRange = true;
+                    break;
                 }
-                else
-                {
-                    _messages.ShowCombat($"Hit! {npc.Health} HP left");
-                    Console.WriteLine($"  Hit NPC for {damage} damage, {npc.Health} HP left");
-                }
+            }
 
-                _actionExecutor?.ExecuteZoneActions(ActionTrigger.Attack);
-                return;
+            if (!inRange)
+                continue;
+
+            hitAny = true;
+            bool killed = npc.TakeDamage(damage);
+            _state.AttackFlashTimer = 0.5;
+            _sounds?.PlaySound(SoundManager.SoundAttack);
+
+            if (killed)
+            {
+                HandleNPCDeath(npc);
+            }
+            else
+            {
+                _messages.ShowCombat($"Hit! {npc.Health} HP left");
+                Console.WriteLine($"  Hit NPC for {damage} damage, {npc.Health} HP left");
             }
         }
 
-        // No NPC found - show swing/miss feedback
-        _state.AttackFlashTimer = 0.2;
-        _messages.ShowMessage("*swing*", MessageType.Combat);
+        if (hitAny)
+        {
+            _actionExecutor?.ExecuteZoneActions(ActionTrigger.Attack);
+        }
+        else
+        {
+            // No NPC found - show swing/miss feedback
+            _state.AttackFlashTimer = 0.2;
+            _messages.ShowMessage("*swing*", MessageType.Combat);
+        }
     }
 
     private void UpdateCamera()
@@ -3141,6 +3335,20 @@ public unsafe class GameEngine : IDisposable
             {
                 npc.MaxHealth = character.Weapon.Health;
                 npc.Health = character.Weapon.Health;
+            }
+
+            // Apply ranged attack from CHWP weapon reference
+            if (character.Weapon != null && character.Weapon.Reference > 0 && character.Weapon.Reference != 0xFFFF)
+            {
+                npc.HasRangedAttack = true;
+                npc.WeaponTileId = character.Weapon.Reference;
+            }
+
+            // Enemy NPCs drop loot from their carried item
+            if (character.Type == CharacterType.Enemy && npc.CarriedItemId.HasValue)
+            {
+                npc.DropsLoot = true;
+                npc.LootItemId = npc.CarriedItemId.Value;
             }
         }
         else
@@ -3525,11 +3733,18 @@ public unsafe class GameEngine : IDisposable
             }
         }
 
+        // First script evaluation (before NPC/projectile updates)
+        _actionExecutor?.ExecuteZoneActions(ActionTrigger.Walk);
+
         // Update NPC AI
         UpdateNPCs(deltaTime);
 
         // Update projectiles
         UpdateProjectiles(deltaTime);
+
+        // Second script evaluation (after NPC/projectile updates, before input)
+        // This ensures scripts that depend on NPC state changes (like all-monsters-dead) trigger promptly
+        _actionExecutor?.ExecuteZoneActions(ActionTrigger.Walk);
 
         // Update bot AI
         if (_bot?.IsRunning == true)
@@ -3573,6 +3788,19 @@ public unsafe class GameEngine : IDisposable
             if (!npc.IsEnabled || !npc.IsAlive)
                 continue;
 
+            // Decrement stun timer - stunned NPCs skip all actions
+            if (npc.StunTimer > 0)
+            {
+                npc.StunTimer--;
+                continue;
+            }
+
+            // Hostile NPCs with ranged weapons try to shoot before moving
+            if (npc.IsHostile && npc.HasRangedAttack)
+            {
+                TryNPCRangedAttack(npc);
+            }
+
             // Update move timer
             npc.MoveTimer += deltaTime;
 
@@ -3593,6 +3821,12 @@ public unsafe class GameEngine : IDisposable
                 case NPCBehavior.Fleeing:
                     UpdateFleeingNPC(npc);
                     break;
+                case NPCBehavior.Patrol:
+                    UpdatePatrolNPC(npc);
+                    break;
+                case NPCBehavior.Animation:
+                    // Animation-only NPCs just cycle frames (handled by global animation sync)
+                    break;
                 case NPCBehavior.Stationary:
                 default:
                     // Face the player if nearby
@@ -3604,7 +3838,7 @@ public unsafe class GameEngine : IDisposable
                     break;
             }
 
-            // Hostile NPCs attack if adjacent to player
+            // Hostile NPCs attack if adjacent to player (melee)
             if (npc.IsHostile)
             {
                 npc.ActionTimer += deltaTime;
@@ -3623,6 +3857,105 @@ public unsafe class GameEngine : IDisposable
                     }
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Attempts a ranged attack from an NPC toward the hero.
+    /// Monster checks if hero is within 4 tiles on same row/col, then rolls 1-in-7 chance to fire.
+    /// </summary>
+    private void TryNPCRangedAttack(NPC npc)
+    {
+        int dx = _state.PlayerX - npc.X;
+        int dy = _state.PlayerY - npc.Y;
+
+        // Must be on same row or column
+        bool sameRow = dy == 0 && Math.Abs(dx) > 0 && Math.Abs(dx) <= 4;
+        bool sameCol = dx == 0 && Math.Abs(dy) > 0 && Math.Abs(dy) <= 4;
+
+        if (!sameRow && !sameCol)
+            return;
+
+        // ~85% chance to fire per eligible tick (rand() % 7 != 3 fires, so 6/7 ~ 85%)
+        if (_random.Next(7) == 3)
+            return;  // Miss this chance
+
+        // Determine direction to player
+        double velX = 0, velY = 0;
+        const double npcProjectileSpeed = 8.0;  // Tiles per second (slower than player projectiles)
+
+        if (sameRow)
+        {
+            velX = dx > 0 ? npcProjectileSpeed : -npcProjectileSpeed;
+            npc.Direction = dx > 0 ? Direction.Right : Direction.Left;
+        }
+        else
+        {
+            velY = dy > 0 ? npcProjectileSpeed : -npcProjectileSpeed;
+            npc.Direction = dy > 0 ? Direction.Down : Direction.Up;
+        }
+
+        var projectile = new Projectile
+        {
+            X = npc.X + (velX > 0 ? 0.5 : velX < 0 ? -0.5 : 0),
+            Y = npc.Y + (velY > 0 ? 0.5 : velY < 0 ? -0.5 : 0),
+            VelocityX = velX,
+            VelocityY = velY,
+            Damage = npc.Damage,
+            LifeTime = 0.5,  // Max 4 tiles at speed 8 = 0.5s
+            Type = ProjectileType.Blaster,
+            IsEnemyProjectile = true,
+            TileId = npc.WeaponTileId
+        };
+        _state.Projectiles.Add(projectile);
+    }
+
+    /// <summary>
+    /// Updates a patrol NPC that follows waypoints.
+    /// </summary>
+    private void UpdatePatrolNPC(NPC npc)
+    {
+        if (npc.Waypoints.Length == 0)
+        {
+            // No waypoints - fall back to wandering
+            UpdateWanderingNPC(npc);
+            return;
+        }
+
+        var target = npc.Waypoints[npc.CurrentWaypoint];
+
+        // Skip waypoints at (0,0) - unused slots
+        if (target.X == 0 && target.Y == 0)
+        {
+            npc.CurrentWaypoint = (npc.CurrentWaypoint + 1) % npc.Waypoints.Length;
+            return;
+        }
+
+        // Move toward current waypoint
+        var dx = Math.Sign(target.X - npc.X);
+        var dy = Math.Sign(target.Y - npc.Y);
+
+        if (dx != 0)
+        {
+            npc.Direction = dx > 0 ? Direction.Right : Direction.Left;
+            if (IsValidNPCPosition(npc.X + dx, npc.Y, npc))
+            {
+                npc.X += dx;
+            }
+        }
+        else if (dy != 0)
+        {
+            npc.Direction = dy > 0 ? Direction.Down : Direction.Up;
+            if (IsValidNPCPosition(npc.X, npc.Y + dy, npc))
+            {
+                npc.Y += dy;
+            }
+        }
+
+        // Check if reached waypoint
+        if (npc.X == target.X && npc.Y == target.Y)
+        {
+            npc.CurrentWaypoint = (npc.CurrentWaypoint + 1) % npc.Waypoints.Length;
         }
     }
 
@@ -3655,8 +3988,21 @@ public unsafe class GameEngine : IDisposable
                 }
             }
 
-            // Check for NPC collision
-            if (projectile.IsActive)
+            // Enemy projectiles check collision with hero
+            if (projectile.IsActive && projectile.IsEnemyProjectile)
+            {
+                if (tileX == _state.PlayerX && tileY == _state.PlayerY)
+                {
+                    _state.Health -= projectile.Damage;
+                    _state.DamageFlashTimer = 1.0;
+                    _sounds?.PlaySound(SoundManager.SoundHurt);
+                    _messages.ShowCombat($"Shot! (-{projectile.Damage} HP)");
+                    projectile.IsActive = false;
+                }
+            }
+
+            // Player projectiles check collision with NPCs
+            if (projectile.IsActive && !projectile.IsEnemyProjectile)
             {
                 foreach (var npc in _state.ZoneNPCs)
                 {
@@ -3665,19 +4011,30 @@ public unsafe class GameEngine : IDisposable
 
                     if (npc.X == tileX && npc.Y == tileY)
                     {
-                        bool killed = npc.TakeDamage(projectile.Damage);
-                        projectile.IsActive = false;
-                        _state.AttackFlashTimer = 0.3;
-
-                        var npcName = GetCharacterName(npc.CharacterId) ?? "Target";
-                        if (killed)
+                        // The Force stuns instead of dealing damage
+                        if (projectile.Type == ProjectileType.Force)
                         {
-                            _messages.ShowCombat($"{npcName} defeated!");
-                            _sounds?.PlaySound(SoundManager.SoundDeath);
+                            npc.StunTimer = projectile.Damage;
+                            projectile.IsActive = false;
+                            _state.AttackFlashTimer = 0.3;
+                            var stunName = GetCharacterName(npc.CharacterId) ?? "Target";
+                            _messages.ShowCombat($"{stunName} stunned!");
                         }
                         else
                         {
-                            _messages.ShowCombat($"Hit! {npc.Health} HP left");
+                            bool killed = npc.TakeDamage(projectile.Damage);
+                            projectile.IsActive = false;
+                            _state.AttackFlashTimer = 0.3;
+
+                            var npcName = GetCharacterName(npc.CharacterId) ?? "Target";
+                            if (killed)
+                            {
+                                HandleNPCDeath(npc);
+                            }
+                            else
+                            {
+                                _messages.ShowCombat($"Hit! {npc.Health} HP left");
+                            }
                         }
                         break;
                     }
@@ -3690,6 +4047,47 @@ public unsafe class GameEngine : IDisposable
                 _state.Projectiles.RemoveAt(i);
             }
         }
+    }
+
+    /// <summary>
+    /// Handles NPC death: shows message, plays sound, drops loot.
+    /// </summary>
+    private void HandleNPCDeath(NPC npc)
+    {
+        var npcName = GetCharacterName(npc.CharacterId) ?? "Target";
+        _messages.ShowCombat($"{npcName} defeated!");
+        _sounds?.PlaySound(SoundManager.SoundDeath);
+
+        // Drop loot if applicable
+        if (npc.DropsLoot && _state.CurrentZone != null)
+        {
+            int lootId = npc.LootItemId;
+
+            // If loot is -1, use zone's DropQuestItem hotspot item
+            if (lootId == -1 || lootId == 0xFFFF)
+            {
+                foreach (var obj in _state.CurrentZone.Objects)
+                {
+                    // ZoneObjectType 0x0D (Teleporter) is also used for quest drops in some contexts
+                    // Look for CrateItem objects that could serve as quest item drops
+                    if (obj.Type == ZoneObjectType.CrateItem && obj.Argument != 0xFFFF && obj.Argument > 0)
+                    {
+                        lootId = obj.Argument;
+                        break;
+                    }
+                }
+            }
+
+            if (lootId > 0 && lootId != 0xFFFF)
+            {
+                // Place loot item on object layer at NPC position
+                _state.CurrentZone.SetTile(npc.X, npc.Y, 1, (ushort)lootId);
+                var lootName = GetTileName(lootId);
+                Console.WriteLine($"  Dropped loot: {lootName} (tile {lootId}) at ({npc.X},{npc.Y})");
+            }
+        }
+
+        _actionExecutor?.ExecuteZoneActions(ActionTrigger.Attack);
     }
 
     private void UpdateWanderingNPC(NPC npc)
@@ -3900,6 +4298,12 @@ public unsafe class GameEngine : IDisposable
         }
         _renderer.RenderHUD(_state.Health, _state.MaxHealth, _state.Inventory, _state.SelectedWeapon, _state.SelectedItem, currentAmmo, maxAmmo);
 
+        // Render dragged item if dragging
+        if (_isDragging && _draggedItemId.HasValue)
+        {
+            _renderer.RenderDraggedItem(_draggedItemId.Value, _dragCurrentX, _dragCurrentY);
+        }
+
         // Render zone info
         _renderer.RenderZoneInfo(
             _state.CurrentZoneId,
@@ -4069,6 +4473,10 @@ public unsafe class GameEngine : IDisposable
 
     private void RenderPlayer()
     {
+        // Skip rendering if hero is hidden (by HideHero script instruction)
+        if (!_state.HeroVisible)
+            return;
+
         // Find hero character for rendering
         // In Yoda Stories, the hero (Luke) is typically character 0 or has Hero type
         Character? heroChar = null;

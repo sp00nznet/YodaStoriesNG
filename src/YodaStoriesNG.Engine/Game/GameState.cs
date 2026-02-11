@@ -23,8 +23,8 @@ public class GameState
     public int PlayerX { get; set; }
     public int PlayerY { get; set; }
     public Direction PlayerDirection { get; set; } = Direction.Down;
-    public int Health { get; set; } = 100;
-    public int MaxHealth { get; set; } = 100;
+    public int Health { get; set; } = 768;
+    public int MaxHealth { get; set; } = 768;
 
     // Current zone
     public int CurrentZoneId { get; set; }
@@ -57,6 +57,7 @@ public class GameState
     public bool IsGameWon { get; set; }
     public bool IsPaused { get; set; }
     public bool HasLocator { get; set; }  // Has picked up R2D2/locator droid
+    public bool HeroVisible { get; set; } = true;  // For HideHero/ShowHero script instructions
 
     // Animation state
     public int AnimationFrame { get; set; }
@@ -115,6 +116,7 @@ public class GameState
         IsGameWon = false;
         IsPaused = false;
         HasLocator = false;
+        HeroVisible = true;
         AnimationFrame = 0;
         AnimationTimer = 0;
         CameraX = 0;

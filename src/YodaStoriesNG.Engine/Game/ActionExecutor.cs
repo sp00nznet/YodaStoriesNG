@@ -29,6 +29,14 @@ public class ActionExecutor
     public int BumpX { get; set; }
     public int BumpY { get; set; }
 
+    // World data for puzzle conditions (RequiredItemIs, EndingIs, FindItemIs, etc.)
+    public WorldMap? CurrentWorld { get; set; }
+    public Mission? CurrentMission { get; set; }
+
+    // Wait instruction support - remaining instructions to resume next tick
+    public List<Instruction>? PendingInstructions { get; set; }
+    public int PendingInstructionIndex { get; set; }
+
     // Event for displaying dialogue
     public event Action<string, string>? OnDialogue;
     public event Action<string>? OnMessage;
@@ -49,6 +57,23 @@ public class ActionExecutor
         _currentTrigger = trigger;
         if (_currentZone == null)
             return;
+
+        // Resume pending instructions from a previous Wait
+        if (PendingInstructions != null)
+        {
+            var remaining = PendingInstructions;
+            var startIdx = PendingInstructionIndex;
+            PendingInstructions = null;
+            PendingInstructionIndex = 0;
+
+            for (int i = startIdx; i < remaining.Count; i++)
+            {
+                ExecuteInstruction(remaining[i]);
+                // Check if another Wait was hit
+                if (PendingInstructions != null)
+                    return;
+            }
+        }
 
         foreach (var action in _currentZone.Actions)
         {
@@ -225,17 +250,20 @@ public class ActionExecutor
                 return _state.ZoneNPCs.All(n => !n.IsHostile || n.Health <= 0);
 
             case ConditionOpcode.RequiredItemIs:
-                // Check if zone's required item matches
-                if (args.Count < 1 || _currentZone == null)
-                    return false;
-                // This typically checks puzzle items - for now just check if we have the item
-                return _state.HasItem(args[0]);
-
-            case ConditionOpcode.FindItemIs:
-                // Similar to RequiredItemIs
+                // Check if current sector's required item matches arg
                 if (args.Count < 1)
                     return false;
-                return _state.HasItem(args[0]);
+                if (CurrentMission?.CurrentPuzzleStep != null)
+                    return CurrentMission.CurrentPuzzleStep.RequiredItemId == args[0];
+                return _state.HasItem(args[0]);  // Fallback
+
+            case ConditionOpcode.FindItemIs:
+                // Check if zone's find/provided item matches arg
+                if (args.Count < 1)
+                    return false;
+                if (CurrentMission?.CurrentPuzzleStep != null)
+                    return CurrentMission.CurrentPuzzleStep.RewardItemId == args[0];
+                return _state.HasItem(args[0]);  // Fallback
 
             case ConditionOpcode.EnterByPlane:
                 // Check if entered zone by X-Wing
@@ -254,10 +282,15 @@ public class ActionExecutor
                 return PlacedItemId != args[0];
 
             case ConditionOpcode.EndingIs:
-                // Check goal item - for now just check if we have the item
+                // Check if arg matches current goal puzzle's item (last step's required item)
                 if (args.Count < 1)
                     return false;
-                return _state.HasItem(args[0]);
+                if (CurrentMission != null && CurrentMission.PuzzleChain.Count > 0)
+                {
+                    var lastStep = CurrentMission.PuzzleChain[^1];
+                    return lastStep.RequiredItemId == args[0];
+                }
+                return _state.HasItem(args[0]);  // Fallback
 
             // Note: SectorCounterIs (0x19) shares value with NpcIs - handled above
             // Note: SectorCounterIsLessThan (0x1A) shares value with HasNpc - handled above
@@ -280,9 +313,12 @@ public class ActionExecutor
                 return BumpX == args[0] && BumpY == args[1] && DroppedItemId.HasValue;
 
             case ConditionOpcode.HasAnyRequiredItem:
-                // Check if has any required item for zone puzzles
-                // For now, assume true if inventory is not empty
-                return _state.Inventory.Count > 0;
+                // Check if inventory contains any of the current sector's required items
+                if (CurrentWorld?.RequiredItems != null && CurrentWorld.RequiredItems.Count > 0)
+                {
+                    return CurrentWorld.RequiredItems.Any(itemId => _state.HasItem(itemId));
+                }
+                return _state.Inventory.Count > 0;  // Fallback
 
             case ConditionOpcode.GamesWonIsGreaterThan:
                 if (args.Count < 1)
@@ -290,10 +326,11 @@ public class ActionExecutor
                 return _state.GamesWon > args[0];
 
             case ConditionOpcode.IsVariable:
-                // Same as TileAtIs internally
-                if (args.Count < 4 || _currentZone == null)
+                // XOR addressing: key = arg0 ^ arg1 ^ arg2, check if variable == arg3
+                if (args.Count < 4)
                     return false;
-                return _currentZone.GetTile(args[0], args[1], args[2]) == args[3];
+                int varKey = args[0] ^ args[1] ^ args[2];
+                return _state.GetVariable(varKey) == args[3];
 
             default:
                 // Unknown condition - assume true to allow script to continue
@@ -308,9 +345,16 @@ public class ActionExecutor
             Console.WriteLine($"  Executing {instructions.Count} instructions");
         }
 
-        foreach (var instruction in instructions)
+        for (int i = 0; i < instructions.Count; i++)
         {
-            ExecuteInstruction(instruction);
+            if (instructions[i].Opcode == InstructionOpcode.Wait)
+            {
+                // Save remaining instructions to resume next tick
+                PendingInstructions = instructions;
+                PendingInstructionIndex = i + 1;
+                return;
+            }
+            ExecuteInstruction(instructions[i]);
         }
     }
 
@@ -346,8 +390,16 @@ public class ActionExecutor
                 break;
 
             case InstructionOpcode.SetVariable:
-                if (args.Count >= 2)
-                    _state.SetVariable(args[0], args[1]);
+                // XOR addressing: key = arg0 ^ arg1 ^ arg2, set to arg3
+                if (args.Count >= 4)
+                {
+                    int setVarKey = args[0] ^ args[1] ^ args[2];
+                    _state.SetVariable(setVarKey, args[3]);
+                }
+                else if (args.Count >= 2)
+                {
+                    _state.SetVariable(args[0], args[1]);  // Fallback for 2-arg form
+                }
                 break;
 
             case InstructionOpcode.AddItem:
@@ -446,8 +498,9 @@ public class ActionExecutor
                 break;
 
             case InstructionOpcode.Wait:
-                // TODO: Implement wait/delay
-                break;
+                // Pause script execution for one tick - remaining instructions resume next frame
+                // This is handled by saving remaining instructions in PendingInstructions
+                break;  // Caller (ExecuteInstructions) checks for Wait
 
             case InstructionOpcode.DropItem:
                 // Drop an item at specified location
@@ -491,11 +544,11 @@ public class ActionExecutor
                 break;
 
             case InstructionOpcode.HideHero:
-                // TODO: Make hero invisible
+                _state.HeroVisible = false;
                 break;
 
             case InstructionOpcode.ShowHero:
-                // TODO: Make hero visible
+                _state.HeroVisible = true;
                 break;
 
             case InstructionOpcode.SetZoneType:
