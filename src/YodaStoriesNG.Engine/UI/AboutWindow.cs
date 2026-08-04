@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Rendering;
 
 namespace YodaStoriesNG.Engine.UI;
@@ -219,6 +220,7 @@ public unsafe class AboutWindow : IDisposable
         // Footer hint
         _font.RenderText(_renderer, "Press ESC or Enter to close", 150, WindowHeight - 18, 1, 100, 100, 120, 255);
 
+        Dev.Capture.Flush(_renderer, "about");
         SDL.RenderPresent(_renderer);
     }
 

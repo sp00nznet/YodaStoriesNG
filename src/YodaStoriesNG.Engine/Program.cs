@@ -6,6 +6,10 @@ class Program
 {
     static int Main(string[] args)
     {
+        // Needs no game data and opens no window - keep it before everything else.
+        if (args.Contains("--self-test"))
+            return Dev.SelfTest.Run();
+
         Console.WriteLine("========================================");
         Console.WriteLine("     Yoda Stories NG");
         Console.WriteLine("     An open-source reimplementation");

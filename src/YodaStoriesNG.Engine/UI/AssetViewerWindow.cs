@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Data;
 using YodaStoriesNG.Engine.Rendering;
 
@@ -260,6 +261,7 @@ public class AssetViewerWindow : IDisposable
         RenderTileGrid();
         RenderTileInfo();
 
+        Dev.Capture.Flush(_renderer, "assets");
         SDL.RenderPresent(_renderer);
     }
 

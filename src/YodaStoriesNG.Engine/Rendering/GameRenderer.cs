@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Data;
 using YodaStoriesNG.Engine.Game;
 using YodaStoriesNG.Engine.UI;
@@ -1101,6 +1102,7 @@ public unsafe class GameRenderer : IDisposable
     /// </summary>
     public void Present()
     {
+        Dev.Capture.Flush(_renderer, "game");
         SDL.RenderPresent(_renderer);
     }
 

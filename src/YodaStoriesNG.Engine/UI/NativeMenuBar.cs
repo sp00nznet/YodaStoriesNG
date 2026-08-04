@@ -112,6 +112,16 @@ public unsafe class NativeMenuBar
     /// </summary>
     public void Initialize(SDLWindow* window)
     {
+        // Everything below this point is user32.dll. On Linux and macOS the P/Invoke
+        // would throw DllNotFoundException during startup and take the game with it,
+        // so those platforms simply run without a menu bar - every menu item has a
+        // keyboard equivalent (see docs/PLAYING.md).
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine("Native menu bar is Windows-only - use the keyboard shortcuts instead");
+            return;
+        }
+
         // Get the native window handle from SDL
         SDLSysWMInfo wmInfo = default;
         SDL.GetVersion(&wmInfo.Version);
@@ -153,9 +163,9 @@ public unsafe class NativeMenuBar
 
         // Debug menu
         var debugMenu = CreatePopupMenu();
-        AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_ASSET_VIEWER, "Asset Viewer (F2)");
+        AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_ASSET_VIEWER, "Asset Viewer (F4)");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_SCRIPT_EDITOR, "Script Editor (F3)");
-        AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_MAP_VIEWER, "Map Viewer (F4)");
+        AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_MAP_VIEWER, "Map Viewer (F2)");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_SAVE_INSPECTOR, "Save Editor (F8)");
         AppendMenuW(debugMenu, MF_STRING, (UIntPtr)ID_DEBUG_ZONE_EDITOR, "Zone Editor (F9)");
         AppendMenuW(debugMenu, MF_SEPARATOR, UIntPtr.Zero, "");

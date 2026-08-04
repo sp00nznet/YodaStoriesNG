@@ -12,7 +12,7 @@ namespace YodaStoriesNG.Engine.Game;
 /// <summary>
 /// Main game engine that coordinates all systems.
 /// </summary>
-public unsafe class GameEngine : IDisposable
+public unsafe partial class GameEngine : IDisposable
 {
     private GameData? _gameData;
     private GameState _state;
@@ -945,6 +945,10 @@ public unsafe class GameEngine : IDisposable
 
             // Update game state
             Update(deltaTime);
+
+            // Docs capture harness - drives the shot list, then stops the loop
+            if (Dev.Capture.Enabled)
+                CaptureTick(deltaTime);
 
             // Render
             Render();

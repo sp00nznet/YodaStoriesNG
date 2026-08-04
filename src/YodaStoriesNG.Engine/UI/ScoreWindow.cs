@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Data;
 using YodaStoriesNG.Engine.Game;
 using YodaStoriesNG.Engine.Rendering;
@@ -209,6 +210,7 @@ public unsafe class ScoreWindow : IDisposable
         // Footer
         _font.RenderText(_renderer, "Press Enter or click to continue", 85, WindowHeight - 18, 1, 100, 100, 120, 255);
 
+        Dev.Capture.Flush(_renderer, "score");
         SDL.RenderPresent(_renderer);
     }
 

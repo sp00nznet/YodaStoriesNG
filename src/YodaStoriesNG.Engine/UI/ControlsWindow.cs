@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Game;
 using YodaStoriesNG.Engine.Rendering;
 
@@ -316,6 +317,7 @@ public unsafe class ControlsWindow : IDisposable
             _font.RenderText(_renderer, "Reset Defaults", WindowWidth - 150, WindowHeight - 22, 1, 200, 150, 150, 255);
         }
 
+        Dev.Capture.Flush(_renderer, "controls");
         SDL.RenderPresent(_renderer);
     }
 

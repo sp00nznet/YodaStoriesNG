@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Data;
 using YodaStoriesNG.Engine.Game;
 using YodaStoriesNG.Engine.Rendering;
@@ -745,10 +746,11 @@ public class ScriptEditorWindow : IDisposable
                     if (args.Count >= 2)
                         AddHighlight(args[0], args[1], HighlightType.Position, cond.Opcode.ToString(), seen);
                     break;
+                // These two carry the tile/value in slot 0 and the position in 1..3.
                 case ConditionOpcode.TileAtIs:
                 case ConditionOpcode.IsVariable:
-                    if (args.Count >= 2)
-                        AddHighlight(args[0], args[1], HighlightType.Tile, cond.Opcode.ToString(), seen);
+                    if (args.Count >= 3)
+                        AddHighlight(args[1], args[2], HighlightType.Tile, cond.Opcode.ToString(), seen);
                     break;
                 case ConditionOpcode.PlacedItemIs:
                 case ConditionOpcode.PlacedItemIsNot:
@@ -823,6 +825,7 @@ public class ScriptEditorWindow : IDisposable
         RenderTopBar();
         RenderActionContent();
 
+        Dev.Capture.Flush(_renderer, "script-editor");
         SDL.RenderPresent(_renderer);
     }
 
@@ -1306,7 +1309,7 @@ public class ScriptEditorWindow : IDisposable
             ConditionOpcode.RandomIsGreaterThan => $"random > {Arg(a,0)}",
             ConditionOpcode.RandomIsLessThan => $"random < {Arg(a,0)}",
             ConditionOpcode.EnterByPlane => "entered by X-Wing",
-            ConditionOpcode.TileAtIs => $"tile at ({Arg(a,0)},{Arg(a,1)}) layer {Arg(a,2)} == {GetTileName(Arg(a,3))}",
+            ConditionOpcode.TileAtIs => $"tile at ({Arg(a,1)},{Arg(a,2)}) layer {Arg(a,3)} == {GetTileName(Arg(a,0))}",
             ConditionOpcode.MonsterIsDead => $"monster #{Arg(a,0)} is dead",
             ConditionOpcode.HasNoActiveMonsters => "all monsters dead",
             ConditionOpcode.HasItem => Arg(a,0) == -1 ? "has zone's puzzle item" : $"has item {GetTileName(Arg(a,0))}",
@@ -1329,7 +1332,7 @@ public class ScriptEditorWindow : IDisposable
             ConditionOpcode.CounterIsNot => $"counter != {Arg(a,0)}",
             ConditionOpcode.RandomIsNot => $"random != {Arg(a,0)}",
             ConditionOpcode.SectorCounterIsNot => $"sector counter != {Arg(a,0)}",
-            ConditionOpcode.IsVariable => $"var at ({Arg(a,0)},{Arg(a,1)},{Arg(a,2)}) == {Arg(a,3)}",
+            ConditionOpcode.IsVariable => $"var at ({Arg(a,1)},{Arg(a,2)},{Arg(a,3)}) == {Arg(a,0)}",
             ConditionOpcode.GamesWonIsGreaterThan => $"games won > {Arg(a,0)}",
             ConditionOpcode.CounterIsGreaterThan => $"counter > {Arg(a,0)}",
             ConditionOpcode.CounterIsLessThan => $"counter < {Arg(a,0)}",

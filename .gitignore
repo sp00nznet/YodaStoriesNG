@@ -1,6 +1,7 @@
-# Build outputs
+# Build output
 bin/
 obj/
+publish/
 *.dll
 *.exe
 *.pdb
@@ -11,33 +12,30 @@ obj/
 *.user
 *.suo
 
-# Original game files (not part of the project)
+# Original game data - supply your own legal copy. See docs/GAME-DATA.md.
 Yoda/
+INDYDESK/
+ida/
 MAGIC/
 Themes/
 AUTORUN.INF
 Yodaplay.exe
 setup.exe
 
-# Indiana Jones Desktop Adventures data
-ida/
-INDYDESK/
+# Reference material and disposable environments: kept locally, never committed
+webfun-reference/
+dosbox-env/
+*.zip
 
-# Temporary scripts
-*.ps1
+# Scratch output from the extraction scripts in tools/
+*.bmp
+indy_palette.bin
+output.txt
 
-# Claude workspace
-.claude/
-
-# OS files
+# OS
 Thumbs.db
 .DS_Store
 nul
 
-# Temporary/debug files
-*.bmp
-output.txt
-
-# Python scripts (dev tools)
-*.py
-webfun-reference/
+# Claude workspace
+.claude/

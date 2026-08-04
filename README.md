@@ -1,383 +1,154 @@
-# Yoda Stories NG
+# YODA STORIES NG
 
-A modern reimplementation of **Star Wars: Yoda Stories** (1997) and **Indiana Jones and His Desktop Adventures** (1996) built with C# and SDL2.
+**The 1997 LucasArts desktop toy, rebuilt from its own data file.** Point it at a copy of
+*Star Wars: Yoda Stories* or *Indiana Jones and His Desktop Adventures* and it parses the
+original tiles, zones, characters and scripts and plays the game - no original executable,
+no emulation, no assets in this repository.
 
-![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
-![License](https://img.shields.io/badge/License-MIT-green)
+![the X-Wing crossing the title screen](docs/hero.gif)
 
-## About
-
-Yoda Stories NG is a fan-made recreation of the classic LucasArts Desktop Adventures games. It parses the original game data files and reimplements the game engine from scratch. Both **Star Wars: Yoda Stories** (`YODESK.DTA`) and **Indiana Jones and His Desktop Adventures** (`DESKTOP.DAW`) are supported.
-
-![Title Screen](docs/screenshots/title-screen.png)
-
-## Key Features
-
-- **Dual game support** - Plays both Yoda Stories (`.dta`) and Indiana Jones (`.daw`) files
-- **Complete data file parsing** - Reads original game assets with automatic game type detection
-- **Procedural world generation** - Each playthrough generates a unique 10x10 or 15x15 world map
-- **15 mission cycle** - Full mission progression with item chains and NPC puzzles
-- **Combat system** - Melee and ranged weapons with NPC AI and ammo system
-- **Score system** - Force Factor (Yoda) / Indy Quotient (Indy) end-game scoring
-- **Color palette animation** - Authentic animated water, lava, and fire effects
-- **R2D2 help system** - Context-sensitive hints from your droid companion
-- **Save/Load system** - JSON-based save files with full game state
-- **Save Game Editor** - Inspect and modify save files, add items to inventory
-- **Native menu bar** - Windows-style menu integration
-- **Widescreen UI** - Modern layout with sidebar HUD and inventory scrolling
-- **Xbox controller support** - Full gamepad controls
-- **Configurable graphics** - 2x and 4x scaling options
-- **Automated Mission Bot** - AI-powered gameplay with A* pathfinding
-- **Complete script engine** - All 30+ condition and instruction opcodes implemented
-- **CI/CD Pipeline** - Automated builds for Windows, Linux, and macOS
-
-## Screenshots
-
-### Yoda Stories Gameplay
-![Yoda Stories Gameplay](docs/screenshots/gameplay-yoda.png)
-
-### Indiana Jones Gameplay
-![Indiana Jones Gameplay](docs/screenshots/gameplay-indy.png)
-
-### Score Screen (Force Factor)
-![Score Screen](docs/screenshots/score-screen.png)
-
-### Palette Animation (Water/Lava Effects)
-![Palette Animation](docs/screenshots/palette-animation.png)
-
-### World Map Viewer
-![World Map](docs/screenshots/world-map.png)
-
-### Script Editor
-![Script Editor](docs/screenshots/script-editor.png)
-
-### Asset Viewer
-![Asset Viewer](docs/screenshots/asset-viewer.png)
-
-### R2D2 Help System
-![R2D2 Help](docs/screenshots/r2d2-help.png)
-
-## Requirements
-
-- .NET 8.0 SDK
-- Original game files:
-  - Star Wars: Yoda Stories - `YODESK.DTA`
-  - Indiana Jones Desktop Adventures - `DESKTOP.DAW` (optional)
-- Windows, Linux, or macOS
-
-## Building
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/YodaStoriesNG.git
-cd YodaStoriesNG
-
-# Build the project
-dotnet build src/YodaStoriesNG.Engine
-
-# Run (make sure yodesk.dta is in the data folder)
-dotnet run --project src/YodaStoriesNG.Engine
-```
-
-## Controls
-
-### Keyboard
-
-| Key | Action |
-|-----|--------|
-| **WASD** / **Arrow Keys** | Move |
-| **Shift + Direction** | Pull blocks |
-| **Space** | Action / Talk / Attack |
-| **1-8** | Select inventory slot |
-| **Tab** | Toggle weapon |
-| **O** | Show mission objective |
-| **X** | Travel (X-Wing) |
-| **R** | Restart game |
-| **M** | Toggle sound mute |
-| **Escape** | Quit |
-
-### Debug Controls
-
-| Key | Action |
-|-----|--------|
-| **F1** | Toggle Debug Overlay |
-| **F2** | Toggle Map Viewer |
-| **F3** | Toggle Script Editor |
-| **F4** | Toggle Asset Viewer |
-| **B** | Toggle Mission Bot |
-| **I** | Inspect (console dump) |
-| **N/P** | Next/Previous zone |
-| **F** | Find zone with content |
-
-### Xbox Controller
-
-| Button | Action |
-|--------|--------|
-| **Left Stick** / **D-Pad** | Move |
-| **A** | Action / Talk / Attack |
-| **B** | Cancel / Dismiss dialogue |
-| **X** | Travel (X-Wing) |
-| **Y** | Show mission objective |
-| **LB / RB** | Toggle weapon |
-| **Start** | Restart game |
-| **Back** | Quit |
-
-## Menu System
-
-### File Menu
-- **New Game: Small/Medium/Large/X-tra Large** - Start new game with different world sizes
-- **Save Game** - Save current progress
-- **Load Game** - Load saved game
-- **Exit** - Quit the game
-
-### Debug Menu
-- **Map Viewer (F2)** - See the full world map with zone types
-- **Script Editor (F3)** - View and analyze IACT action scripts
-- **Asset Viewer (F4)** - Browse game tiles and characters
-- **Enable/Disable Bot** - Toggle automated gameplay
-
-### Config Menu
-- **Graphics: 2x/4x Scale** - Change window size and rendering scale
-- **Keyboard Controls** - View keyboard control mappings
-- **Controller Controls** - View Xbox controller mappings
-- **Select Data File** - Choose which .dta file to load
-
-## World Generation
-
-The game generates procedural worlds using the original algorithm:
-
-| Size | Grid | Puzzles | Description |
-|------|------|---------|-------------|
-| **Small** | 10x10 | 4-8 | Quick adventure |
-| **Medium** | 10x10 | 6-12 | Standard game |
-| **Large** | 10x10 | 8-16 | Extended quest |
-| **X-tra Large** | 15x15 | 12-24 | Epic journey |
-
-### Yoda Stories Worlds
-- **Spaceport** - Landing zone with X-Wing for travel
-- **Puzzle zones** - Contain items and NPCs for trading
-- **Blockades** - Require specific items to pass
-- **Travel zones** - X-Wing connections to islands
-- **Islands** - Remote areas (Dagobah) with special puzzles
-- **The Force** - Guaranteed lightsaber at distance 2 from start
-
-### Indiana Jones Worlds
-- **Home Base** - Starting location (no vehicle)
-- **Puzzle zones** - Artifacts and NPC traders
-- **Blockades** - Obstacles requiring items to pass
-- **Travel zones** - Vehicle/boat connections
-- **Remote areas** - Temples and dig sites
-- **Weapon cache** - Guaranteed weapon near start
-
-## Score System
-
-Upon completing 15 missions, you receive a score evaluation:
-
-### Force Factor (Yoda Stories) / Indy Quotient (Indiana Jones)
-
-| Component | Max Points | Description |
-|-----------|------------|-------------|
-| **Time Bonus** | 200 | Faster completion = more points |
-| **Puzzles Solved** | 100 | Percentage of puzzles completed |
-| **Difficulty** | 100 | Based on puzzle complexity |
-| **Exploration** | 100 | Zones visited vs world size |
-
-### Ratings
-
-| Score | Force Factor (Yoda) | Indy Quotient (Indy) |
-|-------|---------------------|----------------------|
-| 450+ | Legendary Hero! | Master Archaeologist! |
-| 400-449 | Jedi Master | Professor of Antiquities |
-| 350-399 | Jedi Knight | Seasoned Explorer |
-| 300-349 | Padawan | Field Researcher |
-| 250-299 | Force Sensitive | Museum Curator |
-| 200-249 | Adventurer | Graduate Student |
-| <200 | Beginner | Amateur |
-
-## Debug Tools
-
-### Map Viewer (F2)
-Shows the complete world grid with color-coded zones:
-- Player position highlighted with pulsing border
-- Zone types: Puzzle, Spaceport, Blockade, Travel, Island
-- Mission progress and current objective
-
-### Script Editor (F3)
-Browse and analyze zone action scripts:
-- View IACT conditions and instructions
-- Click on referenced positions to highlight in-game
-- Teleport to zones for testing
-
-### Asset Viewer
-Browse the complete tile atlas:
-- All 2000+ game tiles
-- Character frames and animations
-- Filter by tile type
-
-### Console Inspector (I)
-Dumps detailed game state to console:
-- Current zone objects and NPCs
-- Tile data at player position
-- Full IACT script dump
-- Inventory and weapon status
-
-## Save System
-
-Games are saved to `%APPDATA%/YodaStoriesNG/saves/` in JSON format.
-
-Save files include:
-- Player position, health, inventory
-- World map and zone connections
-- Mission progress and puzzle state
-- All game variables and flags
-
-## Mission Bot
-
-The automated Mission Bot (press **B**) plays the game automatically:
-
-- **A* pathfinding** for optimal movement
-- **Auto-combat** with melee and ranged weapons
-- **Item collection** from crates and NPCs
-- **Puzzle solving** through item trading
-- **Zone exploration** to find objectives
-
-The bot displays its current task in the HUD when active.
-
-> **Note:** The Mission Bot is currently optimized for Yoda Stories (X-Wing travel, Dagobah missions). Indiana Jones support is planned for a future update.
-
-## Project Structure
-
-```
-YodaStoriesNG/
-├── src/
-│   ├── YodaStoriesNG.Engine/    # Star Wars: Yoda Stories
-│   │   ├── Audio/               # Sound playback
-│   │   ├── Bot/                 # Automated mission bot
-│   │   │   ├── MissionBot.cs
-│   │   │   ├── BotActions.cs
-│   │   │   ├── MissionSolver.cs
-│   │   │   └── Pathfinder.cs
-│   │   ├── Data/                # Game data structures
-│   │   ├── Debug/               # Debug tools
-│   │   ├── Game/                # Core game logic
-│   │   │   ├── GameEngine.cs
-│   │   │   ├── GameState.cs
-│   │   │   ├── WorldGenerator.cs
-│   │   │   ├── MapGenerator.cs
-│   │   │   ├── ActionExecutor.cs
-│   │   │   ├── SaveGameManager.cs
-│   │   │   └── NPC.cs
-│   │   ├── Parsing/             # DTA file parser
-│   │   ├── Rendering/           # SDL2 renderer
-│   │   │   ├── GameRenderer.cs
-│   │   │   ├── TileRenderer.cs
-│   │   │   ├── Palette.cs       # Palette animation
-│   │   │   └── BitmapFont.cs
-│   │   └── UI/                  # UI components
-│   │       ├── MenuBar.cs
-│   │       ├── TitleScreen.cs
-│   │       ├── SaveGameEditor.cs
-│   │       ├── ControlsWindow.cs
-│   │       ├── DebugMapWindow.cs
-│   │       ├── ScriptEditorWindow.cs
-│   │       ├── AssetViewerWindow.cs
-│   │       └── ScoreWindow.cs
-│   │
-│   └── IndyNG.Engine/           # Indiana Jones Desktop Adventures
-│       ├── Data/                # Game data structures
-│       ├── Game/                # Game logic
-│       ├── Parsing/             # DAW file parser
-│       └── Rendering/           # Renderer with palette support
-│
-├── .gitlab-ci.yml               # CI/CD pipeline
-└── README.md
-```
-
-## Technical Details
-
-### Data Format
-
-The game parses the proprietary `.dta` format:
-
-| Section | Description |
-|---------|-------------|
-| **TILE** | 32x32 pixel tiles with palette indices |
-| **ZONE** | Map data with 3 tile layers (18x18 or 9x9) |
-| **CHAR** | Character definitions and walk frames |
-| **PUZ2** | Puzzle definitions for quest chains |
-| **IACT** | Action scripts (conditions + instructions) |
-| **IZAX** | Zone auxiliary data (NPC spawns with items) |
-| **STUP** | Title screen image (288x288) |
-
-### Palette Animation
-
-The game features authentic color cycling animation for environmental effects:
-
-| Effect | Speed | Description |
-|--------|-------|-------------|
-| Water | Fast (150ms) | Blue shimmer in lakes and oceans |
-| Lava | Fast (150ms) | Red/orange fire and volcanic effects |
-| Forest | Slow (300ms) | Subtle foliage color shifts |
-| Ice | Fast (150ms) | Sparkle effects on snow/ice |
-
-Different palette cycles are used for Yoda Stories vs Indiana Jones.
-
-### Action Scripts (IACT)
-
-Zone behavior is driven by IACT scripts. All 30+ opcodes are fully implemented.
-
-**Conditions (25 opcodes):**
-- `ZoneEntered`, `ZoneNotInitialized` - Zone entry triggers
-- `HasItem`, `RequiredItemIs`, `FindItemIs` - Inventory checks
-- `NpcIs`, `HasNpc`, `MonsterIsDead` - NPC state checks
-- `TileAtIs`, `Standing`, `HeroIsAt`, `Bump` - Position checks
-- `CounterIs`, `RandomIs`, `SectorCounterIs` - Variable checks
-- `HealthIsLessThan`, `GamesWonIs`, `ZoneIsSolved` - Game state checks
-
-**Instructions (25 opcodes):**
-- `PlaceTile`, `RemoveTile`, `MoveTile`, `DrawTile` - Map manipulation
-- `AddItem`, `RemoveItem`, `DropItem` - Inventory management
-- `SpeakHero`, `SpeakNpc`, `PlaySound` - Dialogue and audio
-- `MoveHeroTo`, `MoveHeroBy`, `ChangeZone` - Player movement
-- `EnableMonster`, `DisableMonster`, `EnableHotspot` - Entity control
-- `MarkAsSolved`, `WinGame`, `LoseGame` - Game flow
-- `SetCounter`, `RollDice`, `AddHealth` - Game variables
-
-## CI/CD Pipeline
-
-The project includes a GitLab CI pipeline (`.gitlab-ci.yml`) that:
-
-- **Builds** self-contained executables for all platforms from a single Windows runner
-- **Packages** each platform into distributable zip files
-- **Deploys** to a network share for release distribution
-
-### Build Artifacts
-
-| Platform | Runtime | Output |
-|----------|---------|--------|
-| Windows | `win-x64` | `YodaStoriesNG-windows-x64-{version}.zip` |
-| Linux | `linux-x64` | `YodaStoriesNG-linux-x64-{version}.zip` |
-| macOS | `osx-x64` | `YodaStoriesNG-macos-x64-{version}.zip` |
-
-Each zip contains self-contained single-file executables for both Yoda Stories and Indiana Jones engines.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues and pull requests.
-
-## Legal
-
-This is a fan project and is not affiliated with or endorsed by LucasArts, Disney, or any related entities. Star Wars and Yoda Stories are trademarks of Lucasfilm Ltd.
-
-You must own a legal copy of Star Wars: Yoda Stories to use this software.
-
-## Acknowledgments
-
-- [WebFun.io](https://www.webfun.io/) - Yoda Stories file format documentation and reference implementation
-- The SDL2 team for the cross-platform multimedia library
-- LucasArts for creating the original game
+*The title screen, rendered from `STUP` in the data file, with the X-Wing flyby assembled at
+runtime from tiles 948-951.*
 
 ---
 
-*May the Force be with you!*
+## The one reason it exists
+
+**Desktop Adventures generates a new, always-solvable adventure every time you start it**,
+and it did that in 1996 in under five megabytes. That generator is the interesting artefact,
+and it is locked inside a proprietary container no modern tool reads.
+
+So the point is not nostalgia. It is that `YODESK.DTA` contains a complete procedural
+adventure system - a puzzle table, a sector-growth algorithm, and a thirty-eight-opcode
+scripting language - and reading it back out is the only way to see how it works.
+
+| | |
+|---|---|
+| ![Yoda Stories](docs/shots/gameplay-yoda.png) | ![Indiana Jones](docs/shots/gameplay-indy.png) |
+| **Yoda Stories** - Tatooine, generated | **Indiana Jones** - same engine, its own palette |
+
+## Where it is
+
+**Yoda Stories is playable end to end.** Fifteen missions, procedural worlds at four sizes,
+item-chain puzzles, combat, scoring, save and load. All 36 condition and 38 instruction
+opcodes are implemented.
+
+**Indiana Jones parses, renders and plays, but generates no mission chain** - the world
+generator is still written around Yoda Stories' planet structure, so you get a real world of
+real zones with nothing to solve. That is the biggest open item on the
+[roadmap](docs/ROADMAP.md).
+
+```
+2,123 tiles      658 zones      205 puzzles      8,696 scripts      77 characters
+```
+
+## How it works
+
+- **One file is the whole game.** A flat sequence of tagged sections - tiles, zones,
+  characters, puzzles, scripts, the title art. Parsed once at startup into plain objects.
+  [DATA-FORMAT.md](docs/DATA-FORMAT.md)
+- **Zone behaviour is data, not code.** Each zone carries IACT scripts: a flat AND of
+  conditions, then a flat sequence of instructions. Doors, traps, trades, teleports and the
+  win condition are all built out of that. [SCRIPTING.md](docs/SCRIPTING.md)
+- **Worlds grow outward and chain backwards.** A sector grid expands ring by ring from the
+  spaceport; then the puzzle chain is built *backwards* from the goal, so the world is
+  solvable by construction. [WORLD-GENERATION.md](docs/WORLD-GENERATION.md)
+- **The water moves because the palette rotates.** No tile data changes and no textures are
+  re-uploaded - named colour ranges rotate within themselves on a 150 ms timer. The two
+  games animate different ranges, which is why loading one as the other looks subtly wrong.
+
+![palette cycling](docs/shots/palette-animation.gif)
+
+## Run it
+
+Needs the .NET 8 SDK and your own copy of the game. Full instructions:
+[GAME-DATA.md](docs/GAME-DATA.md), then [BUILDING.md](docs/BUILDING.md).
+
+```bash
+git clone https://github.com/sp00nznet/YodaStoriesNG.git
+cd YodaStoriesNG
+
+# drop yodesk.dta into Yoda/  (and desktop.daw into INDYDESK/, optionally)
+dotnet run --project src/YodaStoriesNG.Engine
+
+# parse and report, without opening a window
+dotnet run --project src/YodaStoriesNG.Engine -- --diag
+
+# the one check that matters: the IACT binary layout
+dotnet run --project src/YodaStoriesNG.Engine -- --self-test
+```
+
+`WASD` to move, `Space` to act, `O` for the objective, `F` to skip to a zone with something
+in it, `B` to let the bot play it for you. [PLAYING.md](docs/PLAYING.md) has the rest.
+
+## Look inside it
+
+Six debug tools, all in a normal build - five of them separate windows you can park on a
+second monitor. [DEBUG-TOOLS.md](docs/DEBUG-TOOLS.md)
+
+| | |
+|---|---|
+| ![script editor](docs/shots/script-editor.png) | ![asset viewer](docs/shots/asset-viewer.png) |
+| **`F3`** IACT disassembly, script coordinates highlighted in the world | **`F4`** all 2,123 tiles, filtered by the flag bits from the file |
+
+`F2` map viewer, `F8` save editor, `F9` zone editor, `F1` in-game overlay, `I` console dump.
+
+## Notes to self
+
+Traps this format sets, each paid for once already:
+
+- **An IACT script item always has five argument slots.** There is no count field. Reading
+  slot 0 as a count parses cleanly, shifts every argument by one, and turns dialogue into
+  slices of the next section header - and the game still *mostly* runs. `--self-test`
+  exists so it cannot come back.
+- **The version field does not identify the game.** Retail `DESKTOP.DAW` reports 2.0,
+  exactly like Yoda Stories. Trust the file name.
+- **`TileAtIs` and `IsVariable` put the tile in slot 0** and the position after it, unlike
+  every other tile opcode.
+- **The zone count in the `ZONE` header is wrong.** Scan for `IZON` markers instead.
+- **Read the backbuffer before `RenderPresent`, not after** - which is why every window
+  flushes its own screenshot rather than the game loop doing it centrally.
+
+## Screenshots
+
+Every image here is generated, never hand-taken:
+
+```powershell
+pwsh tools/capture-shots.ps1
+```
+
+Two minutes. It builds, plays itself through every screen with the bot, and converts the
+frames. [CAPTURING-SCREENSHOTS.md](docs/CAPTURING-SCREENSHOTS.md)
+
+## Layout
+
+```
+docs/                     everything needing more than a paragraph - start at docs/README.md
+  hero.gif  shots/        generated by tools/capture-shots.ps1, never by hand
+src/
+  YodaStoriesNG.Engine/     THE GAME - plays both .dta and .daw
+    Parsing/DtaParser.cs      the whole file format
+    Game/GameEngine.cs        frame loop, input, rules
+    Game/WorldGenerator.cs    missions and the backwards puzzle chain
+    Game/ActionExecutor.cs    the 74 script opcodes
+    Rendering/Palette.cs      256 colours and the animation cycles
+    Bot/                      A* mission bot, plays it for you
+    UI/                       title screen, HUD, six debug tools
+    Dev/                      screenshot harness and the self-test
+  IndyNG.Engine/            a minimal .daw parse/palette testbed, not how you play Indy
+tools/                    capture harness, SZDD decompressors, palette extractors
+```
+
+## Legal
+
+Fan project, not affiliated with or endorsed by LucasArts, Disney or Lucasfilm. Star Wars,
+Yoda Stories and Indiana Jones are their trademarks. **No game content is in this
+repository** - you must own a legal copy of whichever game you load.
+
+Code is [MIT](LICENSE). File-format work is cross-checked against
+[WebFun](https://codeberg.org/cyco/WebFun), without which several of the notes above would
+still be open bugs.
+
+---
+
+*May the Force be with you.*

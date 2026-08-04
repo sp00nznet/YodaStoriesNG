@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Data;
 using YodaStoriesNG.Engine.Game;
 using YodaStoriesNG.Engine.Rendering;
@@ -280,6 +281,7 @@ public class DebugMapWindow : IDisposable
         // Draw legend
         RenderLegend(world);
 
+        Dev.Capture.Flush(_renderer, "map");
         SDL.RenderPresent(_renderer);
     }
 

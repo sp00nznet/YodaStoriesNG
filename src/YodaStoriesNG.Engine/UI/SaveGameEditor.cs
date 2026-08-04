@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Game;
 using YodaStoriesNG.Engine.Rendering;
 
@@ -398,6 +399,7 @@ public unsafe class SaveGameEditor
         // Status bar
         RenderStatusBar();
 
+        Dev.Capture.Flush(_renderer, "save-editor");
         SDL.RenderPresent(_renderer);
     }
 

@@ -187,15 +187,17 @@ public class ActionExecutor
                     return false;
                 return _state.HasItem(args[0]);
 
+            // Note the argument order: the tile ID comes FIRST and the position after it,
+            // which is the reverse of every other tile opcode. Matches WebFun's
+            // conditions/tile-at-is.ts, whose own doc comment states it the wrong way round.
             case ConditionOpcode.TileAtIs:
                 if (args.Count < 4 || _currentZone == null)
                     return false;
-                return _currentZone.GetTile(args[0], args[1], args[2]) == args[3];
+                return _currentZone.GetTile(args[1], args[2], args[3]) == args[0];
 
+            // Takes no arguments - it asks whether THIS zone is solved.
             case ConditionOpcode.ZoneIsSolved:
-                if (args.Count < 1)
-                    return false;
-                return _state.IsZoneSolved(args[0]);
+                return _state.IsZoneSolved(_state.CurrentZoneId);
 
             case ConditionOpcode.HealthIsLessThan:
                 if (args.Count < 1)
@@ -325,12 +327,11 @@ public class ActionExecutor
                     return false;
                 return _state.GamesWon > args[0];
 
+            // Shares TileAtIs's layout: value first, then the (x, y, layer) it lives at.
             case ConditionOpcode.IsVariable:
-                // XOR addressing: key = arg0 ^ arg1 ^ arg2, check if variable == arg3
-                if (args.Count < 4)
+                if (args.Count < 4 || _currentZone == null)
                     return false;
-                int varKey = args[0] ^ args[1] ^ args[2];
-                return _state.GetVariable(varKey) == args[3];
+                return _currentZone.GetTile(args[1], args[2], args[3]) == args[0];
 
             default:
                 // Unknown condition - assume true to allow script to continue

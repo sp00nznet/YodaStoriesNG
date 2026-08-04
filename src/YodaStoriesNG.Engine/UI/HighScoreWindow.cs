@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Data;
 using YodaStoriesNG.Engine.Game;
 using YodaStoriesNG.Engine.Rendering;
@@ -230,6 +231,7 @@ public unsafe class HighScoreWindow : IDisposable
         // Footer hint
         _font.RenderText(_renderer, "Tab/Arrow: Switch game | ESC: Close", 90, WindowHeight - 18, 1, 100, 100, 120, 255);
 
+        Dev.Capture.Flush(_renderer, "highscores");
         SDL.RenderPresent(_renderer);
     }
 

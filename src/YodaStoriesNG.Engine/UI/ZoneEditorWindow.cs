@@ -1,4 +1,5 @@
 using Hexa.NET.SDL2;
+using YodaStoriesNG.Engine;
 using YodaStoriesNG.Engine.Data;
 using YodaStoriesNG.Engine.Game;
 using YodaStoriesNG.Engine.Rendering;
@@ -504,6 +505,7 @@ public unsafe class ZoneEditorWindow : IDisposable
         RenderZoneView();
         RenderStatusBar();
 
+        Dev.Capture.Flush(_renderer, "zone-editor");
         SDL.RenderPresent(_renderer);
     }
 

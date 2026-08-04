@@ -1,4 +1,4 @@
-using YodaStoriesNG.Engine.Data;
+﻿using YodaStoriesNG.Engine.Data;
 
 namespace YodaStoriesNG.Engine.Parsing;
 
@@ -8,6 +8,9 @@ namespace YodaStoriesNG.Engine.Parsing;
 /// </summary>
 public class DtaParser
 {
+    /// <summary>Every IACT condition and instruction carries exactly five argument slots.</summary>
+    private const int ActionItemArgumentCount = 5;
+
     private BinaryReader _reader = null!;
     private GameData _data = null!;
 
@@ -137,19 +140,10 @@ public class DtaParser
         var minor = (minorBytes[0] << 8) | minorBytes[1];
         _data.Version = new Version(major, minor);
 
-        // Version 1.x = Indiana Jones, Version 2.x = Yoda Stories
-        // This provides secondary detection if filename wasn't conclusive
-        if (major == 1 && _data.GameType != GameType.IndianaJones)
-        {
-            Console.WriteLine("Detected Indiana Jones format from version 1.x");
-            _data.GameType = GameType.IndianaJones;
-        }
-        else if (major == 2 && _data.GameType != GameType.YodaStories)
-        {
-            Console.WriteLine("Detected Yoda Stories format from version 2.x");
-            _data.GameType = GameType.YodaStories;
-        }
-
+        // The version field does NOT identify the game: retail DESKTOP.DAW also reports
+        // 2.0, so trusting it here silently turned every Indiana Jones load into a Yoda
+        // Stories one (wrong palette cycles, wrong title-screen vehicle). The file name
+        // is authoritative - see DetectGameType.
         Console.WriteLine($"Game version: {major}.{minor} ({_data.GameType})");
     }
 
@@ -356,7 +350,7 @@ public class DtaParser
                     zone.Aux4Data = new ZoneAux4Data { RawData = _reader.ReadBytes(8) };
                     break;
                 case "IACT":
-                    zone.Actions.Add(ParseIACT());
+                    zone.Actions.Add(ParseAction(_reader));
                     break;
                 default:
                     // Not a zone subsection - go back and return
@@ -453,7 +447,7 @@ public class DtaParser
                     zone.Aux4Data = ParseIZX4FromReader(reader);
                     break;
                 case "IACT":
-                    zone.Actions.Add(ParseActionFromReader(reader, ms));
+                    zone.Actions.Add(ParseAction(reader));
                     break;
                 default:
                     // Unknown tag or end of zone - stop parsing
@@ -568,164 +562,93 @@ public class DtaParser
         return new ZoneAux4Data { RawData = data };
     }
 
-    private Data.Action ParseActionFromReader(BinaryReader reader, MemoryStream ms)
+    /// <summary>
+    /// Parses one IACT (action script) block.
+    ///
+    /// Layout, verified against WebFun's file-format/categories/action.ts:
+    ///
+    ///   uint32  size of the block
+    ///   uint16  condition count, followed by that many items
+    ///   uint16  instruction count, followed by that many items
+    ///
+    /// and an item is always:
+    ///
+    ///   uint16  opcode
+    ///   int16   argument x5   - ALWAYS five slots, used or not
+    ///   uint16  text length
+    ///   bytes   text
+    ///
+    /// The five argument slots are the part that is easy to get wrong: this parser used
+    /// to read the first slot as an argument *count* and the second as the text length,
+    /// which shifted every argument by one and turned dialogue into slices of the
+    /// following section headers. Opcode argument indices in ActionExecutor and
+    /// ScriptEditorWindow are written against the layout above.
+    /// </summary>
+    private Data.Action ParseAction(BinaryReader reader)
     {
         var action = new Data.Action();
-        // IACT length is 2 bytes (not 4)
-        var length = reader.ReadUInt16();
-        var endPos = ms.Position + length;
+        var length = reader.ReadUInt32();
+        var endPos = reader.BaseStream.Position + length;
 
         try
         {
-            // Parse conditions
             var conditionCount = reader.ReadUInt16();
-            for (int i = 0; i < conditionCount && ms.Position < endPos; i++)
+            for (int i = 0; i < conditionCount && reader.BaseStream.Position < endPos; i++)
             {
-                var condition = new Condition();
-                condition.Opcode = (ConditionOpcode)reader.ReadUInt16();
-                var argCount = reader.ReadUInt16();
-                var textLength = reader.ReadUInt16();
-
-                for (int j = 0; j < argCount && ms.Position < endPos; j++)
+                var (opcode, args, text) = ReadActionItem(reader);
+                action.Conditions.Add(new Condition
                 {
-                    condition.Arguments.Add(reader.ReadInt16());
-                }
-
-                if (textLength > 0 && ms.Position + textLength <= endPos)
-                {
-                    var textBytes = reader.ReadBytes(textLength);
-                    condition.Text = System.Text.Encoding.ASCII.GetString(textBytes).TrimEnd('\0');
-                }
-
-                action.Conditions.Add(condition);
+                    Opcode = (ConditionOpcode)opcode,
+                    Arguments = args,
+                    Text = text
+                });
             }
 
-            // Parse instructions
-            if (ms.Position < endPos)
+            if (reader.BaseStream.Position < endPos)
             {
                 var instructionCount = reader.ReadUInt16();
-                for (int i = 0; i < instructionCount && ms.Position < endPos; i++)
+                for (int i = 0; i < instructionCount && reader.BaseStream.Position < endPos; i++)
                 {
-                    var instruction = new Instruction();
-                    instruction.Opcode = (InstructionOpcode)reader.ReadUInt16();
-                    var argCount = reader.ReadUInt16();
-                    var textLength = reader.ReadUInt16();
-
-                    for (int j = 0; j < argCount && ms.Position < endPos; j++)
+                    var (opcode, args, text) = ReadActionItem(reader);
+                    action.Instructions.Add(new Instruction
                     {
-                        instruction.Arguments.Add(reader.ReadInt16());
-                    }
-
-                    if (textLength > 0 && ms.Position + textLength <= endPos)
-                    {
-                        var textBytes = reader.ReadBytes(textLength);
-                        instruction.Text = System.Text.Encoding.ASCII.GetString(textBytes).TrimEnd('\0');
-                    }
-
-                    action.Instructions.Add(instruction);
+                        Opcode = (InstructionOpcode)opcode,
+                        Arguments = args,
+                        Text = text
+                    });
                 }
             }
         }
-        catch
+        catch (EndOfStreamException)
         {
-            // If parsing fails, just seek to end of action
+            // Truncated action - keep whatever parsed and resync below.
         }
 
-        // Ensure we're at the end of the action
-        if (ms.Position != endPos && endPos <= ms.Length)
-            ms.Seek(endPos, SeekOrigin.Begin);
+        // Resync to the block boundary whether or not the body parsed cleanly.
+        if (reader.BaseStream.Position != endPos && endPos <= reader.BaseStream.Length)
+            reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
 
         return action;
     }
 
-
-    private Condition ParseCondition()
+    private static (ushort opcode, List<short> arguments, string? text) ReadActionItem(BinaryReader reader)
     {
-        var condition = new Condition();
-        // Format: opcode (2 bytes) + argCount (2 bytes) + textLength (2 bytes) + args + text
-        condition.Opcode = (ConditionOpcode)_reader.ReadUInt16();
-        var argCount = _reader.ReadUInt16();
-        var textLength = _reader.ReadUInt16();
+        var opcode = reader.ReadUInt16();
 
-        // Read variable number of arguments based on argCount
-        for (int i = 0; i < argCount; i++)
+        var arguments = new List<short>(ActionItemArgumentCount);
+        for (int i = 0; i < ActionItemArgumentCount; i++)
+            arguments.Add(reader.ReadInt16());
+
+        var textLength = reader.ReadUInt16();
+        string? text = null;
+        if (textLength > 0)
         {
-            condition.Arguments.Add(_reader.ReadInt16());
+            // The originals are ISO-8859-2; Latin1 is byte-identical over the ASCII range
+            // the games actually use and needs no encoding provider registration.
+            text = System.Text.Encoding.Latin1.GetString(reader.ReadBytes(textLength)).TrimEnd('\0');
         }
 
-        // Read text if present
-        if (textLength > 0 && textLength < 1000)
-        {
-            var textBytes = _reader.ReadBytes(textLength);
-            condition.Text = System.Text.Encoding.ASCII.GetString(textBytes).TrimEnd('\0');
-        }
-
-        return condition;
-    }
-
-    private Instruction ParseInstruction()
-    {
-        var instruction = new Instruction();
-        // Format: opcode (2 bytes) + argCount (2 bytes) + textLength (2 bytes) + args + text
-        instruction.Opcode = (InstructionOpcode)_reader.ReadUInt16();
-        var argCount = _reader.ReadUInt16();
-        var textLength = _reader.ReadUInt16();
-
-        // Read variable number of arguments based on argCount
-        for (int i = 0; i < argCount; i++)
-        {
-            instruction.Arguments.Add(_reader.ReadInt16());
-        }
-
-        // Read text if present
-        if (textLength > 0 && textLength < 1000)
-        {
-            var textBytes = _reader.ReadBytes(textLength);
-            instruction.Text = System.Text.Encoding.ASCII.GetString(textBytes).TrimEnd('\0');
-        }
-
-        return instruction;
-    }
-
-    /// <summary>
-    /// Parses an IACT (action script) section using the main reader.
-    /// </summary>
-    private Data.Action ParseIACT()
-    {
-        var action = new Data.Action();
-        // IACT length is 2 bytes
-        var length = _reader.ReadUInt16();
-        var endPos = _reader.BaseStream.Position + length;
-
-        try
-        {
-            // Parse conditions
-            var conditionCount = _reader.ReadUInt16();
-            for (int i = 0; i < conditionCount && _reader.BaseStream.Position < endPos; i++)
-            {
-                action.Conditions.Add(ParseCondition());
-            }
-
-            // Parse instructions
-            if (_reader.BaseStream.Position < endPos)
-            {
-                var instructionCount = _reader.ReadUInt16();
-                for (int i = 0; i < instructionCount && _reader.BaseStream.Position < endPos; i++)
-                {
-                    action.Instructions.Add(ParseInstruction());
-                }
-            }
-        }
-        catch
-        {
-            // If parsing fails, just seek to end of action
-        }
-
-        // Ensure we're at the end of the action
-        if (_reader.BaseStream.Position != endPos && endPos <= _reader.BaseStream.Length)
-            _reader.BaseStream.Seek(endPos, SeekOrigin.Begin);
-
-        return action;
+        return (opcode, arguments, text);
     }
 
     private void ParsePuzzlesSection(uint length)
