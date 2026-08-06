@@ -1,5 +1,7 @@
 # YODA STORIES NG
 
+[![build](https://github.com/sp00nznet/YodaStoriesNG/actions/workflows/build.yml/badge.svg)](https://github.com/sp00nznet/YodaStoriesNG/actions/workflows/build.yml)
+
 **The 1997 LucasArts desktop toy, rebuilt from its own data file.** Point it at a copy of
 *Star Wars: Yoda Stories* or *Indiana Jones and His Desktop Adventures* and it parses the
 original tiles, zones, characters and scripts and plays the game - no original executable,
@@ -61,8 +63,12 @@ real zones with nothing to solve. That is the biggest open item on the
 
 ## Run it
 
-Needs the .NET 8 SDK and your own copy of the game. Full instructions:
-[GAME-DATA.md](docs/GAME-DATA.md), then [BUILDING.md](docs/BUILDING.md).
+**Prebuilt, self-contained, no runtime to install:**
+[Releases](https://github.com/sp00nznet/YodaStoriesNG/releases) - Windows, Linux, macOS
+(Intel and Apple Silicon). You still need your own copy of the game:
+[GAME-DATA.md](docs/GAME-DATA.md).
+
+From source, with the .NET 8 SDK ([BUILDING.md](docs/BUILDING.md)):
 
 ```bash
 git clone https://github.com/sp00nznet/YodaStoriesNG.git
@@ -108,6 +114,9 @@ Traps this format sets, each paid for once already:
 - **The zone count in the `ZONE` header is wrong.** Scan for `IZON` markers instead.
 - **Read the backbuffer before `RenderPresent`, not after** - which is why every window
   flushes its own screenshot rather than the game loop doing it centrally.
+- **A single-file publish needs `IncludeAllContentForSelfExtract`, not just
+  `IncludeNativeLibrariesForSelfExtract`.** Without it the binary parses a data file
+  perfectly and then dies on the first SDL call, so "does it start" does not catch it.
 
 ## Screenshots
 
@@ -145,7 +154,8 @@ Fan project, not affiliated with or endorsed by LucasArts, Disney or Lucasfilm. 
 Yoda Stories and Indiana Jones are their trademarks. **No game content is in this
 repository** - you must own a legal copy of whichever game you load.
 
-Code is [MIT](LICENSE). File-format work is cross-checked against
+Code is [MIT](LICENSE); see [NOTICE](NOTICE) for what that does and does not cover.
+File-format work is cross-checked against
 [WebFun](https://codeberg.org/cyco/WebFun), without which several of the notes above would
 still be open bugs.
 

@@ -1,0 +1,11 @@
+The MIT licence in LICENSE covers the source code in this repository only.
+
+Star Wars, Yoda Stories, Indiana Jones and His Desktop Adventures, and all
+related characters and artwork are trademarks of Lucasfilm Ltd. and Disney.
+This project is a fan reimplementation and is not affiliated with, endorsed by,
+or connected to Lucasfilm, LucasArts or Disney.
+
+This repository ships no game content. The engine reads the data files from a
+copy of the original game that you must legally own; see docs/GAME-DATA.md.
+Nothing in the MIT licence grants any right to that content, and the release
+archives published from this repository contain only the engine.

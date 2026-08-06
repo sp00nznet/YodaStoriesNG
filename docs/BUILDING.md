@@ -97,14 +97,43 @@ dotnet publish src/YodaStoriesNG.Engine \
   --self-contained true \
   -p:PublishSingleFile=true \
   -p:IncludeNativeLibrariesForSelfExtract=true \
+  -p:IncludeAllContentForSelfExtract=true \
   -o publish/windows/YodaStoriesNG
 ```
 
-Swap `-r win-x64` for `linux-x64` or `osx-x64`. All three cross-compile from any host - the
-GitLab pipeline builds every platform on one Windows runner.
+Swap `-r win-x64` for `linux-x64`, `osx-x64` or `osx-arm64`. All four cross-compile from any
+host, which is why CI builds every platform on a single Linux runner.
 
-`IncludeNativeLibrariesForSelfExtract` is not optional: without it the bundled SDL2 native
-library is not unpacked and the game fails at startup with a `DllNotFoundException`.
+**Both self-extract properties are load-bearing.** This is the one non-obvious thing about
+publishing this project.
+
+With only `IncludeNativeLibrariesForSelfExtract`, you get a binary that looks fine: it
+starts, finds your data file, parses all 2,123 tiles and 658 zones - and then dies on the
+first SDL call with
+
+```
+Error: The type initializer for 'Hexa.NET.SDL2.SDL' threw an exception.
+```
+
+`Hexa.NET.SDL2` resolves its native library from disk rather than from the bundle, so SDL2
+has to be present in the single-file extraction directory. `IncludeAllContentForSelfExtract`
+is what puts it there. Omit it and every release archive you publish will be broken in a way
+that a smoke test of "does it parse" will not catch.
+
+Test a packaged build with the flag that needs neither data nor a display:
+
+```bash
+./YodaStoriesNG.Engine --self-test
+```
+
+and then with a real data file, which exercises SDL properly:
+
+```bash
+./YodaStoriesNG.Engine /path/to/Yoda --diag
+```
+
+`--diag` creates the window, the renderer and the tile atlas before exiting, so it fails
+loudly if the native library is missing.
 
 The published executable looks for game data next to itself, so ship the `Yoda/` folder
 alongside it - or ship neither and let the player point the file picker at their own copy.
@@ -115,25 +144,46 @@ alongside it - or ship neither and let the player point the file picker at their
 
 | Project | What it is |
 |---|---|
-| `src/YodaStoriesNG.Engine` | **The game.** ~15k lines. Plays both `.dta` and `.daw` files, with the full renderer, script engine, world generator, UI, debug tools and bot. |
-| `src/IndyNG.Engine` | A ~2k-line standalone testbed that was used to work out the Indiana Jones palette and `.daw` parsing in isolation. It renders zones and nothing else. Kept because it is a useful minimal harness for format work; **not** the way to play Indiana Jones. |
+| `src/YodaStoriesNG.Engine` | **The game.** ~23,800 lines. Plays both `.dta` and `.daw` files, with the full renderer, script engine, world generator, UI, debug tools and bot. |
+| `src/IndyNG.Engine` | A ~2,000-line standalone testbed that was used to work out the Indiana Jones palette and `.daw` parsing in isolation. It renders zones and nothing else. Kept because it is a useful minimal harness for format work; **not** the way to play Indiana Jones. |
 
 If you are here to change how the game behaves, everything you want is in the first one.
 See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
-## Continuous integration
+## Continuous integration and releases
 
-`.gitlab-ci.yml` defines three stages - `build`, `package`, `deploy` - that run on a
-Windows shell runner tagged `win10`:
+`.github/workflows/build.yml`, two jobs.
 
-1. **build** publishes both projects self-contained for `win-x64`, `linux-x64` and
-   `osx-x64` into `publish/`.
-2. **package** zips each platform into `YodaStoriesNG-<platform>-<version>.zip`.
-3. **deploy** copies the zips to a network share.
+**`check`** runs on every push to `main`, every pull request, and on demand. It restores,
+builds the solution in Release, and runs the self-test:
 
-There is no test stage, because there are no tests yet. See [ROADMAP.md](ROADMAP.md).
+```bash
+dotnet run --project src/YodaStoriesNG.Engine -- --self-test
+```
+
+That check needs no game data and opens no window, so it runs on a bare runner. It asserts
+the IACT binary layout round-trips - see
+[SCRIPTING.md](SCRIPTING.md#the-five-argument-trap) for why that is the thing worth
+guarding.
+
+**`release`** runs only for a `v*` tag, after `check` passes. It publishes both projects
+self-contained for all four runtime identifiers, zips each with the README, licence and
+data-setup guide, and creates a GitHub Release with the four archives attached.
+
+### Cutting a release
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+That is the whole procedure. Version numbers come from the tag: `v0.2.0` produces
+`YodaStoriesNG-win-x64-0.2.0.zip` and friends. Delete the tag and the release to redo one.
+
+> Releases contain the engine only. They must never contain game data - see
+> [GAME-DATA.md](GAME-DATA.md#legal).
 
 ---
 

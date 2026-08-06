@@ -20,6 +20,10 @@ implemented, palette animation is authentic, there is a mission bot, a score sys
 and load, controller support, a native menu bar, and a screenshot harness that regenerates
 every image in these docs from a real run.
 
+CI builds and self-tests every push on GitHub Actions, and a `v*` tag publishes
+self-contained builds for Windows, Linux and both macOS architectures. The old GitLab
+pipeline, which deployed to a network share on a server that no longer exists, is gone.
+
 ---
 
 ## Known problems
@@ -87,9 +91,10 @@ expensive bug lived:
 dotnet run --project src/YodaStoriesNG.Engine -- --self-test
 ```
 
-Nothing else is covered, and CI has no test stage. The natural next targets are the rest of
-the file format and the world generator's solvability guarantee - both are pure functions
-over inputs the repository can synthesise.
+CI runs it on every push and pull request, so the layout cannot regress silently. Nothing
+else is covered. The natural next targets are the rest of the file format and the world
+generator's solvability guarantee - both are pure functions over inputs the repository can
+synthesise.
 
 ---
 
@@ -104,8 +109,7 @@ Roughly in order of value per unit of work.
 4. **Extend the self-test to the whole container format.** `SelfTest.cs` already builds a
    data file by hand; extending it to tiles, characters and puzzles is more of the same, and
    would have caught both the IACT bug and the `TNAM` one.
-5. **Add a CI test stage** once there is enough to run.
-6. **Find the biplane tiles.**
+5. **Find the biplane tiles.**
 
 ## Deliberately not doing
 

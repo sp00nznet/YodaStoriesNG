@@ -1,0 +1,133 @@
+name: build
+
+# Every push and pull request gets checked. Pushing a v* tag additionally
+# publishes a GitHub Release with a self-contained build per platform.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  check:
+    name: build and self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - run: dotnet restore
+
+      - run: dotnet build YodaStoriesNG.sln -c Release --no-restore
+
+      # Needs no game data and opens no window, so it runs anywhere.
+      # Guards the IACT binary layout - see docs/SCRIPTING.md.
+      - name: Self-test
+        run: dotnet run --project src/YodaStoriesNG.Engine -c Release --no-build -- --self-test
+
+  release:
+    name: release
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Self-contained builds cross-compile from any host, so one Linux runner
+      # produces every platform - which is what the old GitLab pipeline did from
+      # a single Windows runner. Four sequential builds beat a matrix here: the
+      # whole thing takes a few minutes, and one job means one release to create
+      # rather than four legs racing to create it.
+      #
+      # Both self-extract properties are load-bearing. With only
+      # IncludeNativeLibrariesForSelfExtract, the binary parses a data file fine
+      # and then dies on the first SDL call with "type initializer for
+      # Hexa.NET.SDL2.SDL threw an exception" - the binding's native resolver
+      # needs SDL2 on disk in the extraction directory, which is what
+      # IncludeAllContentForSelfExtract guarantees. The old GitLab pipeline set
+      # only the first, so its release archives never actually ran.
+      - name: Publish and package every platform
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+
+          # Only the game ships. IndyNG.Engine is a format testbed, not a way to
+          # play Indiana Jones, and bundling it would double a ~70 MB download
+          # with a binary nobody should run. Developers build it from source.
+          for rid in win-x64 linux-x64 osx-x64 osx-arm64; do
+            echo "::group::$rid"
+            staging="YodaStoriesNG-$rid-$version"
+            rm -rf "$staging"
+
+            dotnet publish src/YodaStoriesNG.Engine/YodaStoriesNG.Engine.csproj \
+              -c Release -r "$rid" \
+              --self-contained true \
+              -p:PublishSingleFile=true \
+              -p:IncludeNativeLibrariesForSelfExtract=true \
+              -p:IncludeAllContentForSelfExtract=true \
+              -p:DebugType=none \
+              -o "$staging"
+
+            cp README.md LICENSE NOTICE "$staging/"
+            cp docs/GAME-DATA.md "$staging/HOW-TO-ADD-GAME-DATA.md"
+            zip -qr "dist/$staging.zip" "$staging"
+            echo "::endgroup::"
+          done
+
+          ls -lh dist
+
+      - name: Release notes
+        run: |
+          cat > notes.md <<'EOF'
+          A reimplementation of the LucasArts Desktop Adventures engine.
+
+          **This archive contains no game content.** You need your own legal copy of
+          *Star Wars: Yoda Stories* or *Indiana Jones and His Desktop Adventures* -
+          see `HOW-TO-ADD-GAME-DATA.md` in the archive, or
+          [docs/GAME-DATA.md](https://github.com/sp00nznet/YodaStoriesNG/blob/main/docs/GAME-DATA.md).
+
+          ### Downloads
+
+          | Archive | For |
+          |---|---|
+          | `win-x64` | Windows |
+          | `linux-x64` | Linux |
+          | `osx-arm64` | macOS, Apple Silicon |
+          | `osx-x64` | macOS, Intel |
+
+          Self-contained: no .NET runtime install needed. One executable, which plays
+          both games.
+
+          ### Status
+
+          Yoda Stories is playable end to end. Indiana Jones parses, renders and plays
+          but generates no mission chain yet -
+          [roadmap](https://github.com/sp00nznet/YodaStoriesNG/blob/main/docs/ROADMAP.md).
+          EOF
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --verify-tag \
+            dist/*.zip
