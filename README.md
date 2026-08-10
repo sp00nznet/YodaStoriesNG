@@ -1,6 +1,7 @@
 # YODA STORIES NG
 
 [![build](https://github.com/sp00nznet/YodaStoriesNG/actions/workflows/build.yml/badge.svg)](https://github.com/sp00nznet/YodaStoriesNG/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/sp00nznet/YodaStoriesNG)](https://github.com/sp00nznet/YodaStoriesNG/releases/latest)
 
 **The 1997 LucasArts desktop toy, rebuilt from its own data file.** Point it at a copy of
 *Star Wars: Yoda Stories* or *Indiana Jones and His Desktop Adventures* and it parses the
