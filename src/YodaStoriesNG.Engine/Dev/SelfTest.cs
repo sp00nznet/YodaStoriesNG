@@ -23,6 +23,7 @@ public static class SelfTest
         failures += Check("zone header round-trip", ZoneHeaderRoundTrip);
         failures += Check("data file lookup ignores case", DataFileLookupIgnoresCase);
         failures += Check("menu bar keeps off user32 away from Windows", MenuBarStaysOffUser32);
+        failures += Check("file filters convert for portable dialogs", FilterConvertsToExtensions);
 
         Console.WriteLine(failures == 0 ? "\nSelf-test PASSED" : $"\nSelf-test FAILED ({failures})");
         return failures == 0 ? 0 : 1;
@@ -109,6 +110,28 @@ public static class SelfTest
             return;
 
         new UI.NativeMenuBar().Initialize(null);
+    }
+
+    /// <summary>
+    /// zenity, kdialog and osascript all want a plain extension list, and the filter they
+    /// have to get it from is a Win32 one whose display halves repeat every pattern in
+    /// brackets - so the easy mistake is to take "dta" twice and "*" as an extension.
+    /// </summary>
+    private static void FilterConvertsToExtensions()
+    {
+        var extensions = UI.FileDialogHelper.ExtensionsIn(
+            "Desktop Adventures Data (*.dta;*.daw)|*.dta;*.daw|Yoda Stories (*.dta)|*.dta|All Files (*.*)|*.*");
+
+        AssertSequence(extensions, new[] { "dta", "daw" });
+        AssertSequence(UI.FileDialogHelper.ExtensionsIn("All Files (*.*)|*.*"), Array.Empty<string>());
+    }
+
+    private static void AssertSequence(List<string> actual, string[] expected)
+    {
+        Assert(actual.Count == expected.Length,
+            $"got [{string.Join(", ", actual)}], expected [{string.Join(", ", expected)}]");
+        for (int i = 0; i < expected.Length; i++)
+            Assert(actual[i] == expected[i], $"item {i} was \"{actual[i]}\", expected \"{expected[i]}\"");
     }
 
     /// <summary>

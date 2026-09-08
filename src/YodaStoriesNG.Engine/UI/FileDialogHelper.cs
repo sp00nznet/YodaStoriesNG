@@ -3,7 +3,8 @@ using System.Runtime.InteropServices;
 namespace YodaStoriesNG.Engine.UI;
 
 /// <summary>
-/// Helper class for Windows file dialogs using native APIs.
+/// File dialogs. Windows gets comdlg32 straight; everywhere else the call goes to
+/// <see cref="PortableFileDialog"/>, which asks the desktop for its own picker.
 /// </summary>
 public static class FileDialogHelper
 {
@@ -58,11 +59,7 @@ public static class FileDialogHelper
     public static string? ShowOpenDialog(string title, string filter, string? initialDir = null, string? defaultExt = null)
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            Console.WriteLine("File dialogs only supported on Windows. Using console input...");
-            Console.Write($"{title}: ");
-            return Console.ReadLine();
-        }
+            return PortableFileDialog.Open(title, initialDir, ExtensionsIn(filter));
 
         // Convert filter format from "Display|*.ext" to "Display\0*.ext\0"
         var nativeFilter = filter.Replace("|", "\0") + "\0\0";
@@ -110,11 +107,7 @@ public static class FileDialogHelper
     public static string? ShowSaveDialog(string title, string filter, string? initialDir = null, string? defaultExt = null, string? defaultFileName = null)
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            Console.WriteLine("File dialogs only supported on Windows. Using console input...");
-            Console.Write($"{title}: ");
-            return Console.ReadLine();
-        }
+            return PortableFileDialog.Save(title, initialDir, defaultFileName, ExtensionsIn(filter));
 
         // Convert filter format from "Display|*.ext" to "Display\0*.ext\0"
         var nativeFilter = filter.Replace("|", "\0") + "\0\0";
@@ -156,6 +149,30 @@ public static class FileDialogHelper
         {
             fileHandle.Free();
         }
+    }
+
+    /// <summary>
+    /// Pulls the extensions out of a Win32 filter string ("Data (*.dta;*.daw)|*.dta;*.daw|...")
+    /// so the non-Windows dialogs, which want a plain list, can be fed the same argument.
+    /// </summary>
+    internal static List<string> ExtensionsIn(string filter)
+    {
+        var extensions = new List<string>();
+
+        // Odd segments are the patterns. The even ones are display names, which repeat the
+        // patterns in brackets and would otherwise be counted twice.
+        var segments = filter.Split('|');
+        for (int i = 1; i < segments.Length; i += 2)
+        {
+            foreach (var pattern in segments[i].Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var extension = pattern.Trim().TrimStart('*', '.');
+                if (extension.Length > 0 && extension != "*" && !extensions.Contains(extension))
+                    extensions.Add(extension);
+            }
+        }
+
+        return extensions;
     }
 
     /// <summary>

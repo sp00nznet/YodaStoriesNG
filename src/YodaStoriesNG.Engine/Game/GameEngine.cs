@@ -34,7 +34,7 @@ public unsafe partial class GameEngine : IDisposable
     private ScoreWindow? _scoreWindow;
     private UI.HighScoreWindow? _highScoreWindow;
     private TitleScreen? _titleScreen;
-    private NativeMenuBar? _menuBar;
+    private UI.IMenuBar? _menuBar;
 
     private bool _isRunning;
     private readonly string _dataPath;
@@ -268,8 +268,21 @@ public unsafe partial class GameEngine : IDisposable
         _titleScreen.SetRenderer(_renderer.GetRenderer());
         _titleScreen.OnStartGame += () => { _showingTitleScreen = false; StartNewGame(); };
 
-        _menuBar = new NativeMenuBar();
-        _menuBar.Initialize(_renderer.GetWindow());
+        // Windows gets the real OS menu; everywhere else user32.dll does not exist, so the
+        // SDL one draws into the strip GameRenderer reserves above the game area.
+        if (OperatingSystem.IsWindows())
+        {
+            var nativeMenuBar = new NativeMenuBar();
+            nativeMenuBar.Initialize(_renderer.GetWindow());
+            _menuBar = nativeMenuBar;
+        }
+        else
+        {
+            var menuBar = new UI.MenuBar(_renderer.GetFont());
+            menuBar.SetRenderer(_renderer.GetRenderer(), _renderer.GetWindowID());
+            _menuBar = menuBar;
+        }
+
         _menuBar.OnNewGame += (size) => { _selectedWorldSize = size; StartNewGame(); };
         _menuBar.OnSaveGame += SaveGame;
         _menuBar.OnSaveGameAs += SaveGameAs;
@@ -988,19 +1001,23 @@ public unsafe partial class GameEngine : IDisposable
                 }
             }
 
+            // The menu bar goes first, and on the title screen too - New Game lives in it.
+            // It owns the reserved strip and so wants raw window coordinates; everything
+            // after it thinks in game-area coordinates, hence the shift.
+            if (_menuBar != null)
+            {
+                SDLEvent evtCopy = evt;
+                if (_menuBar.HandleEvent(&evtCopy))
+                    continue;
+            }
+
+            ShiftPointerIntoGameArea(&evt);
+
             // Handle title screen events
             if (_showingTitleScreen && _titleScreen != null)
             {
                 SDLEvent evtCopy = evt;
                 if (_titleScreen.HandleEvent(&evtCopy))
-                    continue;
-            }
-
-            // Handle menu bar events
-            if (!_showingTitleScreen && _menuBar != null)
-            {
-                SDLEvent evtCopy = evt;
-                if (_menuBar.HandleEvent(&evtCopy))
                     continue;
             }
 
@@ -4223,10 +4240,13 @@ public unsafe partial class GameEngine : IDisposable
         if (_renderer == null)
             return;
 
+        _renderer.BeginGameArea();
+
         // Render title screen
         if (_showingTitleScreen)
         {
             _titleScreen?.Render();
+            RenderMenuBar();
             _renderer.Present();
             return;
         }
@@ -4338,10 +4358,7 @@ public unsafe partial class GameEngine : IDisposable
             _renderer.RenderDebugOverlay(tabs, _debugOverlay.CurrentTab, lines, _debugOverlay.ScrollOffset);
         }
 
-        // Render menu bar at fixed physical size (doesn't scale with graphics)
-        _renderer.DisableLogicalSize();
-        _menuBar?.Render();
-        _renderer.RestoreLogicalSize();
+        RenderMenuBar();
 
         // Present frame
         _renderer.Present();
@@ -4356,6 +4373,38 @@ public unsafe partial class GameEngine : IDisposable
         _aboutWindow?.Render();
         _scoreWindow?.Render();
         _highScoreWindow?.Render();
+    }
+
+    /// <summary>
+    /// Leaves the game area viewport and draws the menu bar in the strip above it.
+    /// Both are no-ops on Windows, where the OS draws its own menu outside the window.
+    /// </summary>
+    private void RenderMenuBar()
+    {
+        _renderer!.EndGameArea();
+        _menuBar?.Render();
+    }
+
+    /// <summary>
+    /// Moves a mouse event from window coordinates into the game area, which starts below
+    /// the menu bar strip. Everything downstream of the menu bar hit-tests against a layout
+    /// that assumes the game starts at y=0, so this is the one place that knows otherwise.
+    /// </summary>
+    private static void ShiftPointerIntoGameArea(SDLEvent* evt)
+    {
+        if (Rendering.GameRenderer.MenuBarHeight == 0)
+            return;
+
+        switch ((SDLEventType)evt->Type)
+        {
+            case SDLEventType.Mousebuttondown:
+            case SDLEventType.Mousebuttonup:
+                evt->Button.Y -= (int)Rendering.GameRenderer.MenuBarHeight;
+                break;
+            case SDLEventType.Mousemotion:
+                evt->Motion.Y -= (int)Rendering.GameRenderer.MenuBarHeight;
+                break;
+        }
     }
 
     /// <summary>
@@ -4882,6 +4931,10 @@ public unsafe partial class GameEngine : IDisposable
             SDL.GameControllerClose(_controller);
             _controller = null;
         }
+
+        // Before the renderer: on Windows this puts the original WndProc back, and that
+        // has to happen while the window it was taken from still exists.
+        _menuBar?.Dispose();
 
         _debugMapWindow?.Dispose();
         _scriptViewer?.Dispose();
