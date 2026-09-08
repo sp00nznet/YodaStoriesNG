@@ -5,10 +5,11 @@ using YodaStoriesNG.Engine.Game;
 namespace YodaStoriesNG.Engine.UI;
 
 /// <summary>
-/// Native Windows menu bar implementation.
-/// Uses Win32 API for proper DPI/scaling support.
+/// Native Windows menu bar. A real OS menu, drawn outside the client area at the right DPI,
+/// which is why Windows gets this rather than the SDL one. See <see cref="MenuBar"/> for the
+/// version everywhere else, and <see cref="IMenuBar"/> for what the two have in common.
 /// </summary>
-public unsafe class NativeMenuBar
+public unsafe class NativeMenuBar : IMenuBar
 {
     // Win32 API imports
     [DllImport("user32.dll")]
@@ -101,7 +102,7 @@ public unsafe class NativeMenuBar
     public event Action? OnShowAbout;
     public event Action? OnShowHighScores;
 
-    public bool IsMenuOpen => false; // Native menus handle this themselves
+    public bool IsMenuOpen => false; // The OS owns the dropdown, and the game keeps running under it
 
     public NativeMenuBar()
     {
@@ -112,14 +113,14 @@ public unsafe class NativeMenuBar
     /// </summary>
     public void Initialize(SDLWindow* window)
     {
-        // Everything below this point is user32.dll. On Linux and macOS the P/Invoke
-        // throws DllNotFoundException during startup and takes the game with it (issue
-        // #1), so those platforms simply run without a menu bar. Most menu items have a
-        // keyboard equivalent; Save, Load and Select Data File do not yet - see
-        // docs/PLAYING.md. Dev/SelfTest.cs guards this branch on every Linux CI run.
+        // Everything below this point is user32.dll. On Linux and macOS the P/Invoke throws
+        // DllNotFoundException during startup and takes the game with it (issue #1). The
+        // engine only builds this class on Windows now, so reaching here off Windows means
+        // something upstream changed - bail rather than crash, and let Dev/SelfTest.cs,
+        // which calls exactly this on every Linux CI run, say so.
         if (!OperatingSystem.IsWindows())
         {
-            Console.WriteLine("Native menu bar is Windows-only - use the keyboard shortcuts instead");
+            Console.WriteLine("Native menu bar is Windows-only - expected UI.MenuBar here");
             return;
         }
 

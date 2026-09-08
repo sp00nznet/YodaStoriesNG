@@ -41,6 +41,16 @@ public unsafe class GameRenderer : IDisposable
     public const int WindowWidth = GameAreaWidth + SidebarWidth;  // 796 pixels wide
     public const int WindowHeight = GameAreaHeight; // 576 pixels tall (no bottom HUD)
 
+    /// <summary>
+    /// Rows reserved above the game for the in-engine menu bar. Windows draws a real OS menu
+    /// outside the client area and so reserves nothing; Linux and macOS get UI.MenuBar drawn
+    /// into this strip, which is what keeps it off the top row of tiles.
+    /// </summary>
+    public static readonly int MenuBarHeight = OperatingSystem.IsWindows() ? 0 : UI.MenuBar.Height;
+
+    /// <summary>The whole logical window: the game area plus whatever the menu bar reserves.</summary>
+    public static int LogicalHeight => WindowHeight + MenuBarHeight;
+
     // Legacy constants for portrait mode (preserved for future use)
     // public const int PortraitWindowWidth = ViewportTilesX * Tile.Width * Scale;
     // public const int PortraitWindowHeight = ViewportTilesY * Tile.Height * Scale + 100 * Scale;
@@ -215,34 +225,37 @@ public unsafe class GameRenderer : IDisposable
 
         _currentScale = scale;
         int newWidth = WindowWidth * scale / 2;  // Base is 2x
-        int newHeight = WindowHeight * scale / 2;
+        int newHeight = LogicalHeight * scale / 2;
 
         SDL.SetWindowSize(_window, newWidth, newHeight);
 
         // Set logical size so all rendering scales properly
         // The logical size stays at the base resolution, SDL handles the scaling
-        SDL.RenderSetLogicalSize(_renderer, WindowWidth, WindowHeight);
+        SDL.RenderSetLogicalSize(_renderer, WindowWidth, LogicalHeight);
 
-        Console.WriteLine($"Window scale set to {scale}x ({newWidth}x{newHeight}), logical size: {WindowWidth}x{WindowHeight}");
+        Console.WriteLine($"Window scale set to {scale}x ({newWidth}x{newHeight}), logical size: {WindowWidth}x{LogicalHeight}");
     }
 
     /// <summary>
-    /// Temporarily disables logical scaling for rendering UI at fixed physical size.
-    /// Call RestoreLogicalSize() after rendering.
+    /// Shifts everything drawn after this call below the menu bar strip.
+    ///
+    /// The whole engine draws in coordinates that assume the window starts at the game area,
+    /// and there are far too many of them to teach each one an offset. A viewport moves the
+    /// lot in one go, and clips it, so a dropdown opening over the game is the only thing
+    /// that ever paints in the reserved rows. No-op on Windows, where nothing is reserved.
     /// </summary>
-    public void DisableLogicalSize()
+    public void BeginGameArea()
     {
-        if (_renderer == null) return;
-        SDL.RenderSetLogicalSize(_renderer, 0, 0);
+        if (_renderer == null || MenuBarHeight == 0) return;
+        var area = new SDLRect { X = 0, Y = MenuBarHeight, W = WindowWidth, H = WindowHeight };
+        SDL.RenderSetViewport(_renderer, &area);
     }
 
-    /// <summary>
-    /// Restores logical scaling after DisableLogicalSize().
-    /// </summary>
-    public void RestoreLogicalSize()
+    /// <summary>Restores the full window, so the menu bar can draw in the strip it reserved.</summary>
+    public void EndGameArea()
     {
-        if (_renderer == null) return;
-        SDL.RenderSetLogicalSize(_renderer, WindowWidth, WindowHeight);
+        if (_renderer == null || MenuBarHeight == 0) return;
+        SDL.RenderSetViewport(_renderer, null);
     }
 
     /// <summary>
@@ -250,7 +263,7 @@ public unsafe class GameRenderer : IDisposable
     /// </summary>
     public (int width, int height) GetPhysicalWindowSize()
     {
-        return (WindowWidth * _currentScale / 2, WindowHeight * _currentScale / 2);
+        return (WindowWidth * _currentScale / 2, LogicalHeight * _currentScale / 2);
     }
 
     public GameRenderer(GameData gameData)
@@ -273,7 +286,7 @@ public unsafe class GameRenderer : IDisposable
             (int)SDL_WINDOWPOS_CENTERED,
             (int)SDL_WINDOWPOS_CENTERED,
             WindowWidth,
-            WindowHeight,
+            LogicalHeight,
             (uint)SDLWindowFlags.Shown);
 
         if (_window == null)
@@ -298,7 +311,7 @@ public unsafe class GameRenderer : IDisposable
         }
 
         // Set initial logical size for consistent scaling behavior
-        SDL.RenderSetLogicalSize(_renderer, WindowWidth, WindowHeight);
+        SDL.RenderSetLogicalSize(_renderer, WindowWidth, LogicalHeight);
 
         // Create tile atlas texture
         CreateTileAtlas();
