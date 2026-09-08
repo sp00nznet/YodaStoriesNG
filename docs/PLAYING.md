@@ -101,7 +101,7 @@ There is no controller binding for the debug tools. Use the keyboard.
 
 ## The menu bar
 
-On Windows the game gets a real native menu bar, drawn by the OS at the correct DPI.
+Every platform gets the same four menus.
 
 | Menu | Contents |
 |---|---|
@@ -110,15 +110,24 @@ On Windows the game gets a real native menu bar, drawn by the OS at the correct 
 | **Config** | Graphics scale 1x/2x/4x, Keyboard Controls, Controller Controls, Select Data File... |
 | **About** | About, High Scores |
 
-**On Linux and macOS there is no menu bar.** It is a Win32 construct
-(`src/YodaStoriesNG.Engine/UI/NativeMenuBar.cs`) and the engine skips it rather than
-crashing. Every item has a keyboard equivalent except Save Game, Save As, Load Game and
-Select Data File, which have no shortcut yet - so on those platforms, pass the data file
-as an argument (`./YodaStoriesNG.Engine /path/to/YODESK.DTA`) and treat a session as
-unsaveable until [#2](https://github.com/sp00nznet/YodaStoriesNG/issues/2) lands.
+Windows draws them with a real native menu bar, outside the window at the OS's own DPI
+(`UI/NativeMenuBar.cs`). That is user32, which Linux and macOS do not have, so there they
+are drawn by SDL into a strip the window reserves above the game (`UI/MenuBar.cs`) - it
+takes no gameplay area, and the menus behave the same way: click a title to open it, drag
+along the bar to move between them, `Esc` or a click elsewhere to dismiss.
 
-The data file itself is found case-insensitively, so `YODESK.DTA` straight off the disc
-works on a case-sensitive filesystem.
+**Save As, Load Game and Select Data File need a file picker**, and off Windows the game
+asks the desktop for its own: `osascript` on macOS, `zenity` or `kdialog` on Linux,
+whichever is installed. On a machine with neither, those three items say so and do
+nothing - Save Game still works, since it writes `quicksave.ysng` without asking, and
+the data file can always come from the command line:
+
+```
+./YodaStoriesNG.Engine /path/to/YODESK.DTA
+```
+
+That path is matched case-insensitively, so `YODESK.DTA` straight off the disc is found on
+a case-sensitive filesystem.
 
 ---
 
