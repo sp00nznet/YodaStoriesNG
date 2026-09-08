@@ -55,9 +55,11 @@ Data-file location is documented in [GAME-DATA.md](GAME-DATA.md); the flags are 
    [DATA-FORMAT.md](DATA-FORMAT.md). This is the only time the file is read.
 2. **Sets the palette for the game type.** `Palette.SetGameType` swaps in the correct set of
    colour-cycling ranges; Yoda Stories and Indiana Jones animate different indices.
-3. **Creates the SDL window and renderer**, 796x576 logical, and uploads the tile atlas.
-4. **Builds the UI**: native menu bar (Windows only), title screen, HUD, and the debug
-   windows, each of which owns its own OS window and stays closed until asked for.
+3. **Creates the SDL window and renderer**, 796x576 logical plus the menu bar strip where
+   one is reserved, and uploads the tile atlas.
+4. **Builds the UI**: the menu bar - `NativeMenuBar` on Windows, the SDL-drawn `MenuBar`
+   elsewhere, both behind `IMenuBar` - title screen, HUD, and the debug windows, each of
+   which owns its own OS window and stays closed until asked for.
 5. **Shows the title screen** and waits for a key.
 
 Starting a game runs `WorldGenerator.GenerateWorld(size)`, which is
@@ -93,8 +95,9 @@ event stops the chain:
 
 1. `Quit` and main-window-close, handled immediately and unconditionally, before anything
    can swallow them.
-2. The title screen, while it is up.
-3. The menu bar.
+2. The menu bar, which sees raw window coordinates because it owns the strip above the
+   game; mouse events are shifted into game-area coordinates immediately after it.
+3. The title screen, while it is up.
 4. Each open debug window, in turn. They filter by their own window ID, so a keypress in
    the Asset Viewer never reaches the game.
 5. The game itself: `HandleKeyDown`, mouse, controller.
@@ -112,12 +115,13 @@ IACT scripts. The bot, if running, gets a slice here too.
 
 ```
 clear
+  viewport shifted below the menu bar strip   (GameRenderer.BeginGameArea)
   zone tiles, three layers                (GameRenderer.RenderZone)
   the parked X-Wing, zone items, NPCs, the player, projectiles
   HUD sidebar: health, weapon, inventory
   messages and dialogue
   debug overlay, if F1 is up
-  menu bar
+  viewport restored, menu bar drawn in its strip
 present
   then each open tool window renders and presents itself
 ```
