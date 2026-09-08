@@ -189,14 +189,14 @@ public unsafe partial class GameEngine : IDisposable
         string? dataFilePath = null;
 
         // Check for Yoda Stories first
-        var yodaPath = Path.Combine(_dataPath, "yodesk.dta");
-        var indyPath = Path.Combine(_dataPath, "desktop.daw");
+        var yodaPath = Data.GameDataFile.Find(_dataPath, "yodesk.dta");
+        var indyPath = Data.GameDataFile.Find(_dataPath, "desktop.daw");
 
-        if (File.Exists(yodaPath))
+        if (yodaPath != null)
         {
             dataFilePath = yodaPath;
         }
-        else if (File.Exists(indyPath))
+        else if (indyPath != null)
         {
             dataFilePath = indyPath;
         }

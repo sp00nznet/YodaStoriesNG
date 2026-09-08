@@ -61,8 +61,8 @@ class Program
             dataPath = "Yoda"; // Default
             foreach (var (path, file, name) in possiblePaths)
             {
-                var fullPath = Path.Combine(path, file);
-                if (File.Exists(fullPath))
+                var fullPath = Data.GameDataFile.Find(path, file);
+                if (fullPath != null)
                 {
                     dataPath = path;
                     dataFile = fullPath;
@@ -75,15 +75,15 @@ class Program
         // Try to find data file in path if not already found
         if (dataFile == null)
         {
-            var yodaFile = Path.Combine(dataPath, "yodesk.dta");
-            var indyFile = Path.Combine(dataPath, "desktop.daw");
+            var yodaFile = Data.GameDataFile.Find(dataPath, "yodesk.dta");
+            var indyFile = Data.GameDataFile.Find(dataPath, "desktop.daw");
 
-            if (File.Exists(yodaFile))
+            if (yodaFile != null)
             {
                 dataFile = yodaFile;
                 gameName = "Yoda Stories";
             }
-            else if (File.Exists(indyFile))
+            else if (indyFile != null)
             {
                 dataFile = indyFile;
                 gameName = "Indiana Jones";

@@ -112,8 +112,13 @@ On Windows the game gets a real native menu bar, drawn by the OS at the correct 
 
 **On Linux and macOS there is no menu bar.** It is a Win32 construct
 (`src/YodaStoriesNG.Engine/UI/NativeMenuBar.cs`) and the engine skips it rather than
-crashing. Every item has a keyboard equivalent, except Save/Load and Select Data File - use
-the file dialogs from the keyboard shortcuts, or start the game with an explicit data path.
+crashing. Every item has a keyboard equivalent except Save Game, Save As, Load Game and
+Select Data File, which have no shortcut yet - so on those platforms, pass the data file
+as an argument (`./YodaStoriesNG.Engine /path/to/YODESK.DTA`) and treat a session as
+unsaveable until [#2](https://github.com/sp00nznet/YodaStoriesNG/issues/2) lands.
+
+The data file itself is found case-insensitively, so `YODESK.DTA` straight off the disc
+works on a case-sensitive filesystem.
 
 ---
 

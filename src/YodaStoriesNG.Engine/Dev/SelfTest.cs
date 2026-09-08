@@ -21,6 +21,8 @@ public static class SelfTest
         int failures = 0;
         failures += Check("IACT round-trip", IactRoundTrip);
         failures += Check("zone header round-trip", ZoneHeaderRoundTrip);
+        failures += Check("data file lookup ignores case", DataFileLookupIgnoresCase);
+        failures += Check("menu bar keeps off user32 away from Windows", MenuBarStaysOffUser32);
 
         Console.WriteLine(failures == 0 ? "\nSelf-test PASSED" : $"\nSelf-test FAILED ({failures})");
         return failures == 0 ? 0 : 1;
@@ -69,6 +71,44 @@ public static class SelfTest
         Assert(zone.GetTile(0, 0, 0) == 100, $"floor tile was {zone.GetTile(0, 0, 0)}");
         Assert(zone.GetTile(0, 0, 1) == 200, $"object tile was {zone.GetTile(0, 0, 1)}");
         Assert(zone.GetTile(0, 0, 2) == 300, $"roof tile was {zone.GetTile(0, 0, 2)}");
+    }
+
+    /// <summary>
+    /// The discs ship YODESK.DTA in upper case; a case-sensitive filesystem does not care
+    /// that we asked for "yodesk.dta". Uses a name that no filesystem folds by itself.
+    /// </summary>
+    private static void DataFileLookupIgnoresCase()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "ysng-selftest-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            File.WriteAllBytes(Path.Combine(directory, "YODESK.DTA"), Array.Empty<byte>());
+
+            var found = Data.GameDataFile.Find(directory, "yodesk.dta");
+            Assert(found != null, "did not find YODESK.DTA when asked for yodesk.dta");
+            Assert(Data.GameDataFile.Find(directory, "desktop.daw") == null,
+                "found a file that is not there");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Issue #1: the native menu bar P/Invoked user32.dll unconditionally, so starting the
+    /// game on Linux or macOS died with "Unable to load shared library 'user32.dll'". The
+    /// guard is a plain runtime check with nothing to stop it being deleted again, so call
+    /// the thing that used to throw. Passing a null window is safe: the guard returns before
+    /// SDL is touched, and on Windows there is no guard to test.
+    /// </summary>
+    private static unsafe void MenuBarStaysOffUser32()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        new UI.NativeMenuBar().Initialize(null);
     }
 
     /// <summary>
