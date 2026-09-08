@@ -113,9 +113,10 @@ public unsafe class NativeMenuBar
     public void Initialize(SDLWindow* window)
     {
         // Everything below this point is user32.dll. On Linux and macOS the P/Invoke
-        // would throw DllNotFoundException during startup and take the game with it,
-        // so those platforms simply run without a menu bar - every menu item has a
-        // keyboard equivalent (see docs/PLAYING.md).
+        // throws DllNotFoundException during startup and takes the game with it (issue
+        // #1), so those platforms simply run without a menu bar. Most menu items have a
+        // keyboard equivalent; Save, Load and Select Data File do not yet - see
+        // docs/PLAYING.md. Dev/SelfTest.cs guards this branch on every Linux CI run.
         if (!OperatingSystem.IsWindows())
         {
             Console.WriteLine("Native menu bar is Windows-only - use the keyboard shortcuts instead");
