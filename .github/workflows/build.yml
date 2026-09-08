@@ -126,7 +126,7 @@ jobs:
           EOF
 
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
-          message=$(git for-each-ref --format='%(contents:body)' "refs/tags/$GITHUB_REF_NAME")
+          message=$(git for-each-ref --format='%(contents)' "refs/tags/$GITHUB_REF_NAME")
           if [ -n "$(echo "$message" | tr -d '[:space:]')" ]; then
             { echo; echo "### What's new"; echo; echo "$message"; } >> notes.md
           fi
