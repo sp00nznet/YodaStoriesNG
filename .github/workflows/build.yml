@@ -93,6 +93,9 @@ jobs:
 
           ls -lh dist
 
+      # An annotated tag's message becomes the "What's new" section, so a release says what
+      # changed without a changelog file to keep in sync. A lightweight tag has no message
+      # and simply gets no section.
       - name: Release notes
         run: |
           cat > notes.md <<'EOF'
@@ -121,6 +124,12 @@ jobs:
           but generates no mission chain yet -
           [roadmap](https://github.com/sp00nznet/YodaStoriesNG/blob/main/docs/ROADMAP.md).
           EOF
+
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          message=$(git for-each-ref --format='%(contents:body)' "refs/tags/$GITHUB_REF_NAME")
+          if [ -n "$(echo "$message" | tr -d '[:space:]')" ]; then
+            { echo; echo "### What's new"; echo; echo "$message"; } >> notes.md
+          fi
 
       - name: Publish release
         env:
