@@ -52,6 +52,11 @@ that follows the chain. Still open:
   the bot has not met yet: an item in a room none of its tricks reach (seed 2, zone 121),
   and the plateau traders sealed by cliffs (seed 1, zone 144). Each new world is a new
   puzzle or two; the bot learns them one at a time.
+- **Unsolved puzzle rooms now reset when you leave them** (#7), so a player can retry from
+  a clean layout. The bot used to solve some block puzzles across several visits, keeping
+  its pushes in between; it now starts over each time. On seed 5 it stops at zone 91
+  around step 3. Fix in the bot: finish a block puzzle in one visit (`Bot/BlockPuzzle.cs`
+  already solves single rooms) instead of leaving partway.
 - **Everything learned here is Indiana Jones-only for now** - the character-type field,
   the NPC-hotspot fix, `SectorPuzzles`, the generator. Yoda Stories gets them when it moves
   to the original generator.
@@ -63,21 +68,6 @@ that follows the chain. Still open:
 It searches Dagobah zones' hotspots for R2-D2 but not their `IZAX` monsters, which is where
 he usually is, so most runs log `Could not find R2D2 anywhere on Dagobah!` and set off
 without the locator.
-
-### Opcodes `0x19` and `0x1A` are evaluated as the wrong condition
-
-**Where:** `src/YodaStoriesNG.Engine/Data/Action.cs`,
-`src/YodaStoriesNG.Engine/Game/ActionExecutor.cs`
-
-`ConditionOpcode` declares `NpcIs` and `HasNpc` with the same values as `SectorCounterIs`
-(`0x19`) and `SectorCounterIsLessThan` (`0x1A`). C# cannot switch on two names for one
-value, so those opcodes are currently evaluated as NPC-interaction checks. Real scripts use
-them as sector-counter comparisons.
-
-Fixing it means also reconciling how sector counters are stored: this engine keys them as
-`variable[arg0 + 3000]` compared against `arg1`, where the original keeps one counter per
-zone compared against `arg0`. See
-[SCRIPTING.md](SCRIPTING.md#known-divergences-from-the-original).
 
 ### Capture harness loses the D3D device after the tool windows
 
@@ -126,13 +116,12 @@ Roughly in order of value per unit of work.
 
 1. **Teach the bot the Indiana Jones chain.** The world is there; the bot is the last
    thing between Indiana Jones and a game that plays itself.
-2. **Reconcile the sector-counter opcodes.** Removes the last known scripting divergence.
-3. **Decide whether Yoda Stories moves to the original generator.** The port already
+2. **Decide whether Yoda Stories moves to the original generator.** The port already
    generates Yoda worlds; it would make them the original's and retire the heuristic one.
-4. **Extend the self-test to the whole container format.** `SelfTest.cs` already builds a
+3. **Extend the self-test to the whole container format.** `SelfTest.cs` already builds a
    data file by hand; extending it to tiles, characters and puzzles is more of the same, and
    would have caught both the IACT bug and the `TNAM` one.
-5. **Find the biplane tiles.**
+4. **Find the biplane tiles.**
 
 ## Deliberately not doing
 

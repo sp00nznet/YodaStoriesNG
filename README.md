@@ -152,10 +152,14 @@ tools/                    capture harness, SZDD decompressors, palette extractor
 ## Thanks
 
 - **Emilio Castillo** ([@emcastillo](https://github.com/emcastillo)) - Yoda mission-chain and
-  X-wing travel fixes with their audits, enemy animation frames, and smooth movement
+  X-wing travel fixes, enemy animation frames, smooth movement, weapon attack poses,
+  puzzle resets, item targeting, native script and reward fixes, the Locator map, and the
+  headless audits that check all of it
   ([#4](https://github.com/sp00nznet/YodaStoriesNG/pull/4),
   [#5](https://github.com/sp00nznet/YodaStoriesNG/pull/5),
-  [#6](https://github.com/sp00nznet/YodaStoriesNG/pull/6)).
+  [#6](https://github.com/sp00nznet/YodaStoriesNG/pull/6),
+  [#7](https://github.com/sp00nznet/YodaStoriesNG/pull/7),
+  [#8](https://github.com/sp00nznet/YodaStoriesNG/pull/8)).
 
 ## Legal
 

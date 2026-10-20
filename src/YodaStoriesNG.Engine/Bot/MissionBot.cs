@@ -136,12 +136,13 @@ public class MissionBot
         if (!_isRunning)
             return;
 
-        // Update action executor
-        _actions.Update(deltaTime);
-
-        // Update timers
+        // Zone changes are noticed before the next queued move runs: a door now lands you a
+        // step inside the room, and a leftover step toward the old door walks straight back out.
         _thinkTimer += deltaTime;
         UpdateStuckDetection(deltaTime);
+
+        // Update action executor
+        _actions.Update(deltaTime);
 
         // State machine
         switch (_currentState)
@@ -694,6 +695,8 @@ public class MissionBot
         {
             Console.WriteLine($"[BOT] Zone changed: {_lastPosition.ZoneId} -> {currentPos.CurrentZoneId}");
             _solver.OnZoneChanged();
+            _actions.Reset();
+            if (_currentState == BotState.ExecutingObjective) _currentState = BotState.ThinkingAboutObjective;
             _stuckCount = 0;
             _stuckTimer = 0;
             // Clear committed exploration target since we changed zones

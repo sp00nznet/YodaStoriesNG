@@ -4317,6 +4317,11 @@ public unsafe partial class GameEngine : IDisposable
             _playerAnimationTimer = 0;
         }
 
+        // Speech pauses its script until dismissed, and the bot does not run while a script
+        // is paused - so the bot "presses a key" here, or every line waits out its timer.
+        if (_bot?.IsRunning == true && _messages.HasDialogue)
+            _messages.DismissDialogue();
+
         // First script evaluation (before NPC/projectile updates)
         _actionExecutor?.ExecuteZoneActions(ActionTrigger.Walk);
         if (CompleteScriptedTravel())

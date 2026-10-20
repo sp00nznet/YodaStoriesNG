@@ -65,6 +65,9 @@ public unsafe partial class GameEngine
                 : new[] { (0,1), (1,0), (-1,0), (0,-1) };
             foreach (var (dx, dy) in offsets)
                 if (CanStand(at.X + dx, at.Y + dy)) { spawn = (at.X + dx, at.Y + dy); break; }
+            // Some rooms wall the door in (Indy zone 151: walls either side, an object in
+            // front), so the door tile itself is the only place to arrive - as before.
+            spawn ??= at;
         }
         else
         {
