@@ -10,6 +10,8 @@ public unsafe partial class GameEngine
     public static int AuditZoneScripts(string path, string reportPath)
     {
         var data = new DtaParser().Parse(path);
+        // ponytail: the regression checks name Yoda zones; Indy would need its own list
+        if (data.GameType != GameType.YodaStories) { Console.WriteLine("Zone script audit only covers Yoda Stories data."); return 1; }
         var findings = new List<(string Kind, int Zone, int Action, string Detail)>();
         var resolved = new List<(string Kind, int Zone, int Action, string Detail)>();
         var conditions = new Dictionary<ConditionOpcode, (int Count, HashSet<int> Zones)>();

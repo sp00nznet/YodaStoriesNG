@@ -14,7 +14,7 @@ class Program
             return GameEngine.AuditPickups(args[1]);
 
         if (args.Length >= 2 && args[0] == "--zone-script-audit")
-            return GameEngine.AuditZoneScripts(args[1], args.Length >= 3 ? args[2] : "zone-script-audit.md");
+            return GameEngine.AuditZoneScripts(args[1], args.Length >= 3 ? args[2] : Path.Combine(Path.GetTempPath(), "zone-script-audit.md"));
 
         // Replay native landing/takeoff scripts through the engine without creating a window.
         if (args.Length >= 2 && args[0] == "--xwing-audit")
