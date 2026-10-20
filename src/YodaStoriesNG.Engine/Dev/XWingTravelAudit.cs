@@ -54,6 +54,8 @@ public unsafe partial class GameEngine
                     // Walk into the real cockpit, not the distant transit marker.
                     engine._state.PlayerX = 6;
                     engine._state.PlayerY = 12;
+                    // Also exercise leaving an unsolved area after object manipulation.
+                    engine.MarkObjectsMoved(engine._state.CurrentZone!);
                     if (shortcut) engine.TravelToPlanet();
                     else engine.AuditMovementStep(0, -1, Direction.Up);
                     engine.AwaitXWingLanding(route.Zone);
@@ -67,6 +69,8 @@ public unsafe partial class GameEngine
 
                     stage = $"return trip {trip + 1}";
                     // The landing script leaves Luke one step below the cockpit.
+                    // Also exercise leaving an unsolved area after object manipulation.
+                    engine.MarkObjectsMoved(engine._state.CurrentZone!);
                     if (shortcut) engine.TravelToPlanet();
                     else
                     {
@@ -131,6 +135,7 @@ public unsafe partial class GameEngine
                 if (world.StartingItemId.HasValue) engine._state.AddItem(world.StartingItemId.Value);
                 engine._state.PlayerX = 6;
                 engine._state.PlayerY = 12;
+                engine.MarkObjectsMoved(engine._state.CurrentZone!);
                 engine.AuditMovementStep(0, -1, Direction.Up);
                 if (world.Mission.GoalPuzzle.Item1 == 1788)
                 {
@@ -139,6 +144,7 @@ public unsafe partial class GameEngine
                     engine.AwaitXWingLanding(642, expectParkedShip: false);
                     engine._state.PlayerX = 3;
                     engine._state.PlayerY = 7;
+                    engine.MarkObjectsMoved(engine._state.CurrentZone!);
                     engine.AuditMovementStep(0, 1, Direction.Down);
                     engine.AwaitXWingLanding(world.LandingZoneId, expectParkedShip: false);
                 }

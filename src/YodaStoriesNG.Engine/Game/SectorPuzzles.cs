@@ -60,6 +60,9 @@ public class SectorPuzzles
         return (At(sector.PuzzleIndex), At(sector.PuzzleIndex + 1));
     }
 
+    /// <summary>Allow an unsolved area's generated contents to be laid down again after reset.</summary>
+    public void ResetArea(int zoneId) => _laidDown.Remove(zoneId);
+
     /// <summary>First visit only: put generated items and NPCs where the hotspots say.</summary>
     public void LayDown(Zone zone)
     {
@@ -82,7 +85,9 @@ public class SectorPuzzles
             bool holdsTile = (int)hotspot.Type is 0 or 2 or 5 or 6 or 8 || includeNpcs && (int)hotspot.Type is 1 or 7;
             if (!hotspot.Enabled || arg < 0 || !holdsTile) continue;
             if (zone.GetTile(hotspot.X, hotspot.Y, 1) != 0xFFFF) continue;
-            if (_state.CollectedObjects.Contains($"{zone.Id}_{hotspot.X}_{hotspot.Y}_tile")) continue;
+            if (_state.IsObjectCollected(zone.Id, hotspot.X, hotspot.Y) ||
+                _state.CollectedObjects.Contains($"{zone.Id}_{hotspot.X}_{hotspot.Y}_tile") ||
+                _state.CollectedObjects.Contains($"{zone.Id}_{hotspot.X}_{hotspot.Y}_r2d2")) continue;
             zone.SetTile(hotspot.X, hotspot.Y, 1, (ushort)arg);
         }
     }

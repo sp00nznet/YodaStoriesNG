@@ -176,6 +176,25 @@ public unsafe partial class GameEngine
         e.CancelSmoothMovement();
         e.UpdateSmoothMovement(1);
         Require(e._state.PlayerX == 3 && e._playerStep == null, "focus loss committed a stale step");
+        e = Scene();
+        e._state.CurrentZone!.SetTile(2,3,1,2);
+        bool shift = false;
+        e._smoothInputSource = () => (1,0,1);
+        e._smoothPullSource = () => shift;
+        e.UpdateSmoothMovement(0.05);
+        Require(e._playerStep is { Pull: false }, "late-Shift fixture did not start an ordinary step");
+        shift = true;
+        e.UpdateSmoothMovement(1.0 / 6 - 0.05);
+        Require(e._state.PlayerX == 4 && e._state.CurrentZone.GetTile(3,3,1) == 2 &&
+            e._state.CurrentZone.GetTile(2,3,1) == ushort.MaxValue, "Shift pressed during a step failed to pull at arrival");
+
+        e = Scene();
+        e._state.CurrentZone!.SetTile(2,2,1,2);
+        e.RequestSmoothPlayerStep(1,1,Direction.Right,false);
+        e._smoothPullSource = () => true;
+        e.UpdateSmoothMovement(Math.Sqrt(2) / 6);
+        Require(e._state.CurrentZone.GetTile(2,2,1) == 2 && e._state.CurrentZone.GetTile(3,3,1) == ushort.MaxValue,
+            "late Shift pulled a block diagonally");
         var legacy = JsonSerializer.Deserialize<KeyBindings>("{}");
         var enabled = JsonSerializer.Deserialize<KeyBindings>(JsonSerializer.Serialize(new KeyBindings { SmoothMovement = true }));
         Require(legacy?.SmoothMovement == false && enabled?.SmoothMovement == true, "settings round trip or legacy default failed");

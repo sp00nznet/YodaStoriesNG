@@ -24,7 +24,7 @@ public class Character
 /// </summary>
 public class CharacterFrames
 {
-    // Walking frames (3 frames per direction)
+    // The CHAR record provides three animation frames for each cardinal direction.
     public ushort[] WalkUp { get; set; } = new ushort[3];
     public ushort[] WalkDown { get; set; } = new ushort[3];
     public ushort[] WalkLeft { get; set; } = new ushort[3];

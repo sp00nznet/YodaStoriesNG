@@ -38,6 +38,8 @@ public static class SelfTest
         failures += Check("scripted travel requests a complete zone load", ScriptedTravelRequestsLoad);
         failures += Check("mission identity and script variables agree with their readers", MissionScriptState);
         failures += Check("smooth movement, reservations, arrivals and settings", GameEngine.TestSmoothMovement);
+        failures += Check("authored weapon poses and blade extensions", WeaponPoses);
+        failures += Check("unsolved moved areas reset while solved areas retain progress", GameEngine.TestAreaReset);
 
         Console.WriteLine(failures == 0 ? "\nSelf-test PASSED" : $"\nSelf-test FAILED ({failures})");
         return failures == 0 ? 0 : 1;
@@ -182,6 +184,43 @@ public static class SelfTest
             "travel left the zone ID and loaded map out of sync, or continued source instructions");
         executor.ResetForZone();
         Assert(!executor.RequestedZoneChange.HasValue && !executor.IsBusy, "zone entry retained an old script");
+    }
+
+    private static void WeaponPoses()
+    {
+        var data = new GameData { GameType = GameType.YodaStories };
+        for (int i = 0; i < 32; i++) data.Tiles.Add(new Tile { Id = i });
+        var frames = new CharacterFrames
+        {
+            WalkUp = new ushort[] { 20, 1, 2 }, WalkDown = new ushort[] { 20, 1, 2 },
+            WalkLeft = new ushort[] { 20, 1, 2 }, WalkRight = new ushort[] { 20, 1, 2 },
+            ExtensionUp = new ushort[] { 0, 3, 4 }, ExtensionDown = new ushort[] { 0, 5, 6 },
+            ExtensionLeft = new ushort[] { 0, 7, 8 }, ExtensionRight = new ushort[] { 510, 9, 10 }
+        };
+        data.Characters.Add(new Character { Frames = frames, Weapon = new CharacterWeapon() });
+        data.Characters.Add(new Character { Frames = new CharacterFrames { ExtensionRight = new ushort[] { 511 } }, Weapon = new CharacterWeapon() });
+        data.Characters.Add(new Character { Frames = new CharacterFrames { ExtensionRight = new ushort[] { 18 } }, Weapon = new CharacterWeapon() });
+        Assert(Rendering.WeaponAnimation.FindCharacter(data, 18) == 2 &&
+            Rendering.WeaponAnimation.FindCharacter(data, 510) == 0, "blue and green sabers must use their own authored characters");
+        Assert(Rendering.WeaponAnimation.FindCharacter(data, 511) == 1, "The Force used the lightsaber character");
+        foreach (var (direction, dx, dy, early, late) in new[]
+        {
+            (Direction.Up, 0, -1, 3, 4), (Direction.Down, 0, 1, 5, 6),
+            (Direction.Left, -1, 0, 7, 8), (Direction.Right, 1, 0, 9, 10)
+        })
+        {
+            var first = Rendering.WeaponAnimation.Resolve(data, 0, direction, 0);
+            var second = Rendering.WeaponAnimation.Resolve(data, 0, direction, 1);
+            Assert(first?.Body == 1 && first?.Extension == early && first?.OffsetX == dx && first?.OffsetY == dy,
+                $"incorrect first pose or blade placement for {direction}");
+            Assert(second?.Body == 2 && second?.Extension == late, $"incorrect second pose for {direction}");
+        }
+        frames.WalkUp[1] = ushort.MaxValue;
+        Assert(Rendering.WeaponAnimation.Resolve(data, 0, Direction.Up, 0)?.Body == 2,
+            "an unused pose did not fall back to the other authored attack pose");
+        frames.WalkUp[2] = ushort.MaxValue;
+        Assert(Rendering.WeaponAnimation.Resolve(data, 0, Direction.Up, 0) == null,
+            "a projectile frame was substituted for a missing attack pose");
     }
 
     private static void IactRoundTrip(GameType game)
@@ -362,6 +401,10 @@ public static class SelfTest
             "left animation did not read all three frames from slot 3");
         Assert(hero.Frames.WalkRight.SequenceEqual(new ushort[] { 106, 114, 122 }),
             "right animation did not read all three frames from slot 6");
+        Assert(hero.Frames.ExtensionUp.SequenceEqual(new ushort[] { 102, 110, 118 }), "up extension slots were not parsed");
+        Assert(hero.Frames.ExtensionDown.SequenceEqual(new ushort[] { 104, 112, 120 }), "down extension slots were not parsed");
+        Assert(hero.Frames.ExtensionLeft.SequenceEqual(new ushort[] { 105, 113, 121 }), "left extension slots were not parsed");
+        Assert(hero.Frames.ExtensionRight.SequenceEqual(new ushort[] { 107, 115, 123 }), "right extension slots were not parsed");
     }
 
     private static byte[] BuildCharacterFile(GameType game)
@@ -389,10 +432,7 @@ public static class SelfTest
             if (game == GameType.YodaStories)
                 w.Write(new byte[6]);              // the two fields Indiana Jones does not have
             for (int slot = 0; slot < 24; slot++)
-            {
-                int tileId = index == 1 && slot == 7 ? weaponTile : 100 + index * 100 + slot;
-                w.Write((short)tileId);
-            }
+                w.Write((short)(index == 1 && slot == 7 ? weaponTile : 100 + index * 100 + slot));
             Backfill(w, recordAt, stream.Position - recordStart);
         }
         w.Write((short)-1);

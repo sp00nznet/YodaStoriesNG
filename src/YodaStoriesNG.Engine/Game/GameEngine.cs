@@ -56,6 +56,7 @@ public unsafe partial class GameEngine : IDisposable
     private double _playerWalkingTimer;
     private double _playerAnimationTimer;
     private int _playerAnimationFrame;
+    private double _attackAnimationDuration = 0.3;
 
     // Drag and drop state
     private bool _isDragging = false;
@@ -106,6 +107,7 @@ public unsafe partial class GameEngine : IDisposable
         _state.Weapons.Add(newWeaponTile);
         _state.CurrentWeaponIndex = 0;
         _state.SelectedWeapon = newWeaponTile;
+        _state.SelectedItem = null;
 
         // Initialize ammo for the new weapon
         InitializeWeaponAmmo(newWeaponTile);
@@ -442,6 +444,8 @@ public unsafe partial class GameEngine : IDisposable
             Console.WriteLine($"Reloading game: {gameName} from {dataFilePath}");
 
             // Update game data
+            CancelSmoothMovement();
+            ResetAreaTracking();
             _gameData = newGameData;
 
             // Each game has its own palette; switch before the atlas is rebuilt from it
@@ -548,6 +552,9 @@ public unsafe partial class GameEngine : IDisposable
             return;
         }
 
+        // Finish the outgoing visit before applying another game's collection flags.
+        CancelSmoothMovement();
+        ResetAreaTracking();
         // Apply save data to game state
         SaveGameManager.ApplyToGameState(saveData, _state);
 
@@ -678,6 +685,8 @@ public unsafe partial class GameEngine : IDisposable
     /// </summary>
     public void StartNewGame()
     {
+        CancelSmoothMovement();
+        ResetAreaTracking();
         _state.Reset();
         ResetPlayerAnimation();
         _messages.Clear();
@@ -925,6 +934,12 @@ public unsafe partial class GameEngine : IDisposable
         }
 
         CancelSmoothMovement();
+        if (!ReferenceEquals(_state.CurrentZone, zone))
+        {
+            ResetUnsolvedArea();
+            _state.Projectiles.Clear();
+        }
+        CaptureInitialArea(zone);
         _state.CurrentZoneId = zoneId;
         _state.CurrentZone = zone;
         _actionExecutor?.ResetForZone();
@@ -1452,9 +1467,8 @@ public unsafe partial class GameEngine : IDisposable
                         }
                     }
                     // Equip the new weapon
-                    _state.SelectedWeapon = _draggedItemId.Value;
+                    EquipWeapon(_draggedItemId.Value);
                     _messages.ShowMessage("Equipped weapon", MessageType.Info);
-                    PlayEquipSound(_draggedItemId.Value);
                 }
             }
             // Check if dropped on inventory
@@ -1765,6 +1779,22 @@ public unsafe partial class GameEngine : IDisposable
         }
     }
 
+    private void CollectWeapon(int weaponId)
+    {
+        if (!_state.Weapons.Contains(weaponId))
+            _state.Weapons.Add(weaponId);
+        InitializeWeaponAmmo(weaponId);
+    }
+
+    private void EquipWeapon(int weaponId)
+    {
+        CollectWeapon(weaponId);
+        _state.CurrentWeaponIndex = _state.Weapons.IndexOf(weaponId);
+        _state.SelectedWeapon = weaponId == 0 ? null : weaponId;
+        _state.SelectedItem = null;
+        if (weaponId != 0) PlayEquipSound(weaponId);
+    }
+
     private void ToggleWeapon()
     {
         if (_state.Weapons.Count == 0)
@@ -1775,6 +1805,7 @@ public unsafe partial class GameEngine : IDisposable
 
         _state.CurrentWeaponIndex = (_state.CurrentWeaponIndex + 1) % _state.Weapons.Count;
         var weaponId = _state.Weapons[_state.CurrentWeaponIndex];
+        EquipWeapon(weaponId);
 
         if (weaponId == 0)
         {
@@ -1783,8 +1814,6 @@ public unsafe partial class GameEngine : IDisposable
         }
         else
         {
-            _state.SelectedWeapon = weaponId;
-            PlayEquipSound(weaponId);
             var weaponName = GetTileName(weaponId) ?? $"Weapon";
             _messages.ShowMessage($"Equipped: {weaponName}", MessageType.Info);
         }
@@ -1879,9 +1908,15 @@ public unsafe partial class GameEngine : IDisposable
 
     private bool IsShiftHeld()
     {
-        // Check if Shift key is held using SDL
-        var modState = SDL.GetModState();
-        return (modState & SDLKeymod.Shift) != 0;
+        // Read the physical keys as well as SDL's modifier cache. Window/menu event
+        // handling can leave the cache behind the keyboard state on some platforms.
+        int count;
+        var keys = SDL.GetKeyboardState(&count);
+        int left = (int)SDL.GetScancodeFromKey((int)SDLKeyCode.Lshift);
+        int right = (int)SDL.GetScancodeFromKey((int)SDLKeyCode.Rshift);
+        return left >= 0 && left < count && keys[left] != 0 ||
+            right >= 0 && right < count && keys[right] != 0 ||
+            (SDL.GetModState() & SDLKeymod.Shift) != 0;
     }
 
     /// <summary>
@@ -1914,6 +1949,7 @@ public unsafe partial class GameEngine : IDisposable
         }
 
         // Pull the block to where the player was standing
+        MarkObjectsMoved(_state.CurrentZone);
         _state.CurrentZone.SetTile(oldPlayerX, oldPlayerY, 1, behindTile);
         _state.CurrentZone.SetTile(behindX, behindY, 1, 0xFFFF);
         _messages.ShowMessage("*pull*", MessageType.Info);
@@ -1963,6 +1999,12 @@ public unsafe partial class GameEngine : IDisposable
             return;
         }
 
+        if (IsGroundBlocked(_state.CurrentZone, newX, newY))
+        {
+            BumpInto(newX, newY);
+            return;
+        }
+
         // Check collision with middle layer tile
         var middleTile = _state.CurrentZone.GetTile(newX, newY, 1);
         if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
@@ -1983,9 +2025,10 @@ public unsafe partial class GameEngine : IDisposable
                     // Only into an empty square, as the original (WebFun hero.ts _doDrag): a block
                     // pushed onto an item used to overwrite it.
                     var destTile = _state.CurrentZone.GetTile(pushX, pushY, 1);
-                    if (destTile == 0xFFFF)
+                    if (!IsGroundBlocked(_state.CurrentZone, pushX, pushY) && destTile == 0xFFFF)
                     {
                         // Push the block
+                        MarkObjectsMoved(_state.CurrentZone);
                         _state.CurrentZone.SetTile(pushX, pushY, 1, middleTile);
                         _state.CurrentZone.SetTile(newX, newY, 1, 0xFFFF);
                         _messages.ShowMessage("*push*", MessageType.Info);
@@ -2007,7 +2050,7 @@ public unsafe partial class GameEngine : IDisposable
                     return;
                 }
             }
-            else if (tile.IsSolid)
+            else if (tile.IsSolid && !IsNPCMapSprite(newX, newY, middleTile))
             {
                 // Collision - trigger bump action
                 BumpInto(newX, newY);
@@ -2100,21 +2143,29 @@ public unsafe partial class GameEngine : IDisposable
             var tile = _gameData.Tiles[objTile];
             Console.WriteLine($"Standing on tile {objTile}: floor={tile.IsFloor}, obj={tile.IsObject}, item={tile.IsItem}, char={tile.IsCharacter}");
 
-            // Auto-pickup Item tiles (not Objects that block movement)
-            if (tile.IsItem && !tile.IsObject)
+            // Auto-pickup loose items and weapons; solid objects still require interaction.
+            if ((tile.IsItem || tile.IsWeapon) && !tile.IsObject)
             {
                 var key = $"{_state.CurrentZoneId}_{newX}_{newY}_tile";
                 if (!_state.CollectedObjects.Contains(key))
                 {
                     // Pick up the item
-                    _state.AddItem(objTile);
+                    // A hotspot may already have awarded the same pickup on arrival.
+                    var awardedByHotspot = _state.IsObjectCollected(_state.CurrentZoneId, newX, newY) &&
+                        _state.CurrentZone.Objects.Any(o => o.Enabled && o.X == newX && o.Y == newY &&
+                            o.Argument == objTile && o.Type is ZoneObjectType.CrateItem or ZoneObjectType.CrateWeapon);
+                    if (!awardedByHotspot)
+                    {
+                        if (tile.IsWeapon) CollectWeapon(objTile);
+                        else _state.AddItem(objTile);
+                    }
                     _state.CollectedObjects.Add(key);
 
                     // Remove the tile from the map
                     _state.CurrentZone.SetTile(newX, newY, 1, 0xFFFF);
 
                     var itemName = GetTileName(objTile) ?? $"Item";
-                    _messages.ShowPickup(itemName);
+                    if (!awardedByHotspot) _messages.ShowPickup(itemName);
                     Console.WriteLine($"Auto-picked up tile item {objTile} ({itemName}) at ({newX},{newY})");
                     _sectorPuzzles?.OnPickedUp(objTile);
                     SyncSectorMission();
@@ -2179,11 +2230,23 @@ public unsafe partial class GameEngine : IDisposable
     /// <summary>
     /// Checks if a position is walkable (not blocked by walls or objects).
     /// </summary>
+    private bool IsGroundBlocked(Zone zone, int x, int y)
+    {
+        int ground = zone.GetTile(x, y, 0);
+        if (ground >= _gameData!.Tiles.Count || !_gameData.Tiles[ground].IsObject) return false;
+        // A walkable surface such as a bridge can cover otherwise impassable ground.
+        int surface = zone.GetTile(x, y, 1);
+        return surface >= _gameData.Tiles.Count || !_gameData.Tiles[surface].IsFloor ||
+            _gameData.Tiles[surface].IsObject;
+    }
+
     private bool IsSpawnPositionWalkable(int x, int y, Zone zone)
     {
         // Check bounds
         if (x < 0 || x >= zone.Width || y < 0 || y >= zone.Height)
             return false;
+
+        if (IsGroundBlocked(zone, x, y)) return false;
 
         // Check middle layer tile
         var middleTile = zone.GetTile(x, y, 1);
@@ -2496,16 +2559,8 @@ public unsafe partial class GameEngine : IDisposable
                     // Pick up weapon (if not already collected)
                     if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
                     {
-                        // Add to weapons list if not already owned
-                        if (!_state.Weapons.Contains(obj.Argument))
-                        {
-                            _state.Weapons.Add(obj.Argument);
-                            InitializeWeaponAmmo(obj.Argument);
-                        }
-                        // Auto-equip the new weapon
-                        _state.CurrentWeaponIndex = _state.Weapons.IndexOf(obj.Argument);
-                        _state.SelectedWeapon = obj.Argument;
-                        PlayEquipSound(obj.Argument);
+                        // Walking over a pickup preserves the player's current selection.
+                        CollectWeapon(obj.Argument);
                         _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
                         var weaponName = GetTileName(obj.Argument) ?? $"Weapon";
                         var ammoState = _state.GetWeaponAmmo(obj.Argument);
@@ -2618,6 +2673,10 @@ public unsafe partial class GameEngine : IDisposable
 
         if (_actionExecutor?.IsBusy == true || !_state.HeroVisible)
             return;
+
+        // Scripts can consume items without going through RemoveItem.
+        if (_state.SelectedItem.HasValue && !_state.HasItem(_state.SelectedItem.Value))
+            _state.SelectedItem = null;
 
         if (_state.SelectedItem.HasValue)
         {
@@ -2928,9 +2987,7 @@ public unsafe partial class GameEngine : IDisposable
                             _state.Weapons.Add(obj.Argument);
                             InitializeWeaponAmmo(obj.Argument);
                         }
-                        _state.CurrentWeaponIndex = _state.Weapons.IndexOf(obj.Argument);
-                        _state.SelectedWeapon = obj.Argument;
-                        PlayEquipSound(obj.Argument);
+                        EquipWeapon(obj.Argument);
                         _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
                         var weaponName = GetTileName(obj.Argument) ?? $"Weapon";
                         var ammoState = _state.GetWeaponAmmo(obj.Argument);
@@ -3056,6 +3113,9 @@ public unsafe partial class GameEngine : IDisposable
                         // Check if mission is complete
                         if (mission != null && mission.IsCompleted)
                         {
+                            // This mission has already been acknowledged by Yoda or its win script.
+                            if (_state.IsGameWon) return true;
+
                             // Mission complete! Increment counter
                             _state.GamesWon++;
                             PlayYodaSound(YodaYouWin);
@@ -3276,7 +3336,7 @@ public unsafe partial class GameEngine : IDisposable
 
         // Trigger attack animation
         _state.IsAttacking = true;
-        _state.AttackTimer = 0.15;  // Shorter for shooting
+        _state.AttackTimer = _attackAnimationDuration = 0.15;  // Shorter for shooting
 
         // Calculate projectile direction
         double velX = 0, velY = 0;
@@ -3348,8 +3408,7 @@ public unsafe partial class GameEngine : IDisposable
         }
 
         _state.CurrentWeaponIndex = (_state.CurrentWeaponIndex + 1) % _state.Weapons.Count;
-        _state.SelectedWeapon = _state.Weapons[_state.CurrentWeaponIndex];
-        PlayEquipSound(_state.SelectedWeapon.Value);
+        EquipWeapon(_state.Weapons[_state.CurrentWeaponIndex]);
     }
 
     private void PerformMeleeAttack()
@@ -3359,7 +3418,7 @@ public unsafe partial class GameEngine : IDisposable
 
         // Trigger attack animation
         _state.IsAttacking = true;
-        _state.AttackTimer = 0.3;
+        _state.AttackTimer = _attackAnimationDuration = 0.3;
 
         // Calculate primary attack position based on facing direction
         int targetX = _state.PlayerX;
@@ -3811,6 +3870,8 @@ public unsafe partial class GameEngine : IDisposable
         if (x < 1 || x >= zone.Width - 1 || y < 1 || y >= zone.Height - 1)
             return false;
 
+        if (IsGroundBlocked(zone, x, y)) return false;
+
         var middleTile = zone.GetTile(x, y, 1);
         if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
         {
@@ -3832,6 +3893,8 @@ public unsafe partial class GameEngine : IDisposable
         // Must be within zone bounds
         if (x < 0 || x >= zone.Width || y < 0 || y >= zone.Height)
             return false;
+
+        if (IsGroundBlocked(zone, x, y)) return false;
 
         // Check layer 1 (middle layer) for blocking objects - this is where walls/objects are
         var middleTileId = zone.GetTile(x, y, 1);
@@ -4471,6 +4534,8 @@ public unsafe partial class GameEngine : IDisposable
     /// </summary>
     private void HandleNPCDeath(NPC npc)
     {
+        // Release a defeated actor's reservations immediately, including mid-step deaths.
+        _npcSteps.Remove(npc);
         var npcName = GetCharacterName(npc.CharacterId) ?? "Target";
         _messages.ShowCombat($"{npcName} defeated!");
 
@@ -4607,6 +4672,8 @@ public unsafe partial class GameEngine : IDisposable
             y < 0 || y >= _state.CurrentZone.Height)
             return false;
 
+        if (IsGroundBlocked(_state.CurrentZone, x, y)) return false;
+
         // Check collision with player
         if (_smoothMovement && MovementReserved(x, y, npc)) return false;
         if (x == _state.PlayerX && y == _state.PlayerY)
@@ -4624,7 +4691,7 @@ public unsafe partial class GameEngine : IDisposable
         if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
         {
             var tile = _gameData.Tiles[middleTile];
-            if (tile.IsSolid && !tile.IsDraggable)
+            if (tile.IsSolid && !tile.IsDraggable && !IsNPCMapSprite(x, y, middleTile))
                 return false;
         }
 
@@ -4653,7 +4720,7 @@ public unsafe partial class GameEngine : IDisposable
         var worldClip = new SDLRect { X = 0, Y = 0, W = GameRenderer.GameAreaWidth, H = GameRenderer.GameAreaHeight };
         SDL.RenderSetClipRect(_renderer.GetRenderer(), &worldClip);
         // Render zone
-        _renderer.RenderZone(_state.CurrentZone, ViewCameraX, ViewCameraY);
+        _renderer.RenderZone(_state.CurrentZone, ViewCameraX, ViewCameraY, IsNPCMapSprite);
 
         // Render zone items (crates, weapons on ground)
         RenderZoneItems();
@@ -4664,38 +4731,21 @@ public unsafe partial class GameEngine : IDisposable
         // Render player character
         RenderPlayer();
 
-        // Render attack animation if attacking
-        if (_state.IsAttacking && _state.SelectedWeapon.HasValue)
+        // Authored weapon frames already contain the hero and blade. Only attacks
+        // without a usable authored pose need the generic slash fallback.
+        if (_state.IsAttacking && CurrentWeaponPose() == null)
         {
             var playerScreenX = (int)((PlayerRenderPosition.X - ViewCameraX) * Data.Tile.Width * GameRenderer.Scale);
             var playerScreenY = (int)((PlayerRenderPosition.Y - ViewCameraY) * Data.Tile.Height * GameRenderer.Scale);
-            var direction = (int)_state.PlayerDirection;
-            var progress = _state.AttackTimer / 0.3;  // Normalized progress
-
-            // Get weapon animation tile based on weapon and direction
-            // Light Saber is Character 14, other weapons are Characters 9-13
-            int weaponCharIndex = GetWeaponCharacterIndex(_state.SelectedWeapon.Value);
-            int weaponTile = GetWeaponTileForDirection(weaponCharIndex, _state.PlayerDirection);
-
-            if (weaponTile > 0)
-            {
-                _renderer.RenderWeaponAttack(weaponTile, playerScreenX, playerScreenY, direction, progress);
-            }
-            else
-            {
-                _renderer.RenderMeleeSlash(playerScreenX, playerScreenY, direction, progress);
-            }
-        }
-        else if (_state.IsAttacking)
-        {
-            // Unarmed attack
-            var playerScreenX = (int)((PlayerRenderPosition.X - ViewCameraX) * Data.Tile.Width * GameRenderer.Scale);
-            var playerScreenY = (int)((PlayerRenderPosition.Y - ViewCameraY) * Data.Tile.Height * GameRenderer.Scale);
-            _renderer.RenderMeleeSlash(playerScreenX, playerScreenY, (int)_state.PlayerDirection, _state.AttackTimer / 0.3);
+            _renderer.RenderMeleeSlash(playerScreenX, playerScreenY, (int)_state.PlayerDirection,
+                _state.AttackTimer / _attackAnimationDuration);
         }
 
         // Render projectiles
         RenderProjectiles();
+
+        // Upper scenery occludes actors and effects beneath it.
+        _renderer.RenderZoneRoof(_state.CurrentZone, ViewCameraX, ViewCameraY, IsNPCMapSprite);
 
         // Render script viewer highlights (if viewing current zone)
         if (_scriptViewer?.IsOpen == true)
@@ -4831,6 +4881,21 @@ public unsafe partial class GameEngine : IDisposable
         }
     }
 
+    private bool IsNPCMapSprite(int x, int y, ushort tile)
+    {
+        // Keep authored tiles available to scripts. Only suppress a matching sprite at
+        // its IZAX spawn point; the live NPC renderer owns movement, visibility and death.
+        foreach (var entity in _state.CurrentZone!.Monsters)
+        {
+            if (entity.X != x || entity.Y != y || entity.CharacterId >= _gameData!.Characters.Count)
+                continue;
+            var frames = _gameData.Characters[entity.CharacterId].Frames;
+            if (frames.WalkUp.Contains(tile) || frames.WalkDown.Contains(tile) ||
+                frames.WalkLeft.Contains(tile) || frames.WalkRight.Contains(tile)) return true;
+        }
+        return false;
+    }
+
     private void RenderNPCs()
     {
         foreach (var npc in _state.ZoneNPCs)
@@ -4901,6 +4966,15 @@ public unsafe partial class GameEngine : IDisposable
         // Skip rendering if hero is hidden (by HideHero script instruction)
         if (!_state.HeroVisible)
             return;
+
+        if (CurrentWeaponPose() is { } attack)
+        {
+            var position = PlayerRenderPosition;
+            _renderer!.RenderSprite(attack.Body, position.X, position.Y, ViewCameraX, ViewCameraY);
+            if (attack.Extension is { } extension)
+                _renderer.RenderSprite(extension, position.X + attack.OffsetX, position.Y + attack.OffsetY, ViewCameraX, ViewCameraY);
+            return;
+        }
 
         // Find hero character for rendering
         // In Yoda Stories, the hero (Luke) is typically character 0 or has Hero type
@@ -5243,8 +5317,10 @@ public unsafe partial class GameEngine : IDisposable
     {
         var zone = _state.CurrentZone;
         if (zone == null || x < 0 || y < 0 || x >= zone.Width || y >= zone.Height) return false;
+        if (IsGroundBlocked(zone, x, y)) return false;
         var t = zone.GetTile(x, y, 1);
-        if (t != 0xFFFF && (t >= _gameData!.Tiles.Count || _gameData.Tiles[t].IsSolid)) return false;
+        if (t != 0xFFFF && (t >= _gameData!.Tiles.Count ||
+            _gameData.Tiles[t].IsSolid && !IsNPCMapSprite(x, y, t))) return false;
         return !_state.ZoneNPCs.Any(n => n.IsEnabled && n.IsAlive && n.X == x && n.Y == y);
     }
 
@@ -5290,8 +5366,7 @@ public unsafe partial class GameEngine : IDisposable
     /// A weapon character's first frame ends in that tile (WebFun: frames[0].extensionRight).
     /// </summary>
     private int WeaponCharacterFor(int weaponTile) =>
-        _gameData?.Characters.FindIndex(c =>
-            c.Weapon != null && c.Frames.ExtensionRight.Length > 0 && c.Frames.ExtensionRight[0] == weaponTile) ?? -1;
+        _gameData == null ? -1 : WeaponAnimation.FindCharacter(_gameData, weaponTile);
 
     /// <summary>A weapon character's CHWP reference is the sound it makes when used.</summary>
     private void PlayWeaponSound(int weaponCharacterId)
@@ -5318,15 +5393,11 @@ public unsafe partial class GameEngine : IDisposable
         });
     }
 
-    private int GetWeaponCharacterIndex(int weaponTileId)
-    {
-        // Map weapon tile IDs to character indices
-        // Lightsabers use Character 14 "Light Saber" for attack animation
-        if (weaponTileId == TILE_BASIC_LIGHTSABER) return 14;     // Basic lightsaber (tile 18)
-        if (weaponTileId == TILE_UPGRADED_LIGHTSABER) return 14;  // Upgraded lightsaber (tile 510)
-        if (weaponTileId == TILE_THE_FORCE) return 14;            // The Force (tile 511) - uses same animation
-        return -1;
-    }
+    private WeaponPose? CurrentWeaponPose() =>
+        _state.IsAttacking && _state.SelectedWeapon.HasValue && _gameData != null
+            ? WeaponAnimation.Resolve(_gameData, WeaponCharacterFor(_state.SelectedWeapon.Value), _state.PlayerDirection,
+                Math.Clamp(1 - _state.AttackTimer / _attackAnimationDuration, 0, 1))
+            : null;
 
     /// <summary>
     /// Checks if the given weapon is a ranged weapon (can attack from a distance).
@@ -5335,28 +5406,6 @@ public unsafe partial class GameEngine : IDisposable
     {
         // The Force allows attacking from a distance
         return weaponTileId == TILE_THE_FORCE;
-    }
-
-    /// <summary>
-    /// Gets the weapon attack tile for a direction.
-    /// Luke's lightsaber attack frames at atlas 241x1472 = tile 2122+
-    /// </summary>
-    private int GetWeaponTileForDirection(int weaponCharIndex, Direction direction)
-    {
-        if (weaponCharIndex == 14)  // Lightsaber
-        {
-            // Luke's lightsaber attack tiles from atlas 241x1472 = tile 2122
-            // Sequential tiles: 2122, 2123 for up/down and left/right
-            return direction switch
-            {
-                Direction.Up => 2122,
-                Direction.Down => 2123,
-                Direction.Right => 2124,
-                Direction.Left => 2125,
-                _ => 2122
-            };
-        }
-        return -1;
     }
 
     /// <summary>

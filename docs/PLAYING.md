@@ -37,6 +37,13 @@ generates another one.
 
 ---
 
+## Movable puzzle objects
+
+If you move blocks, boulders, or other puzzle objects and leave an **unsolved** area,
+the area returns to its initial layout and local puzzle state. Re-enter to try again.
+Solved areas retain their completed state. Collected items stay in your inventory and
+are not recreated by the reset.
+
 ## Smooth movement
 
 Enable **Config → Smooth Movement**, or **Smooth Movement** in the controller pause menu.
@@ -56,7 +63,7 @@ steps finish. Saves keep committed tile positions, so loading starts at a tile c
 | Key | Action |
 |---|---|
 | `W` `A` `S` `D` / arrow keys | Move one tile. Walking into a pushable block pushes it. |
-| `Shift` + direction | Pull a block instead of pushing it. |
+| `Shift` + direction | Pull an adjacent block by stepping away from it. For a block on your right, hold `Shift` and move left. |
 | `Space` | Use the selected item, talk to whoever is in front of you, or attack. |
 | `Tab` | Cycle to the next weapon. |
 | `1`-`9`, `0` | Select inventory slot 1-10, relative to the current scroll position. |

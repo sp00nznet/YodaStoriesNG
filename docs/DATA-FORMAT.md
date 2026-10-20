@@ -303,7 +303,10 @@ These are the raw material the world generator chains together into a mission. S
 
 `CHAR` defines each character: name, type (hero, enemy, friendly), and three animation
 frames, each containing eight tile IDs. The renderer uses slots 0, 1, 3, and 6 for up,
-down, left, and right. Yoda Stories has 77 characters.
+down, left, and right. Slots 2, 4, 5, and 7 hold their adjacent-tile extensions.
+For weapon characters, frame 0 contains projectile sprites and the inventory icon in
+slot 7; frames 1 and 2 contain the hero's attack poses and their weapon extensions.
+Yoda Stories has 77 characters.
 
 `CHWP` and `CAUX` are lists keyed by character index, not arrays in character order. Each
 entry starts with an `int16` index, and an index of `-1` ends the list:

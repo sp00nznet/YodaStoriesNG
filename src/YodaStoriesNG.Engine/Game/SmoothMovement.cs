@@ -20,6 +20,8 @@ public unsafe partial class GameEngine
     private double _bumpCooldown;
     private bool _smoothInputVertical;
     private Func<(int X, int Y, double Strength)>? _smoothInputSource;
+    private Func<bool>? _smoothPullSource;
+    private bool ReadPullInput() => _smoothPullSource?.Invoke() ?? (_renderer != null && IsShiftHeld());
     private bool MovementModePending => _smoothMovement != _smoothMovementRequested;
     private bool MovementUIBlocked => !_movementFocused || _menuBar?.IsMenuOpen == true ||
         _controllerOverlay?.IsOpen == true || _controlsWindow?.IsOpen == true || _state.IsPaused;
@@ -87,12 +89,14 @@ public unsafe partial class GameEngine
     {
         var zone = _state.CurrentZone;
         if (zone == null || x < 0 || y < 0 || x >= zone.Width || y >= zone.Height) return false;
+        if (IsGroundBlocked(zone, x, y)) return false;
         if (actor != null && x == _state.PlayerX && y == _state.PlayerY) return false;
         if (MovementReserved(x, y, actor)) return false;
         if (_state.ZoneNPCs.Any(n => n != actor && n.IsEnabled && n.IsAlive && n.X == x && n.Y == y &&
             !(collect && n.IsReadyToCollect && IsR2D2Character(n.CharacterId)))) return false;
         int tile = zone.GetTile(x, y, 1);
-        return tile == ushort.MaxValue || tile >= _gameData!.Tiles.Count || !_gameData.Tiles[tile].IsObject;
+        return tile == ushort.MaxValue || tile >= _gameData!.Tiles.Count ||
+            !_gameData.Tiles[tile].IsSolid || IsNPCMapSprite(x, y, (ushort)tile);
     }
 
     private bool IsCardinalInteraction(int x, int y) => _sectorPuzzles?.IsBumpTarget(x, y) == true || _state.CurrentZone!.Objects.Any(o => o.Enabled && o.X == x && o.Y == y &&
@@ -118,7 +122,11 @@ public unsafe partial class GameEngine
         // Pushes are validated now and applied by the original movement path at arrival.
         int tile = _state.CurrentZone.GetTile(Math.Clamp(x + dx, 0, _state.CurrentZone.Width - 1),
             Math.Clamp(y + dy, 0, _state.CurrentZone.Height - 1), 1);
-        bool push = !diagonal && tile < _gameData!.Tiles.Count && _gameData.Tiles[tile].IsDraggable &&
+        bool push = !diagonal && x + dx >= 0 && y + dy >= 0 &&
+            x + dx < _state.CurrentZone.Width && y + dy < _state.CurrentZone.Height &&
+            !IsGroundBlocked(_state.CurrentZone, x + dx, y + dy) &&
+            tile < _gameData!.Tiles.Count && _gameData.Tiles[tile].IsDraggable &&
+            _state.CurrentZone.GetTile(x + dx * 2, y + dy * 2, 1) == ushort.MaxValue &&
             SmoothCellClear(x + dx * 2, y + dy * 2) && !MovementReserved(x + dx, y + dy);
         if (!clear && !push || !diagonal && IsCardinalInteraction(x + dx, y + dy) && !push)
         {
@@ -204,17 +212,17 @@ public unsafe partial class GameEngine
         if (_suppressHeldMovement || _bot?.IsRunning == true || _playerStep != null || MovementModePending) return;
         _inputMoveStrength = input.Strength;
         int dx = input.X, dy = input.Y;
-        if (!RequestSmoothPlayerStep(dx, dy, _state.PlayerDirection, _renderer != null && IsShiftHeld()) && dx != 0 && dy != 0)
+        if (!RequestSmoothPlayerStep(dx, dy, _state.PlayerDirection, ReadPullInput()) && dx != 0 && dy != 0)
         {
             // Digital ties choose horizontal. Analog input uses its dominant axis.
             bool vertical = _smoothInputVertical;
             if (vertical)
             {
-                if (!RequestSmoothPlayerStep(0, dy, _state.PlayerDirection, _renderer != null && IsShiftHeld()))
-                    RequestSmoothPlayerStep(dx, 0, _state.PlayerDirection, _renderer != null && IsShiftHeld());
+                if (!RequestSmoothPlayerStep(0, dy, _state.PlayerDirection, ReadPullInput()))
+                    RequestSmoothPlayerStep(dx, 0, _state.PlayerDirection, ReadPullInput());
             }
-            else if (!RequestSmoothPlayerStep(dx, 0, _state.PlayerDirection, _renderer != null && IsShiftHeld()))
-                RequestSmoothPlayerStep(0, dy, _state.PlayerDirection, _renderer != null && IsShiftHeld());
+            else if (!RequestSmoothPlayerStep(dx, 0, _state.PlayerDirection, ReadPullInput()))
+                RequestSmoothPlayerStep(0, dy, _state.PlayerDirection, ReadPullInput());
         }
         _inputMoveStrength = 1;
     }
@@ -238,7 +246,10 @@ public unsafe partial class GameEngine
             remaining = Math.Max(0, step.Elapsed - step.Duration);
             _playerStep = null;
             _committingSmoothStep = true;
-            try { TryMovePlayer(step.ToX - step.FromX, step.ToY - step.FromY, step.Facing, step.Pull); }
+            // A modifier pressed during a smooth step should still pull the block
+            // adjacent to its starting tile. Diagonal steps never pull diagonally.
+            bool pull = step.Pull || (step.FromX == step.ToX || step.FromY == step.ToY) && ReadPullInput();
+            try { TryMovePlayer(step.ToX - step.FromX, step.ToY - step.FromY, step.Facing, pull); }
             finally { _committingSmoothStep = false; }
             if (_actionExecutor?.IsBusy == true || !_state.HeroVisible) break;
             if (_pendingMovementAction is { } action)

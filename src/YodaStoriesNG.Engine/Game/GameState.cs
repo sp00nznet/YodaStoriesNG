@@ -241,8 +241,12 @@ public class GameState
     /// <summary>
     /// Removes an item from inventory.
     /// </summary>
-    public void RemoveItem(int itemId) =>
+    public void RemoveItem(int itemId)
+    {
         Inventory.Remove(itemId);
+        if (SelectedItem == itemId && !Inventory.Contains(itemId))
+            SelectedItem = null;
+    }
 
     /// <summary>
     /// Marks a zone as solved.

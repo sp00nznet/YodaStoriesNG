@@ -738,7 +738,10 @@ public class DtaParser
         };
 
         // Last slot of the first frame is the inventory tile for weapon characters.
-        frames.ExtensionRight = new[] { ReadFrameTile(0, 7) };
+        frames.ExtensionUp = Enumerable.Range(0, 3).Select(frame => ReadFrameTile(frame, 2)).ToArray();
+        frames.ExtensionDown = Enumerable.Range(0, 3).Select(frame => ReadFrameTile(frame, 4)).ToArray();
+        frames.ExtensionLeft = Enumerable.Range(0, 3).Select(frame => ReadFrameTile(frame, 5)).ToArray();
+        frames.ExtensionRight = Enumerable.Range(0, 3).Select(frame => ReadFrameTile(frame, 7)).ToArray();
 
         character.Frames = frames;
 

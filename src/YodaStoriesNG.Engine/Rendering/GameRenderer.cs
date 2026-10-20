@@ -471,21 +471,24 @@ public unsafe class GameRenderer : IDisposable
     /// <summary>
     /// Renders a zone at the specified camera offset.
     /// </summary>
-    public void RenderZone(Zone zone, double cameraX, double cameraY)
+    public void RenderZone(Zone zone, double cameraX, double cameraY, Func<int, int, ushort, bool>? isActorTile = null)
     {
         // Clear screen
         SDL.SetRenderDrawColor(_renderer, 0, 0, 0, 255);
         SDL.RenderClear(_renderer);
 
-        // Render tile layers
-        for (int layer = 0; layer < 3; layer++)
+        // Roofs are drawn after actors so walking underneath does not put the hero on top.
+        for (int layer = 0; layer < 2; layer++)
         {
-            RenderTileLayer(zone, layer, cameraX, cameraY);
+            RenderTileLayer(zone, layer, cameraX, cameraY, isActorTile);
         }
 
     }
 
-    private void RenderTileLayer(Zone zone, int layer, double cameraX, double cameraY)
+    public void RenderZoneRoof(Zone zone, double cameraX, double cameraY, Func<int, int, ushort, bool>? isActorTile = null) =>
+        RenderTileLayer(zone, 2, cameraX, cameraY, isActorTile);
+
+    private void RenderTileLayer(Zone zone, int layer, double cameraX, double cameraY, Func<int, int, ushort, bool>? isActorTile)
     {
         for (int screenY = 0; screenY <= ViewportTilesY; screenY++)
         {
@@ -499,6 +502,10 @@ public unsafe class GameRenderer : IDisposable
 
                 var tileId = zone.GetTile(worldX, worldY, layer);
                 if (tileId == 0xFFFF || tileId >= _gameData.Tiles.Count)
+                    continue;
+
+                // IZAX actors own their sprites; their map placeholders must not remain as ghosts.
+                if (layer > 0 && isActorTile?.Invoke(worldX, worldY, tileId) == true)
                     continue;
 
                 var tile = _gameData.Tiles[(int)tileId];
@@ -1020,76 +1027,6 @@ public unsafe class GameRenderer : IDisposable
             H = size + 4
         };
         SDL.RenderDrawRect(_renderer, &glowRect);
-    }
-
-    /// <summary>
-    /// Renders a weapon attack animation using the weapon's tile sprite.
-    /// </summary>
-    public void RenderWeaponAttack(int weaponTileId, int playerScreenX, int playerScreenY, int direction, double progress)
-    {
-        if (weaponTileId <= 0 || weaponTileId >= _gameData.Tiles.Count)
-        {
-            // Fallback to melee slash for invalid weapon
-            RenderMeleeSlash(playerScreenX, playerScreenY, direction, progress);
-            return;
-        }
-
-        // Calculate weapon position based on direction and progress
-        int offsetX = 0, offsetY = 0;
-        double angle = 0;
-
-        // Swing animation - weapon moves in an arc
-        var swingProgress = Math.Sin(progress * Math.PI);  // 0 -> 1 -> 0
-
-        // Direction: 0=Up, 1=Down, 2=Left, 3=Right
-        switch (direction)
-        {
-            case 0: // Up
-                offsetY = -(int)(Tile.Height * Scale * (0.5 + swingProgress * 0.5));
-                offsetX = (int)((swingProgress - 0.5) * Tile.Width * Scale);
-                break;
-            case 1: // Down
-                offsetY = (int)(Tile.Height * Scale * (0.5 + swingProgress * 0.5));
-                offsetX = (int)((0.5 - swingProgress) * Tile.Width * Scale);
-                break;
-            case 2: // Left
-                offsetX = -(int)(Tile.Width * Scale * (0.5 + swingProgress * 0.5));
-                offsetY = (int)((swingProgress - 0.5) * Tile.Height * Scale);
-                break;
-            case 3: // Right
-                offsetX = (int)(Tile.Width * Scale * (0.5 + swingProgress * 0.5));
-                offsetY = (int)((0.5 - swingProgress) * Tile.Height * Scale);
-                break;
-        }
-
-        // Render the weapon tile
-        var weaponX = playerScreenX + offsetX;
-        var weaponY = playerScreenY + offsetY;
-
-        // Get tile from atlas
-        int tilesPerRow = (_atlasWidth + Tile.Width - 1) / Tile.Width;
-        int atlasX = (weaponTileId % tilesPerRow) * Tile.Width;
-        int atlasY = (weaponTileId / tilesPerRow) * Tile.Height;
-
-        var srcRect = new SDLRect { X = atlasX, Y = atlasY, W = Tile.Width, H = Tile.Height };
-        var dstRect = new SDLRect { X = weaponX, Y = weaponY, W = Tile.Width * Scale, H = Tile.Height * Scale };
-
-        SDL.RenderCopy(_renderer, _tileAtlas, &srcRect, &dstRect);
-
-        // Add lightsaber glow effect for tile 510 (lightsaber)
-        if (weaponTileId == 510)
-        {
-            SDL.SetRenderDrawBlendMode(_renderer, SDLBlendMode.Blend);
-            SDL.SetRenderDrawColor(_renderer, 100, 255, 100, (byte)(100 * swingProgress));
-            var glowRect = new SDLRect
-            {
-                X = weaponX - 4,
-                Y = weaponY - 4,
-                W = Tile.Width * Scale + 8,
-                H = Tile.Height * Scale + 8
-            };
-            SDL.RenderDrawRect(_renderer, &glowRect);
-        }
     }
 
     /// <summary>
