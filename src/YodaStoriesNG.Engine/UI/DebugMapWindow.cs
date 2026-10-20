@@ -33,6 +33,7 @@ public class DebugMapWindow : IDisposable
     private int _gridHeight = 10;
 
     private bool _isOpen = false;
+    private bool _locatorMode;
     private uint _windowId;
 
     // Map tile IDs - these will be found by scanning tiles with Map flag
@@ -46,6 +47,7 @@ public class DebugMapWindow : IDisposable
     private int _tileVisited = -1;
 
     public bool IsOpen => _isOpen;
+    public bool IsLocatorOpen => _isOpen && _locatorMode;
 
     public DebugMapWindow(GameState state, WorldGenerator worldGenerator, GameData gameData)
     {
@@ -126,9 +128,15 @@ public class DebugMapWindow : IDisposable
             $"Gateway={_tileGateway}, Wall={_tileWall}, Objective={_tileObjective}");
     }
 
-    public unsafe void Open()
+    public unsafe void Open(bool locatorMode = false)
     {
-        if (_isOpen) return;
+        _locatorMode = locatorMode;
+        if (_isOpen)
+        {
+            SDL.SetWindowTitle(_window, locatorMode ? "Locator" : "World Map");
+            SDL.RaiseWindow(_window);
+            return;
+        }
 
         // Calculate grid size from current world
         var world = _worldGenerator.CurrentWorld;
@@ -147,7 +155,7 @@ public class DebugMapWindow : IDisposable
         int windowHeight = CellSize * _gridHeight + Padding * 2;
 
         _window = SDL.CreateWindow(
-            "World Map",
+            locatorMode ? "Locator" : "World Map",
             100, 100,
             windowWidth, windowHeight,
             (uint)(SDLWindowFlags.Shown | SDLWindowFlags.Resizable));
@@ -235,6 +243,7 @@ public class DebugMapWindow : IDisposable
         }
 
         _isOpen = false;
+        _locatorMode = false;
         Console.WriteLine("[DebugMap] Window closed");
     }
 
@@ -249,6 +258,18 @@ public class DebugMapWindow : IDisposable
     public unsafe bool HandleEvent(SDLEvent* evt)
     {
         if (!_isOpen) return false;
+
+        if (evt->Type == (uint)SDLEventType.Keydown && evt->Key.WindowID == _windowId)
+        {
+            if (evt->Key.Repeat == 0 && evt->Key.Keysym.Sym is (int)SDLKeyCode.Escape or (int)SDLKeyCode.Space or (int)SDLKeyCode.Return)
+                Close();
+            return true;
+        }
+        if (_locatorMode && evt->Type == (uint)SDLEventType.Controllerbuttondown && evt->Cbutton.Button is 0 or 1)
+        {
+            Close();
+            return true;
+        }
 
         if (evt->Type == (uint)SDLEventType.Windowevent &&
             evt->Window.WindowID == _windowId)
@@ -294,11 +315,12 @@ public class DebugMapWindow : IDisposable
 
         // Find current zone position
         int currentGridX = -1, currentGridY = -1;
+        int currentMapZone = world.Sectors.GetValueOrDefault(_state.CurrentZoneId)?.Zone ?? _state.CurrentZoneId;
         for (int y = 0; y < gridHeight; y++)
         {
             for (int x = 0; x < gridWidth; x++)
             {
-                if (world.Grid[y, x] == _state.CurrentZoneId)
+                if (world.Grid[y, x] == currentMapZone)
                 {
                     currentGridX = x;
                     currentGridY = y;
@@ -476,6 +498,14 @@ public class DebugMapWindow : IDisposable
         // Title
         DrawText(legendX, legendY, "WORLD MAP", (255, 255, 255));
         legendY += lineHeight + 5;
+
+        if (_locatorMode)
+        {
+            DrawText(legendX, legendY, "Red: You are here", (255, 100, 100));
+            legendY += lineHeight;
+            DrawText(legendX, legendY, "Esc/Space: Close", (200, 200, 200));
+            return;
+        }
 
         // Current zone info
         var zone = _state.CurrentZone;

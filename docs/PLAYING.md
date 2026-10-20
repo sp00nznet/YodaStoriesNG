@@ -30,8 +30,18 @@ generates another one.
    the sidebar scrolls a long inventory.
 10. **Find the X-Wing and press `X`** to travel between the starting swamp and the mission
     planet. Indiana Jones uses a different vehicle in the same role.
-11. **Stuck?** Press `O` again, or - once you have the R2-D2 locator droid - let R2 tell
+11. **Stuck?** Press `O` again, or - once you have R2-D2 - let R2 tell
     you where to go next.
+
+The **Locator** is a separate map item. Select it and press `Space` (controller: `A`)
+to open the world map. Gameplay pauses while the map is open. Close it with `Escape`,
+`Space`, the window close button, or controller `A`/`B`. R2-D2 gives hints instead.
+
+To use a puzzle item, stand next to the target and either drag the item from the bag
+onto that map tile, or select it and press `Space` while facing the target. A puzzle
+target directly underneath Luke can also be used with `Space`. Dropping an item out
+of reach shows a message and keeps it in the bag. During smooth movement, item use
+waits until Luke reaches the next tile center.
 
 ![R2-D2 giving a hint](shots/r2d2-help.png)
 
@@ -50,7 +60,10 @@ Enable **Config → Smooth Movement**, or **Smooth Movement** in the controller 
 The choice is remembered between launches and is off by default. It applies to both the
 player and enemies. Hold movement keys or the D-pad to keep walking; two directions move
 diagonally, and the analog stick controls walking speed. Releasing input finishes the
-current tile step. Diagonals have the same overall speed and cannot cut through corners.
+current tile step. Diagonals have the same overall speed. Luke can pass through diagonal
+openings between wall corners and movable rocks when the destination is clear;
+actors and reserved movement cells still obstruct them.
+Walking toward an opening also slides Luke around the wall corner.
 
 Pushing, pulling, boarding, and entering doors use a cardinal approach. Actions requested
 while walking happen at the next tile center. A mode change takes effect when active
@@ -251,3 +264,10 @@ Because it is plain JSON you can open a save in any text editor. Or use the buil
 [DEBUG-TOOLS.md](DEBUG-TOOLS.md#save-game-editor-f8).
 
 ![The save game editor](shots/save-editor.png)
+
+### Spare weapons
+
+Each weapon pickup adds a copy to your inventory without changing the equipped weapon.
+Extra copies remain in the bag when that weapon is equipped. When its ammunition runs
+out, one spare is consumed and its full ammunition supply becomes available. Switching
+weapons moves one copy between the bag and weapon slot; it does not create extra copies.

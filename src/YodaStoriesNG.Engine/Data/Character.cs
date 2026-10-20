@@ -38,8 +38,8 @@ public class CharacterFrames
 }
 
 /// <summary>
-/// The file stores 1 Hero, 2 Enemy, 4 Weapon. Friendly is the engine's own - Yoda Stories'
-/// characters are still classified by name (see DtaParser.InferCharacterType).
+/// The file stores 1 Hero, 2 Enemy, 4 Weapon. Friendly is the engine's own
+/// category for scripted companions such as R2-D2.
 /// </summary>
 public enum CharacterType : ushort
 {

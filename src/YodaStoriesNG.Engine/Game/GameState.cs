@@ -224,18 +224,22 @@ public class GameState
         Counters[id] = current + amount;
     }
 
+    // The reserved script-variable range persists these counters in existing saves.
+    public int GetSectorCounter(int zoneId) => GetVariable(zoneId + 3000);
+    public void SetSectorCounter(int zoneId, int value) => SetVariable(zoneId + 3000, value);
+
     /// <summary>
     /// Checks if the player has an item.
     /// </summary>
     public bool HasItem(int itemId) =>
-        Inventory.Contains(itemId);
+        Inventory.Contains(itemId) || Weapons.Contains(itemId);
 
     /// <summary>
     /// Adds an item to inventory (allows duplicates for stacking).
     /// </summary>
     public void AddItem(int itemId)
     {
-        Inventory.Add(itemId);
+        if (itemId >= 0) Inventory.Add(itemId);
     }
 
     /// <summary>
@@ -243,7 +247,21 @@ public class GameState
     /// </summary>
     public void RemoveItem(int itemId)
     {
-        Inventory.Remove(itemId);
+        // Equipped copies live outside Inventory; script removal still consumes one
+        // real copy. Removing a reserve must leave the equipped copy intact.
+        bool removed = Inventory.Remove(itemId);
+        if (!removed && SelectedWeapon == itemId)
+        {
+            SelectedWeapon = null;
+            removed = true;
+        }
+        if (!Inventory.Contains(itemId) && SelectedWeapon != itemId && (removed || Weapons.Contains(itemId)))
+        {
+            Weapons.Remove(itemId);
+            WeaponAmmo.Remove(itemId);
+            int selectedIndex = SelectedWeapon.HasValue ? Weapons.IndexOf(SelectedWeapon.Value) : -1;
+            CurrentWeaponIndex = selectedIndex >= 0 ? selectedIndex : Math.Clamp(CurrentWeaponIndex, 0, Math.Max(0, Weapons.Count - 1));
+        }
         if (SelectedItem == itemId && !Inventory.Contains(itemId))
             SelectedItem = null;
     }
@@ -341,17 +359,26 @@ public class GameState
     /// </summary>
     public void RemoveDepletedWeapon(int tileId)
     {
-        Inventory.Remove(tileId);
+        // The spent equipped copy is outside Inventory. Consume exactly one reserve
+        // and start its full clip, keeping any additional copies in the bag.
+        if (WeaponAmmo.TryGetValue(tileId, out var ammo) && Inventory.Remove(tileId))
+        {
+            ammo.CurrentAmmo = ammo.MaxAmmo;
+            if (SelectedItem == tileId && !Inventory.Contains(tileId)) SelectedItem = null;
+            return;
+        }
         Weapons.Remove(tileId);
         WeaponAmmo.Remove(tileId);
+        if (SelectedItem == tileId && !Inventory.Contains(tileId)) SelectedItem = null;
 
-        // Switch to next weapon or fists
         if (SelectedWeapon == tileId)
         {
             if (Weapons.Count > 0)
             {
                 CurrentWeaponIndex = Math.Min(CurrentWeaponIndex, Weapons.Count - 1);
-                SelectedWeapon = Weapons[CurrentWeaponIndex];
+                int next = Weapons[CurrentWeaponIndex];
+                SelectedWeapon = next == 0 ? null : next;
+                Inventory.Remove(next); // transfer its equipped copy out of the bag
             }
             else
             {
@@ -359,7 +386,10 @@ public class GameState
                 CurrentWeaponIndex = 0;
             }
         }
+        else if (SelectedWeapon.HasValue)
+            CurrentWeaponIndex = Weapons.IndexOf(SelectedWeapon.Value);
     }
+
 }
 
 public enum Direction

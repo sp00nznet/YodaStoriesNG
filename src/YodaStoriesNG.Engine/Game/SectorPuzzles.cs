@@ -45,6 +45,11 @@ public class SectorPuzzles
     /// </summary>
     public bool SyncMission()
     {
+        // Room and outdoor zones share a sector. Keep script checks and the saved
+        // SolvedZones set in agreement with generated puzzle progress.
+        foreach (var sector in _world.Sectors.Values.Distinct())
+            if (sector.Solved || _world.Sectors.Any(p => ReferenceEquals(p.Value, sector) && _state.IsZoneSolved(p.Key)))
+                SetSolved(sector);
         if (_world.Mission is not { } mission) return false;
         int step = mission.PuzzleChain.FindIndex(s =>
             !(s.ZoneId is { } z && _world.Sectors.TryGetValue(z, out var sector) && sector.Solved));
@@ -121,7 +126,7 @@ public class SectorPuzzles
         var text = sector.Solved
             ? Line(puzzle, 1)
             : string.Join(" ", new[] { Line(puzzle, 0), next != null ? Line(next, 2) : "" }.Where(t => t.Length > 0));
-        if (text.Length > 0) OnSpeak?.Invoke(NameOf(sector.Npc), text);
+        if (text.Length > 0) Speak(NameOf(sector.Npc), text);
         return true;
     }
 
@@ -140,14 +145,14 @@ public class SectorPuzzles
 
         if (!town.Solved)
         {
-            OnSpeak?.Invoke("Marcus", Line(goal, 3));
+            Speak("Marcus", Line(goal, 3));
             int first = _world.Mission.PuzzleChain.FirstOrDefault()?.RewardItemId ?? 0;
             if (first > 0) _state.AddItem(first);
-            town.Solved = true;
+            SetSolved(town);
         }
         else
         {
-            OnSpeak?.Invoke("Marcus", Line(goal, 2));
+            Speak("Marcus", Line(goal, 2));
         }
         return true;
     }
@@ -156,13 +161,15 @@ public class SectorPuzzles
     public bool PlaceItem(int item, int x, int y)
     {
         if (Sector is not { } sector || _state.CurrentZone is not { } zone) return false;
-        var hotspot = zone.Objects.FirstOrDefault(h => h.X == x && h.Y == y && h.Enabled);
+        // Reward markers frequently share a cell with the actual lock or NPC.
+        // Select by interaction role, not whichever hotspot was stored first.
+        var hotspot = zone.Objects.FirstOrDefault(h => h.X == x && h.Y == y && h.Enabled && h.Type == Lock);
 
         if (sector.PuzzleIndex < 0 || sector.Solved)
         {
             // Blockades and solved sectors: the required item opens a Lock.
             if (hotspot?.Type != Lock || sector.RequiredItem != item) return false;
-            sector.Solved = true;
+            SetSolved(sector);
             _state.RemoveItem(item);
             return true;
         }
@@ -172,21 +179,22 @@ public class SectorPuzzles
 
         if (puzzle.Type == PuzzleType.Transaction)
         {
+            hotspot = zone.Objects.FirstOrDefault(h => h.X == x && h.Y == y && h.Enabled && h.Type == SpawnLocation);
             if (sector.RequiredItem != item) return NoGo();
             if (zone.GetTile(x, y, 1) != sector.Npc || hotspot == null) return NoGo();
 
             _state.RemoveItem(item);
-            OnSpeak?.Invoke(NameOf(sector.Npc), Line(puzzle, 1));
+            Speak(NameOf(sector.Npc), Line(puzzle, 1));
             // Handed straight over - WebFun's "pick up items automatically" behaviour.
             if (sector.FindItem >= 0) _state.AddItem(sector.FindItem);
-            sector.Solved = true;
+            SetSolved(sector);
             return true;
         }
 
         if (puzzle.Type == PuzzleType.Offer)
         {
             if (hotspot?.Type != Lock || hotspot.Argument != item) return NoGo();
-            sector.Solved = true;
+            SetSolved(sector);
             _state.RemoveItem(item);
             // The find item's drop spot opens; show it now rather than on the next visit.
             foreach (var drop in zone.Objects.Where(h => h.Type == DropQuestItem && h.Argument == sector.FindItem))
@@ -210,9 +218,23 @@ public class SectorPuzzles
     /// <summary>Picking up a sector's find item solves it (WebFun engine.dropItem).</summary>
     public void OnPickedUp(int item)
     {
-        if (Sector is { } sector && sector.FindItem == item) sector.Solved = true;
+        if (Sector is { } sector && sector.FindItem == item) SetSolved(sector);
+    }
+
+    private void SetSolved(Sector sector)
+    {
+        sector.Solved = true;
+        foreach (var pair in _world.Sectors.Where(p => ReferenceEquals(p.Value, sector)))
+            _state.MarkZoneSolved(pair.Key);
     }
 
     private static string Line(Puzzle p, int i) => i < p.Strings.Count ? p.Strings[i].Trim() : "";
+    private void Speak(string speaker, string text)
+    {
+        int provided = Sector?.FindItem ?? -1, required = Sector?.RequiredItem ?? -1;
+        if (required < 0) required = provided;
+        if (provided < 0) provided = required;
+        OnSpeak?.Invoke(speaker, DialogueText.Resolve(_data, text, provided, required));
+    }
     private string NameOf(int tile) => _data.TileNames.GetValueOrDefault(tile) ?? "";
 }

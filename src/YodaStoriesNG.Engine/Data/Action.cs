@@ -49,7 +49,7 @@ public enum ConditionOpcode : ushort
     EnterByPlane = 0x09,            // Entered zone via X-Wing
     TileAtIs = 0x0A,                // Tile at (x, y, layer) == tile
     MonsterIsDead = 0x0B,           // Monster index is dead
-    HasNoActiveMonsters = 0x0C,     // All monsters are dead
+    HasNoActiveMonsters = 0x0C,     // No enabled living monsters remain
     HasItem = 0x0D,                 // Inventory contains item (-1 = zone's puzzle item)
     RequiredItemIs = 0x0E,          // Zone's required item matches
     EndingIs = 0x0F,                // Current goal item id matches
@@ -64,12 +64,12 @@ public enum ConditionOpcode : ushort
     PlacedItemIsNot = 0x17,         // Placed item does NOT match (x, y, layer, tileA, tileB)
     HeroIsAt = 0x18,                // Hero at position (x, y)
     SectorCounterIs = 0x19,         // Zone sector-counter == value
-    NpcIs = 0x19,                   // Alias - check current NPC (game-specific use)
+    NpcIs = 0x100,                  // Engine extension: current NPC (not a native sector counter)
     SectorCounterIsLessThan = 0x1A, // Zone sector-counter < value
-    HasNpc = 0x1A,                  // Alias - check if interacting with NPC
+    HasNpc = 0x101,                 // Engine extension: interacting with an NPC
     SectorCounterIsGreaterThan = 0x1B, // Zone sector-counter > value
     GamesWonIs = 0x1C,              // Total games won == value
-    DropsQuestItemAt = 0x1D,        // Player drops quest item at (x, y)
+    DropsQuestItemAt = 0x1D,        // Enabled quest-item hotspot exists at (x, y)
     HasAnyRequiredItem = 0x1E,      // Inventory has any required item for zone
     CounterIsNot = 0x1F,            // Zone counter != value
     DroppedItemIs = 0x30,           // Check dropped item (game-specific extension)
@@ -90,7 +90,7 @@ public enum InstructionOpcode : ushort
     PlaceTile = 0x00,           // Place tile at (x, y, layer, tile)
     RemoveTile = 0x01,          // Remove tile at (x, y, layer)
     MoveTile = 0x02,            // Move tile from (x1, y1, layer) to (x2, y2)
-    DrawTile = 0x03,            // Draw tile at (x, y, layer, tile, ?)
+    DrawTile = 0x03,            // Draw temporary frame at (x, y, tile); map stays unchanged
     SpeakHero = 0x04,           // Show hero speech bubble (uses text)
     SpeakNpc = 0x05,            // Show NPC speech at (x, y) (uses text)
     SetTileNeedsDisplay = 0x06, // Redraw tile at (x, y)
@@ -106,7 +106,7 @@ public enum InstructionOpcode : ushort
     HideHero = 0x10,            // Hide hero sprite
     ShowHero = 0x11,            // Show hero sprite
     MoveHeroTo = 0x12,          // Teleport hero to (x, y)
-    MoveHeroBy = 0x13,          // Move hero by (dx, dy, ?, ?, ?)
+    MoveHeroBy = 0x13,          // Yoda: scripted move (fromX, fromY, toX, toY, mode)
     DisableAction = 0x14,       // Disable this action permanently
     EnableHotspot = 0x15,       // Enable hotspot (index)
     DisableHotspot = 0x16,      // Disable hotspot (index)
@@ -122,7 +122,7 @@ public enum InstructionOpcode : ushort
     LoseGame = 0x20,            // Lose the game
     ChangeZone = 0x21,          // Go to zone (id) at (x, y)
     SetSectorCounter = 0x22,    // Set zone sector-counter = value
-    SetZoneType = 0x22,         // Alias for SetSectorCounter
+    SetZoneType = 0x100,        // Engine extension; native 0x22 sets the sector counter
     AddToSectorCounter = 0x23,  // Add value to zone sector-counter
     SetRandom = 0x24,           // Set zone random = value
     AddHealth = 0x25,           // Increase health by value (capped at max)

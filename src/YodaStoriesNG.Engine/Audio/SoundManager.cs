@@ -139,6 +139,13 @@ public unsafe class SoundManager : IDisposable
         _voices.Add(new Voice { Clip = clip });
     }
 
+    /// <summary>Stop active effects, including audio already queued to SDL.</summary>
+    public void StopAllSounds()
+    {
+        _voices.Clear();
+        if (_device != 0) SDL.ClearQueuedAudio(_device);
+    }
+
     /// <summary>Mixes live voices into the device queue. Call once per frame.</summary>
     public void Update()
     {

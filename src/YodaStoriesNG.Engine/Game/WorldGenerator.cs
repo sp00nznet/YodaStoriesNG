@@ -432,6 +432,17 @@ public class WorldGenerator
         return world;
     }
 
+    /// <summary>Use authored mission text instead of internal ending-item names.</summary>
+    internal static string GetMissionTitle(Puzzle puzzle)
+    {
+        // Mission string 0 is often empty; string 2 is the authored objective.
+        // Item1 can be an internal ending token (e.g. END1A), not a display name.
+        foreach (int index in new[] { 0, 2, 3 })
+            if (index < puzzle.Strings.Count && !string.IsNullOrWhiteSpace(puzzle.Strings[index]))
+                return puzzle.Strings[index].Trim();
+        return "Mission";
+    }
+
     /// <summary>
     /// The puzzle chain in the order it is played: find the first item, then each puzzle
     /// sector by index, ending at the goal zone that hands over the mission's item.
@@ -445,7 +456,7 @@ public class WorldGenerator
         var mission = new Mission
         {
             Id = goal.Id,
-            Name = Text(goal, 0) is { Length: > 0 } name ? name : GetItemName(goal.Item1),
+            Name = GetMissionTitle(goal),
             Planet = planet,
             Description = Text(goal, 2, 3, 0),
             GoalPuzzle = goal,
@@ -575,7 +586,7 @@ public class WorldGenerator
             .ToList();
 
         // Extract a clean mission name (first sentence or first 60 chars)
-        var rawName = cleanStrings.FirstOrDefault() ?? "Unknown Mission";
+        var rawName = GetMissionTitle(questPuzzle);
         var missionName = rawName.Length > 60 ? rawName.Substring(0, 60) + "..." : rawName;
         if (missionName.Contains("."))
             missionName = missionName.Substring(0, missionName.IndexOf('.') + 1);
@@ -1259,8 +1270,16 @@ public class WorldGenerator
     {
         if (CurrentWorld == null || CurrentMission == null) return;
 
-        // The starting item is the first item needed in the puzzle chain
-        if (CurrentMission.PuzzleChain.Count > 0)
+        // Native worlds have two independent strains. PuzzleChain is sorted for
+        // display, so its first step need not be the strain Yoda supplies.
+        if (_gameData.GameType == GameType.YodaStories && CurrentWorld.Strain1.Count > 0 &&
+            CurrentWorld.Strain1[0] is { Item1: > 0 } firstPuzzle)
+        {
+            CurrentWorld.StartingItemId = firstPuzzle.Item1;
+        }
+
+        // The older generator uses a single ordered chain.
+        if (!CurrentWorld.StartingItemId.HasValue && CurrentMission.PuzzleChain.Count > 0)
         {
             var firstStep = CurrentMission.PuzzleChain[0];
             if (firstStep.RequiredItemId > 0)

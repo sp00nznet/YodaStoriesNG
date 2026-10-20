@@ -243,10 +243,8 @@ public class OriginalWorldGenerator
             PlaceZone(pos.Value.x, pos.Value.y, zone!, findItem: _findItem, puzzleIndex: _currentPuzzleIndex,
                 requiredItem: _requiredItem, npc: _npc, additionalRequiredItem: _additionalRequiredItem);
 
-            // The chain's first item has to come from somewhere. Yoda Stories hides it in a
-            // Find zone; in Indiana Jones Marcus hands it over in the town (SectorPuzzles).
-            if (puzzleIdIndex == 1 && !_singleStrain)
-                AddProvidedItemQuest(_requiredItem, distance);
+            // Yoda hands over strain 1's initial item on Dagobah. Only strain 2
+            // needs a generated Find source; adding both duplicates Yoda's gift.
 
             previousPuzzleIndex--;
         }
@@ -552,7 +550,9 @@ public class OriginalWorldGenerator
         if (!_singleStrain && !ZoneLeadsToProvidedItem(zone, providedItem2)) return false;
 
         int newItem1 = GetUnusedRequiredItemForZoneRandomly(zone, false);
-        int newItem2 = _singleStrain ? -1 : GetUnusedRequiredItemForZoneRandomly(zone, true);
+        // Both branches are chosen before either is committed to the quest list.
+        // Exclude the first choice explicitly so independent branches need distinct items.
+        int newItem2 = _singleStrain ? -1 : GetUnusedRequiredItemForZoneRandomly(zone, true, newItem1);
         if (newItem1 == -1 || !_singleStrain && newItem2 == -1) return false;
 
         var newPuzzle = GetUnusedPuzzleRandomly(newItem1, ZoneType.Goal);
@@ -682,12 +682,12 @@ public class OriginalWorldGenerator
         return -1;
     }
 
-    private int GetUnusedRequiredItemForZoneRandomly(Zone zone, bool isGoal)
+    private int GetUnusedRequiredItemForZoneRandomly(Zone zone, bool isGoal, int excludedItem = -1)
     {
         foreach (var room in Rooms(zone))
         {
             var items = (isGoal ? room.GoalItems : room.RequiredItems).Select(i => (int)i)
-                .Where(i => !HasQuestRequiringItem(i)).ToList();
+                .Where(i => i != excludedItem && !HasQuestRequiringItem(i)).ToList();
             if (items.Count > 0) return items[_rng.Next() % items.Count];
         }
         return -1;

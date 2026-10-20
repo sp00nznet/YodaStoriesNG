@@ -62,6 +62,7 @@ public unsafe partial class GameEngine : IDisposable
     private bool _isDragging = false;
     private int? _draggedItemId = null;
     private int? _draggedFromSlot = null;  // Inventory slot index, or -1 for weapon slot
+    private int? _draggedFromZone;
     private int _dragStartX, _dragStartY;
     private int _dragCurrentX, _dragCurrentY;
 
@@ -101,7 +102,9 @@ public unsafe partial class GameEngine : IDisposable
     /// </summary>
     private void UpgradeWeapon(int newWeaponTile)
     {
-        // Remove old weapons and add the new one
+        // Remove old weapon copies from the inventory as well as the cycling list.
+        var replacedWeapons = _state.Weapons.ToHashSet();
+        _state.Inventory.RemoveAll(replacedWeapons.Contains);
         _state.Weapons.Clear();
         _state.WeaponAmmo.Clear();
         _state.Weapons.Add(newWeaponTile);
@@ -254,10 +257,14 @@ public unsafe partial class GameEngine : IDisposable
         // Initialize action executor
         _actionExecutor = new ActionExecutor(_gameData, _state);
         _actionExecutor.OnHeroRelocated += CancelSmoothMovement;
+        _actionExecutor.IsDialogueActive = () => _messages.HasDialogue;
+        _actionExecutor.OnDialogue += (speaker, text) => _messages.ShowDialogue(speaker, text);
+        _actionExecutor.OnItemAdded += RegisterScriptedItem;
 
-        // Wire up action executor events (OnDialogue wired later, after init)
+        // Wire script events once; SuppressDialogue handles initialization.
         _actionExecutor.OnMessage += (text) => _messages.ShowMessage(text, MessageType.Info);
         _actionExecutor.OnPlaySound += (soundId) => _sounds?.PlaySound(soundId);
+        _actionExecutor.OnStopSound += () => _sounds?.StopAllSounds();
 
         LoadSounds(_dataPath);
 
@@ -557,6 +564,10 @@ public unsafe partial class GameEngine : IDisposable
         ResetAreaTracking();
         // Apply save data to game state
         SaveGameManager.ApplyToGameState(saveData, _state);
+        // Older saves kept collected weapons only in the cycling list.
+        foreach (int weapon in _state.Weapons)
+            if (weapon > 0 && weapon != _state.SelectedWeapon && !_state.Inventory.Contains(weapon))
+                _state.AddItem(weapon);
 
         // Restore world map if we have world data
         if (saveData.WorldData != null && _worldGenerator != null)
@@ -628,10 +639,14 @@ public unsafe partial class GameEngine : IDisposable
         // Restore mission
         if (saveData.MissionData != null)
         {
+            // Older saves may have used an ending token's tile name as the mission title.
+            var savedTitle = saveData.MissionData.Name;
+            var titlePuzzle = _gameData!.Puzzles.FirstOrDefault(p => p.Type == PuzzleType.Mission &&
+                (GetTileName(p.Item1) == savedTitle || p.Item2.HasValue && GetTileName(p.Item2.Value) == savedTitle));
             world.Mission = new Mission
             {
                 MissionNumber = saveData.MissionData.MissionNumber,
-                Name = saveData.MissionData.Name,
+                Name = titlePuzzle != null ? WorldGenerator.GetMissionTitle(titlePuzzle) : savedTitle,
                 Description = saveData.MissionData.Description,
                 CurrentStep = saveData.MissionData.CurrentStep,
                 IsCompleted = saveData.MissionData.IsCompleted,
@@ -760,8 +775,6 @@ public unsafe partial class GameEngine : IDisposable
         if (_actionExecutor != null)
         {
             _actionExecutor.SuppressDialogue = false;
-            // Wire up dialogue event NOW, after init, so no dialogue appears during zone loading
-            _actionExecutor.OnDialogue += (speaker, text) => _messages.ShowDialogue(speaker, text);
         }
 
         // Initialize debug tools
@@ -1039,6 +1052,9 @@ public unsafe partial class GameEngine : IDisposable
             _actionExecutor.SuppressDialogue = false;
         }
 
+        // Entry scripts choose which alternative reward hotspots are enabled.
+        _sectorPuzzles?.Refresh(zone);
+
         // Mark zone as initialized
         _state.SetVariable(_state.CurrentZoneId + 1000, 1);
     }
@@ -1113,6 +1129,15 @@ public unsafe partial class GameEngine : IDisposable
                     _isRunning = false;
                     return; // Exit immediately
                 }
+            }
+
+            // The locator owns input while its map is open, before game menus or
+            // inventory shortcuts can interpret keys from the secondary window.
+            if (_debugMapWindow != null)
+            {
+                SDLEvent mapEvent = evt;
+                if (_debugMapWindow.HandleEvent(&mapEvent)) continue;
+                if (_debugMapWindow.IsLocatorOpen) continue;
             }
 
             if ((SDLEventType)evt.Type == SDLEventType.Keydown && evt.Key.Keysym.Sym == (int)SDLKeyCode.F10 &&
@@ -1397,6 +1422,7 @@ public unsafe partial class GameEngine : IDisposable
         if (button != 1) return;
 
         if (_renderer == null) return;
+        if (MovementUIBlocked || _state.IsGameOver || !_state.HeroVisible) return;
 
         // Check if click is on weapon slot
         if (_renderer.IsPointOverWeaponSlot(x, y) && _state.SelectedWeapon.HasValue)
@@ -1405,6 +1431,7 @@ public unsafe partial class GameEngine : IDisposable
             _isDragging = true;
             _draggedItemId = _state.SelectedWeapon.Value;
             _draggedFromSlot = -1;  // -1 indicates weapon slot
+            _draggedFromZone = _state.CurrentZoneId;
             _dragStartX = x;
             _dragStartY = y;
             _dragCurrentX = x;
@@ -1426,6 +1453,7 @@ public unsafe partial class GameEngine : IDisposable
                 _isDragging = true;
                 _draggedItemId = itemId;
                 _draggedFromSlot = clickedSlot.Value;
+                _draggedFromZone = _state.CurrentZoneId;
                 _dragStartX = x;
                 _dragStartY = y;
                 _dragCurrentX = x;
@@ -1442,6 +1470,12 @@ public unsafe partial class GameEngine : IDisposable
         // Only handle left click (button 1)
         if (button != 1) return;
 
+        if (_draggedFromZone != _state.CurrentZoneId || MovementUIBlocked || _state.IsGameOver || !_state.HeroVisible)
+        {
+            ClearItemDrag();
+            return;
+        }
+
         if (_isDragging && _draggedItemId.HasValue && _renderer != null)
         {
             int dragDist = Math.Abs(x - _dragStartX) + Math.Abs(y - _dragStartY);
@@ -1452,20 +1486,7 @@ public unsafe partial class GameEngine : IDisposable
             {
                 if (wasActualDrag && IsWeaponTile(_draggedItemId.Value))
                 {
-                    // Dragging from inventory to weapon slot
-                    if (_draggedFromSlot.HasValue && _draggedFromSlot.Value >= 0)
-                    {
-                        // Swap: put currently equipped weapon in the inventory slot
-                        if (_state.SelectedWeapon.HasValue)
-                        {
-                            _state.Inventory[_draggedFromSlot.Value] = _state.SelectedWeapon.Value;
-                        }
-                        else
-                        {
-                            // No weapon equipped, just remove from inventory
-                            _state.Inventory.RemoveAt(_draggedFromSlot.Value);
-                        }
-                    }
+                    // EquipWeapon transfers one copy between the bag and weapon slot.
                     // Equip the new weapon
                     EquipWeapon(_draggedItemId.Value);
                     _messages.ShowMessage("Equipped weapon", MessageType.Info);
@@ -1509,21 +1530,27 @@ public unsafe partial class GameEngine : IDisposable
                         }
                     }
                 }
-                else
-                {
-                    // It was a click, not a drag - use item if it's R2D2
-                    if (IsLocatorTile(_draggedItemId.Value) && _state.HasLocator)
-                    {
-                        ShowLocatorHint();
-                    }
-                }
+            }
+            else if (wasActualDrag && x >= 0 && y >= 0 &&
+                x < GameRenderer.GameAreaWidth && y < GameRenderer.GameAreaHeight)
+            {
+                // Mouse coordinates have already had the menu strip removed.
+                // Use the same fractional camera origin as the world renderer.
+                int targetX = (int)Math.Floor(ViewCameraX + x / (double)(Tile.Width * GameRenderer.Scale));
+                int targetY = (int)Math.Floor(ViewCameraY + y / (double)(Tile.Height * GameRenderer.Scale));
+                UseItemAt(_draggedItemId.Value, targetX, targetY, _draggedFromZone!.Value);
             }
         }
 
-        // End drag
+        ClearItemDrag();
+    }
+
+    private void ClearItemDrag()
+    {
         _isDragging = false;
         _draggedItemId = null;
         _draggedFromSlot = null;
+        _draggedFromZone = null;
     }
 
     private void HandleMouseMove(int x, int y)
@@ -1779,16 +1806,40 @@ public unsafe partial class GameEngine : IDisposable
         }
     }
 
-    private void CollectWeapon(int weaponId)
+    private void RegisterScriptedItem(int item)
+    {
+        if (IsWeaponTile(item)) RegisterWeapon(item);
+        if (_gameData!.GameType == GameType.YodaStories && item == WorldGenerator.TILE_LOCATOR)
+            _state.HasLocator = true;
+        _sectorPuzzles?.OnPickedUp(item);
+        SyncSectorMission();
+    }
+
+    private void RegisterWeapon(int weaponId)
     {
         if (!_state.Weapons.Contains(weaponId))
             _state.Weapons.Add(weaponId);
         InitializeWeaponAmmo(weaponId);
     }
 
+    private void CollectWeapon(int weaponId)
+    {
+        RegisterWeapon(weaponId);
+        // Every pickup is a real copy, including a spare of the equipped weapon.
+        if (weaponId > 0) _state.AddItem(weaponId);
+        if (_state.SelectedWeapon == weaponId && _state.IsWeaponEmpty(weaponId))
+            _state.RemoveDepletedWeapon(weaponId);
+    }
+
     private void EquipWeapon(int weaponId)
     {
-        CollectWeapon(weaponId);
+        RegisterWeapon(weaponId);
+        if (_state.SelectedWeapon != (weaponId == 0 ? (int?)null : weaponId))
+        {
+            if (_state.SelectedWeapon is { } previous && previous > 0)
+                _state.AddItem(previous);
+            _state.Inventory.Remove(weaponId);
+        }
         _state.CurrentWeaponIndex = _state.Weapons.IndexOf(weaponId);
         _state.SelectedWeapon = weaponId == 0 ? null : weaponId;
         _state.SelectedItem = null;
@@ -1956,6 +2007,25 @@ public unsafe partial class GameEngine : IDisposable
         _sectorPuzzles?.Refresh(_state.CurrentZone); // whatever the block was covering shows now
     }
 
+    private bool IsScriptedActorTile(Zone zone, int x, int y)
+    {
+        ushort tileId = zone.GetTile(x, y, 1);
+        if (tileId >= _gameData!.Tiles.Count) return false;
+        var tile = _gameData.Tiles[tileId];
+        if (tile.IsObject || !(tile.IsItem || tile.IsWeapon || tile.IsCharacter)) return false;
+        // A trade target remains an actor until its script explicitly hands it over.
+        if (zone.Actions.Any(a => a.Conditions.Any(c =>
+            c.Opcode is ConditionOpcode.PlacedItemIs or ConditionOpcode.PlacedItemIsNot && c.Arguments.Count >= 4 &&
+            c.Arguments[0] == x && c.Arguments[1] == y && c.Arguments[2] == 1 && c.Arguments[3] == tileId))) return true;
+        // Flavor text which has finished/disabled itself must not permanently lock a pickup.
+        if (_actionExecutor != null && ReferenceEquals(zone, _state.CurrentZone))
+            return _actionExecutor.WouldHandleBump(x, y);
+        return zone.Actions.Select((action, index) => (action, index)).Any(pair =>
+            !_state.DisabledActions.Contains((zone.Id, pair.index)) && pair.action.Conditions.Any(c =>
+                c.Opcode == ConditionOpcode.Bump && c.Arguments.Count >= 3 &&
+                c.Arguments[0] == x && c.Arguments[1] == y && c.Arguments[2] == tileId));
+    }
+
     private void TryMovePlayer(int dx, int dy, Direction direction, bool tryPull = false)
     {
         if (_smoothMovement && !_committingSmoothStep)
@@ -1999,6 +2069,12 @@ public unsafe partial class GameEngine : IDisposable
             return;
         }
 
+        if (IsScriptedActorTile(_state.CurrentZone, newX, newY))
+        {
+            if (dx == 0 || dy == 0) BumpInto(newX, newY);
+            return;
+        }
+
         if (IsGroundBlocked(_state.CurrentZone, newX, newY))
         {
             BumpInto(newX, newY);
@@ -2012,7 +2088,8 @@ public unsafe partial class GameEngine : IDisposable
             var tile = _gameData.Tiles[middleTile];
             bool diagonal = dx != 0 && dy != 0;
 
-            if (tile.IsDraggable && !diagonal)
+            if (tile.IsDraggable && dx != 0 && dy != 0) return;
+            if (tile.IsDraggable)
             {
                 // Try to push the block
                 var pushX = newX + dx;
@@ -2053,15 +2130,15 @@ public unsafe partial class GameEngine : IDisposable
             else if (tile.IsSolid && !IsNPCMapSprite(newX, newY, middleTile))
             {
                 // Collision - trigger bump action
+                var bumpZone = _state.CurrentZone;
                 BumpInto(newX, newY);
-
-                // The original then slides round the obstacle diagonally (WebFun hero.ts
-                // move()), which is the only way into some doorways hemmed in by trees.
-                if (!tryPull && !diagonal && !_messages.HasDialogue)
-                    foreach (var (sx, sy) in dx == 0 ? new[] { (-1, dy), (1, dy) } : new[] { (dx, 1), (dx, -1) })
-                        if (IsOpenFloor(_state.PlayerX + sx, _state.PlayerY + sy))
+                if (!_smoothMovement && !tryPull && (dx == 0 || dy == 0) &&
+                    ReferenceEquals(bumpZone, _state.CurrentZone) && !_messages.HasDialogue &&
+                    _actionExecutor?.IsBusy != true && _state.HeroVisible)
+                    foreach (var slide in dx == 0 ? new[] { (-1, dy), (1, dy) } : new[] { (dx, 1), (dx, -1) })
+                        if (CanSlidePlayerTo(slide.Item1, slide.Item2))
                         {
-                            TryMovePlayer(sx, sy, direction);
+                            TryMovePlayer(slide.Item1, slide.Item2, direction);
                             break;
                         }
                 return;
@@ -2071,9 +2148,7 @@ public unsafe partial class GameEngine : IDisposable
         // A tile a bump script is waiting for is bumped, not walked over - in the original
         // anything in the object layer stops you. (Pacal is an item tile; walking onto him
         // picked him up and skipped the thank-you that wins the game.)
-        if (middleTile != 0xFFFF && _state.CurrentZone.Actions.Any(a => a.Conditions.Any(c =>
-                c.Opcode == ConditionOpcode.Bump && c.Arguments.Count >= 3 &&
-                c.Arguments[0] == newX && c.Arguments[1] == newY && c.Arguments[2] == middleTile)))
+        if (middleTile != 0xFFFF && _actionExecutor?.WouldHandleBump(newX, newY) == true)
         {
             BumpInto(newX, newY);
             return;
@@ -2131,6 +2206,8 @@ public unsafe partial class GameEngine : IDisposable
         var arrivalZone = _state.CurrentZone;
         // Execute walk actions
         _actionExecutor?.ExecuteZoneActions(ActionTrigger.Walk);
+        if (ReferenceEquals(arrivalZone, _state.CurrentZone))
+            _sectorPuzzles?.Refresh(_state.CurrentZone!);
 
         // Check for zone objects at new position
         CheckZoneObjects();
@@ -2144,7 +2221,8 @@ public unsafe partial class GameEngine : IDisposable
             Console.WriteLine($"Standing on tile {objTile}: floor={tile.IsFloor}, obj={tile.IsObject}, item={tile.IsItem}, char={tile.IsCharacter}");
 
             // Auto-pickup loose items and weapons; solid objects still require interaction.
-            if ((tile.IsItem || tile.IsWeapon) && !tile.IsObject)
+            if ((tile.IsItem || tile.IsWeapon) && !tile.IsObject &&
+                !IsScriptedActorTile(_state.CurrentZone, newX, newY))
             {
                 var key = $"{_state.CurrentZoneId}_{newX}_{newY}_tile";
                 if (!_state.CollectedObjects.Contains(key))
@@ -2247,6 +2325,7 @@ public unsafe partial class GameEngine : IDisposable
             return false;
 
         if (IsGroundBlocked(zone, x, y)) return false;
+        if (IsScriptedActorTile(zone, x, y)) return false;
 
         // Check middle layer tile
         var middleTile = zone.GetTile(x, y, 1);
@@ -2336,6 +2415,9 @@ public unsafe partial class GameEngine : IDisposable
 
                 case ZoneObjectType.DoorEntrance:
                 case ZoneObjectType.DoorExit:
+                    TravelThroughDoor(obj);
+                    return;
+
                 case ZoneObjectType.VehicleToSecondary:
                 case ZoneObjectType.VehicleToPrimary:
                 case ZoneObjectType.Teleporter:
@@ -2428,7 +2510,8 @@ public unsafe partial class GameEngine : IDisposable
                             Console.WriteLine($"  Spawning at center ({spawnX},{spawnY})");
                         }
 
-                        LoadZone(destZoneId, spawnX, spawnY);
+                        LoadZone(destZoneId, spawnX, spawnY,
+                            enteredByPlane: obj.Type is ZoneObjectType.VehicleToSecondary or ZoneObjectType.VehicleToPrimary);
                         return;
                     }
                     break;
@@ -2529,6 +2612,26 @@ public unsafe partial class GameEngine : IDisposable
         _messages.ShowMessage("Can't go that way", MessageType.Info);
     }
 
+    private bool IsExposedPickup(ZoneObject obj)
+    {
+        if (!obj.Enabled || obj.Argument == 0 || obj.Argument >= _gameData!.Tiles.Count ||
+            _state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y) ||
+            _state.CollectedObjects.Contains($"{_state.CurrentZoneId}_{obj.X}_{obj.Y}_tile")) return false;
+        ushort tile = _state.CurrentZone!.GetTile(obj.X, obj.Y, 1);
+        if (IsScriptedActorTile(_state.CurrentZone, obj.X, obj.Y)) return false;
+        return tile == obj.Argument || _sectorPuzzles == null && tile == ushort.MaxValue;
+    }
+
+    private void CompleteHotspotPickup(ZoneObject obj)
+    {
+        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+        _state.CollectedObjects.Add($"{_state.CurrentZoneId}_{obj.X}_{obj.Y}_tile");
+        if (_state.CurrentZone!.GetTile(obj.X, obj.Y, 1) == obj.Argument)
+            _state.CurrentZone.SetTile(obj.X, obj.Y, 1, ushort.MaxValue);
+        _sectorPuzzles?.OnPickedUp(obj.Argument);
+        SyncSectorMission();
+    }
+
     private void CheckZoneObjects()
     {
         foreach (var obj in _state.CurrentZone!.Objects)
@@ -2543,10 +2646,10 @@ public unsafe partial class GameEngine : IDisposable
             {
                 case ZoneObjectType.CrateItem:
                     // Pick up item (if not already collected)
-                    if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                    if (IsExposedPickup(obj))
                     {
                         _state.AddItem(obj.Argument);
-                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        CompleteHotspotPickup(obj);
                         var itemName = GetTileName(obj.Argument) ?? $"Item #{obj.Argument}";
                         _messages.ShowPickup(itemName);
 
@@ -2557,11 +2660,11 @@ public unsafe partial class GameEngine : IDisposable
 
                 case ZoneObjectType.CrateWeapon:
                     // Pick up weapon (if not already collected)
-                    if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                    if (IsExposedPickup(obj))
                     {
                         // Walking over a pickup preserves the player's current selection.
                         CollectWeapon(obj.Argument);
-                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        CompleteHotspotPickup(obj);
                         var weaponName = GetTileName(obj.Argument) ?? $"Weapon";
                         var ammoState = _state.GetWeaponAmmo(obj.Argument);
                         if (ammoState != null)
@@ -2581,7 +2684,7 @@ public unsafe partial class GameEngine : IDisposable
                         {
                             _state.AddItem(obj.Argument);
                         }
-                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        CompleteHotspotPickup(obj);
                         _state.HasLocator = true;
                         var itemName = GetTileName(obj.Argument) ?? "Locator Droid";
                         _messages.ShowPickup(itemName);
@@ -2589,11 +2692,14 @@ public unsafe partial class GameEngine : IDisposable
                     }
                     break;
 
+                case ZoneObjectType.DoorEntrance:
+                case ZoneObjectType.DoorExit:
+                    TravelThroughDoor(obj);
+                    return;
+
                 case ZoneObjectType.Teleporter:
                 case ZoneObjectType.VehicleToSecondary:
                 case ZoneObjectType.VehicleToPrimary:
-                case ZoneObjectType.DoorEntrance:
-                case ZoneObjectType.DoorExit:
                     // Handle 65535 (0xFFFF) as "return to previous zone"
                     int destZoneId = obj.Argument;
                     if (destZoneId == 65535 || destZoneId == -1)
@@ -2642,9 +2748,8 @@ public unsafe partial class GameEngine : IDisposable
                             }
                         }
 
-                        _state.ArrivingByVehicle = byVehicle;
-                        LoadZone(destZoneId, spawnX, spawnY);
-                        _state.ArrivingByVehicle = false;
+                        LoadZone(destZoneId, spawnX, spawnY,
+                            enteredByPlane: obj.Type is ZoneObjectType.VehicleToSecondary or ZoneObjectType.VehicleToPrimary);
                     }
                     break;
 
@@ -2660,10 +2765,16 @@ public unsafe partial class GameEngine : IDisposable
         }
     }
 
-    private void UseItem()
+    private void UseItem() => UseItemAt(_state.SelectedItem, null, null, _state.CurrentZoneId);
+
+    private void UseItemAt(int? selectedItem, int? targetX, int? targetY, int requestedZone)
     {
-        if (_smoothMovement && (MovementUIBlocked || _state.IsGameOver)) return;
-        if (_playerStep != null) { _pendingMovementAction = () => UseItem(); return; }
+        if (MovementUIBlocked || _state.IsGameOver || _state.CurrentZoneId != requestedZone) return;
+        if (_playerStep != null)
+        {
+            _pendingMovementAction = () => UseItemAt(selectedItem, targetX, targetY, requestedZone);
+            return;
+        }
         // If dialogue is active, dismiss it
         if (_messages.HasDialogue)
         {
@@ -2675,38 +2786,51 @@ public unsafe partial class GameEngine : IDisposable
             return;
 
         // Scripts can consume items without going through RemoveItem.
-        if (_state.SelectedItem.HasValue && !_state.HasItem(_state.SelectedItem.Value))
-            _state.SelectedItem = null;
-
-        if (_state.SelectedItem.HasValue)
+        if (selectedItem.HasValue && !_state.HasItem(selectedItem.Value))
         {
-            var usedItemId = _state.SelectedItem.Value;
+            if (_state.SelectedItem == selectedItem) _state.SelectedItem = null;
+            return;
+        }
 
-            // Check if this is a locator/R2D2 item - these give hints
-            if (usedItemId < _gameData!.Tiles.Count)
+        if (selectedItem.HasValue)
+        {
+            var usedItemId = selectedItem.Value;
+
+            if (IsLocatorTile(usedItemId))
             {
-                var itemTile = _gameData.Tiles[usedItemId];
-                if ((itemTile.Flags & TileFlags.ItemLocator) != 0 || _state.HasLocator && IsLocatorTile(usedItemId))
-                {
-                    ShowLocatorHint();
-                    return;
-                }
+                PlayYodaSound(YodaLocator);
+                _debugMapWindow?.Open(locatorMode: true);
+                return;
+            }
+            if (usedItemId == WorldGenerator.TILE_LOCATOR)
+            {
+                ShowLocatorHint();
+                return;
+            }
+
+            var facing = GetFacingPosition();
+            int useX = targetX ?? facing.x, useY = targetY ?? facing.y;
+            // A floor switch may be underneath Luke. Prefer the faced target,
+            // but allow Space to address an authored target on his own tile.
+            if (!targetX.HasValue && !HasItemUseTarget(useX, useY, usedItemId) && HasItemUseTarget(_state.PlayerX, _state.PlayerY, usedItemId))
+                (useX, useY) = (_state.PlayerX, _state.PlayerY);
+            if (_state.CurrentZone == null || useX < 0 || useY < 0 ||
+                useX >= _state.CurrentZone.Width || useY >= _state.CurrentZone.Height ||
+                Math.Abs(useX - _state.PlayerX) + Math.Abs(useY - _state.PlayerY) > 1)
+            {
+                _messages.ShowMessage("Move next to the target to use that item.", MessageType.Info);
+                return;
             }
 
             // Set the placed item context for action conditions
             if (_actionExecutor != null)
             {
                 _actionExecutor.PlacedItemId = usedItemId;
-                (_actionExecutor.PlacedX, _actionExecutor.PlacedY) = _state.PlayerDirection switch
-                {
-                    Direction.Up => (_state.PlayerX, _state.PlayerY - 1),
-                    Direction.Down => (_state.PlayerX, _state.PlayerY + 1),
-                    Direction.Left => (_state.PlayerX - 1, _state.PlayerY),
-                    _ => (_state.PlayerX + 1, _state.PlayerY),
-                };
+                (_actionExecutor.PlacedX, _actionExecutor.PlacedY) = (useX, useY);
 
                 // Also set NPC context if there's a nearby friendly NPC
-                var nearbyNpc = FindNearbyNPC(friendlyOnly: true);
+                var nearbyNpc = _state.ZoneNPCs.FirstOrDefault(n => n.IsEnabled && n.IsAlive && !n.IsHostile && n.X == useX && n.Y == useY);
+                _actionExecutor.InteractingNpcId = nearbyNpc?.CharacterId;
                 if (nearbyNpc != null)
                 {
                     _actionExecutor.InteractingNpcId = nearbyNpc.CharacterId;
@@ -2722,8 +2846,11 @@ public unsafe partial class GameEngine : IDisposable
 
             // No script took the item: the sector's own puzzle gets a go (WebFun's PlaceTile
             // hotspot mode). A script that used the item has already removed it.
-            if (_sectorPuzzles != null && _actionExecutor != null && _state.HasItem(usedItemId))
-                _sectorPuzzles.PlaceItem(usedItemId, _actionExecutor.PlacedX, _actionExecutor.PlacedY);
+            bool scripted = _actionExecutor?.HandledItemPlacement == true;
+            bool waiting = _actionExecutor?.IsBusy == true || _messages.HasDialogue || _actionExecutor?.RequestedZoneChange != null;
+            bool sectorHandled = false;
+            if (_sectorPuzzles != null && !scripted && !waiting && _state.HasItem(usedItemId))
+                sectorHandled = _sectorPuzzles.PlaceItem(usedItemId, useX, useY);
             if (_sectorPuzzles != null && _state.CurrentZone != null)
             {
                 _sectorPuzzles.Refresh(_state.CurrentZone);
@@ -2735,7 +2862,10 @@ public unsafe partial class GameEngine : IDisposable
             {
                 _actionExecutor.PlacedItemId = null;
                 _actionExecutor.InteractingNpcId = null;
+                _actionExecutor.PlacedX = _actionExecutor.PlacedY = -1;
             }
+            if (!scripted && !sectorHandled && !waiting)
+                _messages.ShowMessage("That item has no effect here.", MessageType.Info);
         }
         else
         {
@@ -2768,6 +2898,14 @@ public unsafe partial class GameEngine : IDisposable
                 }
             }
         }
+    }
+
+    private bool HasItemUseTarget(int x, int y, int item)
+    {
+        var zone = _state.CurrentZone;
+        if (zone == null) return false;
+        if (zone.Objects.Any(h => h.Enabled && h.X == x && h.Y == y && (int)h.Type is 1 or 12)) return true;
+        return _actionExecutor?.WouldHandleItemPlacement(item, x, y) == true;
     }
 
     /// <summary>
@@ -2963,16 +3101,16 @@ public unsafe partial class GameEngine : IDisposable
         // Check for items at target position
         foreach (var obj in _state.CurrentZone.Objects)
         {
-            if (obj.X != targetX || obj.Y != targetY)
+            if (!obj.Enabled || obj.X != targetX || obj.Y != targetY)
                 continue;
 
             switch (obj.Type)
             {
                 case ZoneObjectType.CrateItem:
-                    if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                    if (IsExposedPickup(obj))
                     {
                         _state.AddItem(obj.Argument);
-                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        CompleteHotspotPickup(obj);
                         var itemName = GetTileName(obj.Argument) ?? $"Item";
                         _messages.ShowPickup(itemName);
                         return true;
@@ -2980,15 +3118,11 @@ public unsafe partial class GameEngine : IDisposable
                     break;
 
                 case ZoneObjectType.CrateWeapon:
-                    if (obj.Argument > 0 && !_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
+                    if (IsExposedPickup(obj))
                     {
-                        if (!_state.Weapons.Contains(obj.Argument))
-                        {
-                            _state.Weapons.Add(obj.Argument);
-                            InitializeWeaponAmmo(obj.Argument);
-                        }
+                        CollectWeapon(obj.Argument);
                         EquipWeapon(obj.Argument);
-                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        CompleteHotspotPickup(obj);
                         var weaponName = GetTileName(obj.Argument) ?? $"Weapon";
                         var ammoState = _state.GetWeaponAmmo(obj.Argument);
                         if (ammoState != null)
@@ -3008,7 +3142,7 @@ public unsafe partial class GameEngine : IDisposable
                         {
                             _state.AddItem(obj.Argument);
                         }
-                        _state.MarkObjectCollected(_state.CurrentZoneId, obj.X, obj.Y);
+                        CompleteHotspotPickup(obj);
                         _state.HasLocator = true;
                         var locatorName = GetTileName(obj.Argument) ?? "Locator Droid";
                         _messages.ShowPickup(locatorName);
@@ -3044,15 +3178,9 @@ public unsafe partial class GameEngine : IDisposable
             if (!npc.IsEnabled || !npc.IsAlive)
                 continue;
 
-            // Check if NPC is at the target position OR adjacent to player
-            bool atTarget = (npc.X == targetX && npc.Y == targetY);
-            bool adjacent = Math.Abs(npc.X - _state.PlayerX) <= 1 &&
-                           Math.Abs(npc.Y - _state.PlayerY) <= 1 &&
-                           !(npc.X == _state.PlayerX && npc.Y == _state.PlayerY);
-
-            Console.WriteLine($"  NPC at ({npc.X},{npc.Y}): atTarget={atTarget}, adjacent={adjacent}");
-
-            if (atTarget || adjacent)
+            // Talking must not intercept an attack aimed away from a nearby friendly.
+            bool atTarget = npc.X == targetX && npc.Y == targetY;
+            if (atTarget)
             {
                 // Hostile NPCs can't be talked to - let the attack handle them
                 if (npc.IsHostile)
@@ -3238,19 +3366,8 @@ public unsafe partial class GameEngine : IDisposable
                     }
                     else
                     {
-                        var dialogues = new[]
-                        {
-                            "Hello there, traveler!",
-                            "May the Force be with you.",
-                            "I have nothing to trade right now.",
-                            "Be careful out there!",
-                            "The Empire has been causing trouble...",
-                            "Have you seen any droids around?",
-                            "This is a peaceful place.",
-                            "Good luck on your journey!"
-                        };
-                        var dialogue = dialogues[_random.Next(dialogues.Length)];
-                        _messages.ShowDialogue(npcName, dialogue);
+                        // Do not invent dialogue for an actor without an authored interaction.
+                        return false;
                     }
                 }
                 return true;
@@ -3557,6 +3674,7 @@ public unsafe partial class GameEngine : IDisposable
             {
                 var npc = NPC.FromZoneObject(obj);
                 ConfigureNPCFromCharacter(npc);
+
                 _state.ZoneNPCs.Add(npc);
             }
         }
@@ -3584,6 +3702,11 @@ public unsafe partial class GameEngine : IDisposable
                 };
 
                 ConfigureNPCFromCharacter(npc);
+
+                // IZAX explicitly controls death drops. Loot zero/-1 selects the
+                // generated quest item; it does not mean this enemy drops nothing.
+                npc.DropsLoot = entity.DropsLoot;
+                npc.LootItemId = entity.Loot > 0 ? entity.Loot - 1 : -1;
 
                 // Log IZAX NPC spawn
                 var npcName = GetCharacterName(npc.CharacterId) ?? $"TileID #{npc.CharacterId}";
@@ -3871,6 +3994,7 @@ public unsafe partial class GameEngine : IDisposable
             return false;
 
         if (IsGroundBlocked(zone, x, y)) return false;
+        if (IsScriptedActorTile(zone, x, y)) return false;
 
         var middleTile = zone.GetTile(x, y, 1);
         if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
@@ -3895,6 +4019,7 @@ public unsafe partial class GameEngine : IDisposable
             return false;
 
         if (IsGroundBlocked(zone, x, y)) return false;
+        if (IsScriptedActorTile(zone, x, y)) return false;
 
         // Check layer 1 (middle layer) for blocking objects - this is where walls/objects are
         var middleTileId = zone.GetTile(x, y, 1);
@@ -4133,12 +4258,14 @@ public unsafe partial class GameEngine : IDisposable
             _renderer?.RefreshAnimatedTiles();
         }
 
-        if (_showingTitleScreen || _state.IsPaused || (_smoothMovement && MovementUIBlocked))
+        if (_showingTitleScreen || _state.IsPaused || _debugMapWindow?.IsLocatorOpen == true || (_smoothMovement && MovementUIBlocked))
         {
             if (_smoothMovement) _suppressHeldMovement = true;
             return;
         }
         if (_discardMovementTime && _smoothMovement) { deltaTime = 0; _discardMovementTime = false; }
+        // Dialogue timers must advance even while their script is suspended.
+        _messages.Update(deltaTime);
         UpdateSmoothMovement(deltaTime);
 
         // The airfield's flight ends with a script putting the hero on the plane's square;
@@ -4219,6 +4346,8 @@ public unsafe partial class GameEngine : IDisposable
             return;
         }
 
+        if (_state.CurrentZone != null) _sectorPuzzles?.Refresh(_state.CurrentZone);
+
         // Update bot AI
         if (_bot?.IsRunning == true)
             _bot.Update(deltaTime);
@@ -4239,9 +4368,6 @@ public unsafe partial class GameEngine : IDisposable
                 _state.AttackTimer = 0;
             }
         }
-
-        // Update messages
-        _messages.Update(deltaTime);
 
         // Check for game over conditions
         if (_state.Health <= 0 && !_state.IsGameOver)
@@ -4549,9 +4675,10 @@ public unsafe partial class GameEngine : IDisposable
             {
                 foreach (var obj in _state.CurrentZone.Objects)
                 {
-                    // ZoneObjectType 0x0D (Teleporter) is also used for quest drops in some contexts
-                    // Look for CrateItem objects that could serve as quest item drops
-                    if (obj.Type == ZoneObjectType.CrateItem && obj.Argument != 0xFFFF && obj.Argument > 0)
+                    // Native DropQuestItem is hotspot zero, not the ordinary crate.
+                    // It may be disabled: this enemy, rather than a floor pickup,
+                    // owns the reward until it is defeated.
+                    if ((int)obj.Type == 0 && obj.Argument != 0xFFFF && obj.Argument > 0)
                     {
                         lootId = obj.Argument;
                         break;
@@ -4565,6 +4692,7 @@ public unsafe partial class GameEngine : IDisposable
                 _state.CurrentZone.SetTile(npc.X, npc.Y, 1, (ushort)lootId);
                 var lootName = GetTileName(lootId);
                 Console.WriteLine($"  Dropped loot: {lootName} (tile {lootId}) at ({npc.X},{npc.Y})");
+                npc.DropsLoot = false;
             }
         }
 
@@ -4673,6 +4801,7 @@ public unsafe partial class GameEngine : IDisposable
             return false;
 
         if (IsGroundBlocked(_state.CurrentZone, x, y)) return false;
+        if (IsScriptedActorTile(_state.CurrentZone, x, y)) return false;
 
         // Check collision with player
         if (_smoothMovement && MovementReserved(x, y, npc)) return false;
@@ -4746,6 +4875,11 @@ public unsafe partial class GameEngine : IDisposable
 
         // Upper scenery occludes actors and effects beneath it.
         _renderer.RenderZoneRoof(_state.CurrentZone, ViewCameraX, ViewCameraY, IsNPCMapSprite);
+
+        // DrawTileNow is a temporary surface operation, above the ordinary scene.
+        if (_actionExecutor != null)
+            foreach (var frame in _actionExecutor.DrawnTiles)
+                _renderer.RenderSprite(frame.Value, frame.Key.X, frame.Key.Y, ViewCameraX, ViewCameraY);
 
         // Render script viewer highlights (if viewing current zone)
         if (_scriptViewer?.IsOpen == true)
@@ -4858,15 +4992,19 @@ public unsafe partial class GameEngine : IDisposable
 
     private void RenderZoneItems()
     {
+        // Generated worlds materialize rewards in the object layer only when uncovered.
+        // Drawing hotspot arguments again exposes hidden and disabled alternatives.
+        if (_sectorPuzzles != null) return;
+        var drawn = new HashSet<(int X, int Y)>();
         foreach (var obj in _state.CurrentZone!.Objects)
         {
             // Only render item crates that haven't been picked up
             if (obj.Type != ZoneObjectType.CrateItem && obj.Type != ZoneObjectType.CrateWeapon)
                 continue;
 
-            // Check if already picked up (stored in zone state)
-            if (_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
-                continue;
+            if (!IsExposedPickup(obj) ||
+                _state.CurrentZone.GetTile(obj.X, obj.Y, 1) != ushort.MaxValue ||
+                !drawn.Add((obj.X, obj.Y))) continue;
 
             // Check if within viewport
             if (obj.X < ViewCameraX - 1 || obj.X >= ViewCameraX + GameRenderer.ViewportTilesX + 1 ||
@@ -5077,30 +5215,13 @@ public unsafe partial class GameEngine : IDisposable
     }
 
     /// <summary>
-    /// Checks if a tile is a locator/R2D2 item.
+    /// Checks the native map-item flags. R2 and other droid items are distinct.
     /// </summary>
     private bool IsLocatorTile(int tileId)
     {
-        // Direct check for R2D2 tile (794)
-        if (tileId == WorldGenerator.TILE_LOCATOR)
-            return true;
-
-        // Check by tile name
-        var name = GetTileName(tileId);
-        if (name != null)
-        {
-            var nameLower = name.ToLowerInvariant();
-            if (nameLower.Contains("r2") || nameLower.Contains("locator") || nameLower.Contains("droid"))
-                return true;
-        }
-        // Check by flags
-        if (tileId < _gameData!.Tiles.Count)
-        {
-            var tile = _gameData.Tiles[tileId];
-            if ((tile.Flags & TileFlags.ItemLocator) != 0)
-                return true;
-        }
-        return false;
+        return _gameData != null && tileId >= 0 && tileId < _gameData.Tiles.Count &&
+            (_gameData.Tiles[tileId].Flags & (TileFlags.Item | TileFlags.ItemLocator)) ==
+            (TileFlags.Item | TileFlags.ItemLocator);
     }
 
     /// <summary>

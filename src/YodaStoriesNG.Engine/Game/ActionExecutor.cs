@@ -41,6 +41,11 @@ public class ActionExecutor
     private ActionTrigger _pendingTrigger;
     private bool _pendingEnteredByPlane;
     private bool _pendingZoneWasUninitialized;
+    private (int? Item, int X, int Y, int? Npc) _pendingPlacement;
+    private bool _pendingHandledItemPlacement;
+    private readonly List<(Zone Zone, int X, int Y)> _pendingForceDrops = new();
+    private readonly Dictionary<(int X, int Y), int> _drawnTiles = new();
+    public IReadOnlyDictionary<(int X, int Y), int> DrawnTiles => _drawnTiles;
 
     /// <summary>
     /// When true, dialogue instructions are suppressed.
@@ -74,6 +79,7 @@ public class ActionExecutor
     public int PendingInstructionIndex { get; set; }
 
     public bool IsBusy => PendingInstructions != null;
+    public bool HandledItemPlacement { get; private set; }
     public (int ZoneId, int X, int Y)? RequestedZoneChange { get; private set; }
 
     /// <summary>Cancel a suspended script when leaving its zone.</summary>
@@ -85,13 +91,23 @@ public class ActionExecutor
         _pendingActionIndex = -1;
         _currentActionIndex = -1;
         RequestedZoneChange = null;
+        _pendingForceDrops.Clear();
+        _drawnTiles.Clear();
+        PlacedItemId = null;
+        PlacedX = PlacedY = -1;
+        InteractingNpcId = null;
+        HandledItemPlacement = false;
+        _pendingHandledItemPlacement = false;
     }
 
     // Event for displaying dialogue
     public event Action<string, string>? OnDialogue;
+    public Func<bool>? IsDialogueActive { get; set; }
+    public event Action<int>? OnItemAdded;
     public event Action<string>? OnMessage;
     public event System.Action? OnHeroRelocated;
     public event Action<int>? OnPlaySound;
+    public event System.Action? OnStopSound;
 
     public ActionExecutor(GameData gameData, GameState state)
     {
@@ -113,9 +129,14 @@ public class ActionExecutor
 
         if (IsBusy && _pendingZoneId != _currentZone.Id)
             ResetForZone();
+        if (trigger == ActionTrigger.UseItem && !IsBusy) HandledItemPlacement = false;
+
+        // A speech bubble owns its script until dismissed (or its timer expires).
+        if (IsDialogueActive?.Invoke() == true) return;
 
         _enteredByPlane = trigger == ActionTrigger.ZoneEnter && enteredByPlane;
         _zoneWasUninitialized = !_state.Variables.ContainsKey(_currentZone.Id + 1000);
+        var incomingPlacement = (PlacedItemId, PlacedX, PlacedY, InteractingNpcId);
         try
         {
             int nextActionIndex = 0;
@@ -128,6 +149,8 @@ public class ActionExecutor
                 _currentTrigger = trigger = _pendingTrigger;
                 _enteredByPlane = _pendingEnteredByPlane;
                 _zoneWasUninitialized = _pendingZoneWasUninitialized;
+                (PlacedItemId, PlacedX, PlacedY, InteractingNpcId) = _pendingPlacement;
+                HandledItemPlacement = _pendingHandledItemPlacement;
                 PendingInstructions = null;
                 PendingInstructionIndex = 0;
                 ExecuteInstructions(remaining, startIdx);
@@ -143,6 +166,9 @@ public class ActionExecutor
                 var action = _currentZone.Actions[i];
                 if (EvaluateConditions(action.Conditions, trigger))
                 {
+                    if (trigger == ActionTrigger.UseItem && action.Conditions.Any(c =>
+                        c.Opcode is ConditionOpcode.PlacedItemIs or ConditionOpcode.PlacedItemIsNot))
+                        HandledItemPlacement = true;
                     _currentActionIndex = i;
                     ExecuteInstructions(action.Instructions);
                     // A paused action owns the interpreter until it finishes. Continuing
@@ -154,18 +180,66 @@ public class ActionExecutor
         }
         finally
         {
+            (PlacedItemId, PlacedX, PlacedY, InteractingNpcId) = incomingPlacement;
             _enteredByPlane = false;
+            if (!IsBusy && !RequestedZoneChange.HasValue)
+            {
+                foreach (var drop in _pendingForceDrops.ToArray())
+                    if (ReferenceEquals(drop.Zone, _currentZone))
+                    {
+                        // Relocate a reward left by an earlier run rather than duplicate it.
+                        for (int y = drop.Y - 1; y <= drop.Y + 1; y++)
+                            for (int x = drop.X - 1; x <= drop.X + 1; x++)
+                                if (drop.Zone.GetTile(x, y, 1) == 511)
+                                    drop.Zone.SetTile(x, y, 1, ushort.MaxValue);
+                        DropScriptItem(511, drop.X, drop.Y);
+                    }
+                _pendingForceDrops.Clear();
+            }
         }
     }
 
-    /// <summary>
-    /// Returns true if the current trigger is player-initiated (NpcTalk, UseItem).
-    /// Dialogue should only show for these triggers, not for ZoneEnter, Walk, Bump, etc.
-    /// </summary>
-    private bool IsPlayerInitiatedTrigger()
+    /// <summary>Read-only check used by movement before deciding to collect a map tile.</summary>
+    public bool WouldHandleBump(int x, int y)
     {
-        return _currentTrigger == ActionTrigger.NpcTalk ||
-               _currentTrigger == ActionTrigger.UseItem;
+        var zone = _state.CurrentZone;
+        if (zone == null) return false;
+        var previousZone = _currentZone;
+        int previousX = BumpX, previousY = BumpY;
+        try
+        {
+            _currentZone = zone; BumpX = x; BumpY = y;
+            return zone.Actions.Select((action, index) => (action, index)).Any(pair =>
+                !_state.DisabledActions.Contains((zone.Id, pair.index)) &&
+                pair.action.Conditions.Any(c => c.Opcode == ConditionOpcode.Bump) &&
+                EvaluateConditions(pair.action.Conditions, ActionTrigger.Bump));
+        }
+        finally { _currentZone = previousZone; BumpX = previousX; BumpY = previousY; }
+    }
+
+    /// <summary>Probe an item's authored target without executing or changing a script.</summary>
+    public bool WouldHandleItemPlacement(int item, int x, int y)
+    {
+        var zone = _state.CurrentZone;
+        if (zone == null) return false;
+        var previousZone = _currentZone;
+        var previous = (PlacedItemId, PlacedX, PlacedY, InteractingNpcId);
+        try
+        {
+            _currentZone = zone;
+            PlacedItemId = item; PlacedX = x; PlacedY = y;
+            InteractingNpcId = _state.ZoneNPCs.FirstOrDefault(n => n.IsEnabled && n.IsAlive &&
+                !n.IsHostile && n.X == x && n.Y == y)?.CharacterId;
+            return zone.Actions.Select((action, index) => (action, index)).Any(pair =>
+                !_state.DisabledActions.Contains((zone.Id, pair.index)) &&
+                pair.action.Conditions.Any(c => c.Opcode is ConditionOpcode.PlacedItemIs or ConditionOpcode.PlacedItemIsNot) &&
+                EvaluateConditions(pair.action.Conditions, ActionTrigger.UseItem));
+        }
+        finally
+        {
+            _currentZone = previousZone;
+            (PlacedItemId, PlacedX, PlacedY, InteractingNpcId) = previous;
+        }
     }
 
     private bool EvaluateConditions(List<Condition> conditions, ActionTrigger trigger)
@@ -189,14 +263,6 @@ public class ActionExecutor
     private bool EvaluateCondition(Condition condition, ActionTrigger trigger)
     {
         var result = EvaluateConditionInternal(condition, trigger);
-
-        // Debug: Log NpcIs condition evaluations (most relevant for R2D2 interaction)
-        if (condition.Opcode == ConditionOpcode.NpcIs)
-        {
-            var args = condition.Arguments;
-            var expectedNpc = args.Count > 0 ? args[0] : -1;
-            Console.WriteLine($"  Condition NpcIs: expected={expectedNpc}, actual={InteractingNpcId}, result={result}");
-        }
 
         return result;
     }
@@ -291,11 +357,13 @@ public class ActionExecutor
             case ConditionOpcode.TileAtIs:
                 if (args.Count < 4 || _currentZone == null)
                     return false;
-                return _currentZone.GetTile(args[1], args[2], args[3]) == args[0];
+                // Script operands are signed 16-bit; tile slots store the same bits
+                // unsigned. In particular, -1 names the empty tile (0xFFFF).
+                return _currentZone.GetTile(args[1], args[2], args[3]) == unchecked((ushort)args[0]);
 
             // Takes no arguments - it asks whether THIS zone is solved.
             case ConditionOpcode.ZoneIsSolved:
-                return _state.IsZoneSolved(_state.CurrentZoneId);
+                return CurrentSector?.Solved == true || _state.IsZoneSolved(_state.CurrentZoneId);
 
             case ConditionOpcode.HealthIsLessThan:
                 if (args.Count < 1)
@@ -317,7 +385,7 @@ public class ActionExecutor
             // conditions/placed-item-is.ts, which also rejects negative coordinates.
             case ConditionOpcode.PlacedItemIs:
             {
-                if (args.Count < 5 || !PlacedItemId.HasValue || _currentZone == null)
+                if (trigger != ActionTrigger.UseItem || args.Count < 5 || !PlacedItemId.HasValue || _currentZone == null)
                     return false;
                 if (args[0] < 0 || args[1] < 0 || args[2] < 0 || args[3] < 0)
                     return false;
@@ -341,6 +409,12 @@ public class ActionExecutor
                     return false;
                 return DroppedItemId == args[0];
 
+            case ConditionOpcode.SectorCounterIs:
+                return args.Count >= 1 && _state.GetSectorCounter(_state.CurrentZoneId) == args[0];
+
+            case ConditionOpcode.SectorCounterIsLessThan:
+                return args.Count >= 1 && _state.GetSectorCounter(_state.CurrentZoneId) < args[0];
+
             case ConditionOpcode.NpcIs:
                 if (args.Count < 1)
                     return false;
@@ -356,11 +430,12 @@ public class ActionExecutor
                 var npcIndex = args[0];
                 if (npcIndex >= 0 && npcIndex < _state.ZoneNPCs.Count)
                     return _state.ZoneNPCs[npcIndex].Health <= 0;
-                return true; // If NPC doesn't exist, consider it "dead"
+                return false;
 
             case ConditionOpcode.HasNoActiveMonsters:
-                // Check if all hostile NPCs in zone are dead
-                return _state.ZoneNPCs.All(n => !n.IsHostile || n.Health <= 0);
+                // Native scripts ask whether any enabled monster remains. Death is
+                // represented separately from enabled state in this engine.
+                return _state.ZoneNPCs.All(n => !n.IsEnabled || !n.IsAlive);
 
             case ConditionOpcode.RequiredItemIs:
                 // Check if current sector's required item matches arg
@@ -393,10 +468,18 @@ public class ActionExecutor
                 return _state.PlayerX == args[0] && _state.PlayerY == args[1];
 
             case ConditionOpcode.PlacedItemIsNot:
-                // Check if placed item does NOT match
-                if (args.Count < 1)
+            {
+                // A rejected offer is still an item-placement event, not the absence
+                // of an offer. Use the same target and item slots as PlacedItemIs.
+                if (trigger != ActionTrigger.UseItem || args.Count < 5 || !PlacedItemId.HasValue || _currentZone == null)
                     return false;
-                return PlacedItemId != args[0];
+                if (args[0] < 0 || args[1] < 0 || args[2] < 0 || args[3] < 0)
+                    return false;
+                int item = args[4] >= 0 ? args[4] : CurrentSector?.RequiredItem ?? -1;
+                if (item < 0) return false;
+                return PlacedItemId != item && PlacedX == args[0] && PlacedY == args[1] &&
+                       _currentZone.GetTile(args[0], args[1], args[2]) == args[3];
+            }
 
             case ConditionOpcode.EndingIs:
                 // Ending identifies the mission itself. The final sector's required
@@ -412,25 +495,18 @@ public class ActionExecutor
                 }
                 return _state.HasItem(args[0]);  // Fallback
 
-            // Note: SectorCounterIs (0x19) shares value with NpcIs - handled above
-            // Note: SectorCounterIsLessThan (0x1A) shares value with HasNpc - handled above
             // Note: HasGoalItem (0x12) shares value with ItemIsPlaced - handled above
 
             case ConditionOpcode.SectorCounterIsGreaterThan:
-                if (args.Count < 2)
-                    return false;
-                return _state.GetVariable(args[0] + 3000) > args[1];
+                return args.Count >= 1 && _state.GetSectorCounter(_state.CurrentZoneId) > args[0];
 
             case ConditionOpcode.SectorCounterIsNot:
-                if (args.Count < 2)
-                    return false;
-                return _state.GetVariable(args[0] + 3000) != args[1];
+                return args.Count >= 1 && _state.GetSectorCounter(_state.CurrentZoneId) != args[0];
 
             case ConditionOpcode.DropsQuestItemAt:
-                // Check if quest item dropped at position
-                if (args.Count < 2)
-                    return false;
-                return BumpX == args[0] && BumpY == args[1] && DroppedItemId.HasValue;
+                // This describes the generated map layout, not a player drop event.
+                return args.Count >= 2 && _currentZone != null && _currentZone.Objects.Any(h =>
+                    (int)h.Type == 0 && h.X == args[0] && h.Y == args[1] && h.Enabled);
 
             case ConditionOpcode.HasAnyRequiredItem:
                 // Check if inventory contains any of the current sector's required items
@@ -451,11 +527,11 @@ public class ActionExecutor
             case ConditionOpcode.IsVariable:
                 if (args.Count < 4 || _currentZone == null)
                     return false;
-                return _currentZone.GetTile(args[1], args[2], args[3]) == args[0];
+                return _currentZone.GetTile(args[1], args[2], args[3]) == unchecked((ushort)args[0]);
 
             default:
-                // Unknown condition - assume true to allow script to continue
-                return true;
+                // An unsupported condition cannot authorize an action.
+                return false;
         }
     }
 
@@ -471,19 +547,134 @@ public class ActionExecutor
             if (instructions[i].Opcode == InstructionOpcode.Wait)
             {
                 // Save remaining instructions to resume next tick
-                PendingInstructions = instructions;
-                PendingInstructionIndex = i + 1;
-                _pendingZoneId = _currentZone!.Id;
-                _pendingActionIndex = _currentActionIndex;
-                _pendingTrigger = _currentTrigger;
-                _pendingEnteredByPlane = _enteredByPlane;
-                _pendingZoneWasUninitialized = _zoneWasUninitialized;
+                SuspendInstructions(instructions, i + 1);
                 return;
             }
             ExecuteInstruction(instructions[i]);
+            if (instructions[i].Opcode is InstructionOpcode.SpeakHero or InstructionOpcode.SpeakNpc or InstructionOpcode.SpeakNpc2 &&
+                IsDialogueActive?.Invoke() == true)
+            {
+                SuspendInstructions(instructions, i + 1);
+                return;
+            }
             if (RequestedZoneChange.HasValue)
                 return;
         }
+    }
+
+    private void SuspendInstructions(List<Instruction> instructions, int nextIndex)
+    {
+        PendingInstructions = instructions;
+        PendingInstructionIndex = nextIndex;
+        _pendingZoneId = _currentZone!.Id;
+        _pendingActionIndex = _currentActionIndex;
+        _pendingTrigger = _currentTrigger;
+        _pendingEnteredByPlane = _enteredByPlane;
+        _pendingZoneWasUninitialized = _zoneWasUninitialized;
+        _pendingPlacement = (PlacedItemId, PlacedX, PlacedY, InteractingNpcId);
+        _pendingHandledItemPlacement = HandledItemPlacement;
+    }
+
+    private string ResolveDialogueText(string text)
+    {
+        var sector = CurrentSector;
+        var step = CurrentMission?.CurrentPuzzleStep;
+        int provided = sector?.FindItem ?? step?.RewardItemId ?? -1;
+        int required = sector?.RequiredItem ?? step?.RequiredItemId ?? -1;
+        // Find-only rooms may use either token for their single generated reward.
+        if (required < 0) required = provided;
+        if (provided < 0) provided = required;
+        return DialogueText.Resolve(_gameData, text, provided, required);
+    }
+
+    private string DialogueSpeaker(List<short> args)
+    {
+        // SpeakNpc stores map coordinates, not a character index.
+        if (args.Count < 2 || _currentZone == null) return "NPC";
+        int x = args[0], y = args[1];
+        var npc = _state.ZoneNPCs.FirstOrDefault(n => n.IsEnabled && n.IsAlive && n.X == x && n.Y == y);
+        if (npc != null && npc.CharacterId >= 0 && npc.CharacterId < _gameData.Characters.Count)
+            return _gameData.Characters[npc.CharacterId].Name;
+        int tile = _currentZone.GetTile(x, y, 1);
+        return _gameData.TileNames.GetValueOrDefault(tile) ?? "NPC";
+    }
+
+    private bool IsBenEncounter(int x, int y) => _gameData.GameType == GameType.YodaStories &&
+        _currentZone != null && _currentZone.Actions.Any(a => a.Instructions.Any(i =>
+            i.Opcode == InstructionOpcode.PlaceTile && i.Arguments.Count >= 4 &&
+            i.Arguments[0] == x && i.Arguments[1] == y && i.Arguments[2] == 1 && i.Arguments[3] == 791));
+
+    private bool IsScriptedPickupHandoff(int tileId, int x, int y)
+    {
+        if (_currentZone == null || _currentActionIndex < 0 || _currentActionIndex >= _currentZone.Actions.Count)
+            return false;
+        var action = _currentZone.Actions[_currentActionIndex];
+        bool addressesItem = action.Conditions.Any(c =>
+            c.Opcode == ConditionOpcode.Bump && c.Arguments.Count >= 3 &&
+                c.Arguments[0] == x && c.Arguments[1] == y && c.Arguments[2] == tileId ||
+            c.Opcode == ConditionOpcode.PlacedItemIs && c.Arguments.Count >= 4 &&
+                c.Arguments[0] == x && c.Arguments[1] == y && c.Arguments[2] == 1 && c.Arguments[3] == tileId);
+        return addressesItem && action.Instructions.Any(i => i.Opcode == InstructionOpcode.RemoveTile &&
+            i.Arguments.Count >= 3 && i.Arguments[0] == x && i.Arguments[1] == y && i.Arguments[2] == 1) &&
+            _currentZone.GetTile(x, y, 1) != tileId;
+    }
+
+    private void DropScriptItem(int tileId, int x, int y)
+    {
+        if (_currentZone == null || tileId < 0 || tileId >= _gameData.Tiles.Count) return;
+        if (IsScriptedPickupHandoff(tileId, x, y))
+        {
+            // RemoveTile + DropItem of the interaction target is the authored pickup.
+            // Award it once instead of recreating an identical, bump-triggering map tile.
+            _state.AddItem(tileId);
+            _state.CollectedObjects.Add($"{_currentZone.Id}_{x}_{y}_tile");
+            OnItemAdded?.Invoke(tileId);
+            OnMessage?.Invoke($"Picked up: {_gameData.TileNames.GetValueOrDefault(tileId) ?? "item"}");
+            return;
+        }
+        // A drop cannot share the object layer with an NPC's scripted appearance/fade.
+        // Only drop where Luke can walk from his current position, and outside roof cover.
+        var reachable = new HashSet<(int X, int Y)> { (_state.PlayerX, _state.PlayerY) };
+        var frontier = new Queue<(int X, int Y)>();
+        frontier.Enqueue((_state.PlayerX, _state.PlayerY));
+        while (frontier.TryDequeue(out var cell))
+            foreach (var (sx, sy) in new[] { (-1,0), (1,0), (0,-1), (0,1) })
+            {
+                int nx = cell.X + sx, ny = cell.Y + sy;
+                if (nx < 0 || ny < 0 || nx >= _currentZone.Width || ny >= _currentZone.Height || reachable.Contains((nx, ny))) continue;
+                int ground = _currentZone.GetTile(nx, ny, 0), middle = _currentZone.GetTile(nx, ny, 1);
+                if (ground < _gameData.Tiles.Count && _gameData.Tiles[ground].IsObject &&
+                    !(middle < _gameData.Tiles.Count && _gameData.Tiles[middle].IsFloor)) continue;
+                if (middle < _gameData.Tiles.Count && _gameData.Tiles[middle].IsObject) continue;
+                reachable.Add((nx, ny)); frontier.Enqueue((nx, ny));
+            }
+        var offsets = new[] { (0,0), (-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,-1), (-1,1), (1,1) };
+        foreach (var (dx, dy) in offsets.OrderBy(o => x + o.Item1 == _state.PlayerX && y + o.Item2 == _state.PlayerY ? 1 : 0)
+            .ThenBy(o => Math.Abs(x + o.Item1 - _state.PlayerX) + Math.Abs(y + o.Item2 - _state.PlayerY)))
+        {
+            int tx = x + dx, ty = y + dy;
+            if (tx < 0 || ty < 0 || tx >= _currentZone.Width || ty >= _currentZone.Height ||
+                !reachable.Contains((tx, ty)) ||
+                _currentZone.GetTile(tx, ty, 1) != ushort.MaxValue ||
+                _currentZone.GetTile(tx, ty, 2) != ushort.MaxValue ||
+                _state.ZoneNPCs.Any(n => n.IsEnabled && n.IsAlive && n.X == tx && n.Y == ty)) continue;
+            int ground = _currentZone.GetTile(tx, ty, 0);
+            if (ground < _gameData.Tiles.Count && _gameData.Tiles[ground].IsObject) continue;
+            if (tx == _state.PlayerX && ty == _state.PlayerY)
+            {
+                _state.AddItem(tileId);
+                OnItemAdded?.Invoke(tileId);
+            }
+            else
+            {
+                _currentZone.SetTile(tx, ty, 1, (ushort)tileId);
+                _state.CollectedObjects.Remove($"{_currentZone.Id}_{tx}_{ty}_tile");
+            }
+            return;
+        }
+        // A cramped encounter must still award its item without destroying map tiles.
+        _state.AddItem(tileId);
+        OnItemAdded?.Invoke(tileId);
     }
 
     private void ExecuteInstruction(Instruction instruction)
@@ -525,8 +716,12 @@ public class ActionExecutor
                 break;
 
             case InstructionOpcode.AddItem:
-                if (args.Count >= 1)
+                // Negative native AddItem arguments are deliberate no-ops.
+                if (args.Count >= 1 && args[0] >= 0 && args[0] < _gameData.Tiles.Count)
+                {
                     _state.AddItem(args[0]);
+                    OnItemAdded?.Invoke(args[0]);
+                }
                 break;
 
             case InstructionOpcode.RemoveItem:
@@ -537,6 +732,12 @@ public class ActionExecutor
 
             case InstructionOpcode.MarkAsSolved:
                 _state.MarkZoneSolved(_state.CurrentZoneId);
+                if (CurrentSector is { } solvedSector && CurrentWorld != null)
+                {
+                    solvedSector.Solved = true;
+                    foreach (var pair in CurrentWorld.Sectors.Where(p => ReferenceEquals(p.Value, solvedSector)))
+                        _state.MarkZoneSolved(pair.Key);
+                }
                 break;
 
             case InstructionOpcode.WinGame:
@@ -574,8 +775,18 @@ public class ActionExecutor
                 if (args.Count >= 2)
                 {
                     OnHeroRelocated?.Invoke();
-                    _state.PlayerX += args[0];
-                    _state.PlayerY += args[1];
+                    if (_gameData.GameType == GameType.YodaStories && args.Count >= 4)
+                    {
+                        // Native Yoda scripts name a source and destination. (-1,-1)
+                        // means start at the current hero, not move one square northwest.
+                        _state.PlayerX = args[2];
+                        _state.PlayerY = args[3];
+                    }
+                    else
+                    {
+                        _state.PlayerX += args[0];
+                        _state.PlayerY += args[1];
+                    }
                 }
                 break;
 
@@ -595,27 +806,19 @@ public class ActionExecutor
                 break;
 
             case InstructionOpcode.SpeakHero:
-                // Only show dialogue if not suppressed AND trigger is player-initiated
-                if (!string.IsNullOrEmpty(instruction.Text) && !SuppressDialogue && IsPlayerInitiatedTrigger())
+                // Script conditions decide when speech happens, including bumps and walking.
+                if (!string.IsNullOrEmpty(instruction.Text) && !SuppressDialogue)
                 {
-                    OnDialogue?.Invoke("Luke", instruction.Text);
+                    OnDialogue?.Invoke("Luke", ResolveDialogueText(instruction.Text));
                 }
                 break;
 
             case InstructionOpcode.SpeakNpc:
             case InstructionOpcode.SpeakNpc2:
-                // Only show dialogue if not suppressed AND trigger is player-initiated
-                if (!string.IsNullOrEmpty(instruction.Text) && !SuppressDialogue && IsPlayerInitiatedTrigger())
+                // Script conditions decide when speech happens, including bumps and walking.
+                if (!string.IsNullOrEmpty(instruction.Text) && !SuppressDialogue)
                 {
-                    // Get NPC name from argument if provided
-                    string npcName = "NPC";
-                    if (args.Count >= 1 && args[0] >= 0 && args[0] < _gameData.Characters.Count)
-                    {
-                        var character = _gameData.Characters[args[0]];
-                        if (!string.IsNullOrEmpty(character.Name))
-                            npcName = character.Name;
-                    }
-                    OnDialogue?.Invoke(npcName, instruction.Text);
+                    OnDialogue?.Invoke(DialogueSpeaker(args), ResolveDialogueText(instruction.Text));
                 }
                 break;
 
@@ -641,8 +844,12 @@ public class ActionExecutor
                     int y = args[2];
                     if (tileId < 0)
                         break;
-                    // Place the item tile on layer 1 (object layer)
-                    _currentZone.SetTile(x, y, 1, (ushort)tileId);
+                    if (tileId == 511 && IsBenEncounter(x, y))
+                    {
+                        var drop = (_currentZone, x, y);
+                        if (!_pendingForceDrops.Contains(drop)) _pendingForceDrops.Add(drop);
+                    }
+                    else DropScriptItem(tileId, x, y);
                     Console.WriteLine($"Dropped item {tileId} at ({x},{y})");
                 }
                 break;
@@ -698,7 +905,7 @@ public class ActionExecutor
                 break;
 
             case InstructionOpcode.Redraw:
-                // Request a redraw - handled by renderer
+                _drawnTiles.Clear();
                 break;
 
             case InstructionOpcode.MoveTile:
@@ -717,22 +924,28 @@ public class ActionExecutor
                 break;
 
             case InstructionOpcode.DrawTile:
-                // Draw a tile at position (same as PlaceTile for us)
-                if (args.Count >= 4 && _currentZone != null)
-                    _currentZone.SetTile(args[0], args[1], args[2], (ushort)args[3]);
+                // Native DrawTileNow uses (x,y,tile); the unused slots contain junk.
+                // Paint the frame on top of the scene without touching its map layers.
+                if (args.Count >= 3 && _currentZone != null && args[0] >= 0 && args[1] >= 0 &&
+                    args[0] < _currentZone.Width && args[1] < _currentZone.Height &&
+                    args[2] >= 0 && args[2] < _gameData.Tiles.Count)
+                    _drawnTiles[(args[0], args[1])] = args[2];
                 break;
 
             case InstructionOpcode.SetTileNeedsDisplay:
-                // Redraw tile at position - handled by renderer automatically
+                if (args.Count >= 2) _drawnTiles.Remove((args[0], args[1]));
                 break;
 
             case InstructionOpcode.SetRectNeedsDisplay:
-                // Redraw rectangle area - handled by renderer automatically
+                if (args.Count >= 4)
+                    foreach (var point in _drawnTiles.Keys.Where(p => p.X >= args[0] && p.Y >= args[1] &&
+                        p.X < args[0] + Math.Max(0, (int)args[2]) &&
+                        p.Y < args[1] + Math.Max(0, (int)args[3])).ToArray())
+                        _drawnTiles.Remove(point);
                 break;
 
             case InstructionOpcode.StopSound:
-                // Stop currently playing sounds
-                // TODO: Implement sound stopping
+                OnStopSound?.Invoke();
                 break;
 
             case InstructionOpcode.EnableHotspot:
@@ -761,19 +974,19 @@ public class ActionExecutor
                 }
                 break;
 
-            // Note: SetSectorCounter (0x22) shares value with SetZoneType - handled above
+            case InstructionOpcode.SetSectorCounter:
+                if (args.Count >= 1)
+                    _state.SetSectorCounter(_state.CurrentZoneId, args[0]);
+                break;
 
             case InstructionOpcode.AddToSectorCounter:
-                // Add to zone sector counter
-                if (args.Count >= 2)
-                {
-                    int current = _state.GetVariable(args[0] + 3000);
-                    _state.SetVariable(args[0] + 3000, current + args[1]);
-                }
+                if (args.Count >= 1)
+                    _state.SetSectorCounter(_state.CurrentZoneId,
+                        _state.GetSectorCounter(_state.CurrentZoneId) + args[0]);
                 break;
 
             case InstructionOpcode.SetRandom:
-                // Set zone random to specific value
+                // The authored state machine controls repeated encounters and rewards.
                 if (args.Count >= 1)
                     _lastRandomValue = args[0];
                 break;

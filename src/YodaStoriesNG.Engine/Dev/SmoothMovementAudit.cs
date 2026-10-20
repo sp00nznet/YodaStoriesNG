@@ -64,8 +64,8 @@ public unsafe partial class GameEngine
         Require(e._state.Inventory.Count(i => i == 3) == 1, "pickup ran twice");
 
         e = Scene();
-        e._state.CurrentZone!.SetTile(4, 3, 1, 1);
-        Require(!e.RequestSmoothPlayerStep(1, 1, Direction.Right, false), "diagonal cut through a wall");
+        e._state.ZoneNPCs.Add(new NPC { X = 4, Y = 3, Health = 10 });
+        Require(!e.RequestSmoothPlayerStep(1, 1, Direction.Right, false), "diagonal cut through an actor");
         Require(e.RequestSmoothPlayerStep(0, 1, Direction.Down, false), "valid cardinal slide was blocked");
         e._smoothMovementRequested = false;
         e.ApplyPendingMovementMode();

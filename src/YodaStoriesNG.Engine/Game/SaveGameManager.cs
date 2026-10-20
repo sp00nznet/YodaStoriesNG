@@ -253,11 +253,11 @@ public class SaveGameManager
         state.PreviousZoneId = saveData.PreviousZoneId;
 
         // Inventory and weapons
-        state.Inventory = saveData.Inventory.ToList();
+        state.Inventory = saveData.Inventory.Where(item => item >= 0).ToList();
         state.Weapons = saveData.Weapons.ToList();
         state.CurrentWeaponIndex = saveData.CurrentWeaponIndex;
         state.SelectedWeapon = saveData.SelectedWeapon;
-        state.SelectedItem = saveData.SelectedItem;
+        state.SelectedItem = saveData.SelectedItem is >= 0 ? saveData.SelectedItem : null;
 
         // Weapon ammo
         state.WeaponAmmo.Clear();

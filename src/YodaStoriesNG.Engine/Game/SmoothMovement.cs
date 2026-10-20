@@ -23,7 +23,7 @@ public unsafe partial class GameEngine
     private Func<bool>? _smoothPullSource;
     private bool ReadPullInput() => _smoothPullSource?.Invoke() ?? (_renderer != null && IsShiftHeld());
     private bool MovementModePending => _smoothMovement != _smoothMovementRequested;
-    private bool MovementUIBlocked => !_movementFocused || _menuBar?.IsMenuOpen == true ||
+    private bool MovementUIBlocked => !_movementFocused || _debugMapWindow?.IsLocatorOpen == true || _menuBar?.IsMenuOpen == true ||
         _controllerOverlay?.IsOpen == true || _controlsWindow?.IsOpen == true || _state.IsPaused;
     private (double X, double Y) PlayerRenderPosition => _playerStep is { } step
         ? (step.X, step.Y) : (_state.PlayerX, _state.PlayerY);
@@ -56,6 +56,7 @@ public unsafe partial class GameEngine
 
     private void CancelSmoothMovement()
     {
+        ClearItemDrag();
         _playerStep = null;
         _npcSteps.Clear();
         _pendingMovementAction = null;
@@ -89,7 +90,7 @@ public unsafe partial class GameEngine
     {
         var zone = _state.CurrentZone;
         if (zone == null || x < 0 || y < 0 || x >= zone.Width || y >= zone.Height) return false;
-        if (IsGroundBlocked(zone, x, y)) return false;
+        if (IsGroundBlocked(zone, x, y) || IsScriptedActorTile(zone, x, y)) return false;
         if (actor != null && x == _state.PlayerX && y == _state.PlayerY) return false;
         if (MovementReserved(x, y, actor)) return false;
         if (_state.ZoneNPCs.Any(n => n != actor && n.IsEnabled && n.IsAlive && n.X == x && n.Y == y &&
@@ -99,7 +100,32 @@ public unsafe partial class GameEngine
             !_gameData.Tiles[tile].IsSolid || IsNPCMapSprite(x, y, (ushort)tile);
     }
 
-    private bool IsCardinalInteraction(int x, int y) => _sectorPuzzles?.IsBumpTarget(x, y) == true || _state.CurrentZone!.Objects.Any(o => o.Enabled && o.X == x && o.Y == y &&
+    private bool DiagonalSideClear(int x, int y)
+    {
+        var zone = _state.CurrentZone;
+        if (zone == null || x < 0 || y < 0 || x >= zone.Width || y >= zone.Height ||
+            IsGroundBlocked(zone, x, y) || IsScriptedActorTile(zone, x, y) || MovementReserved(x, y)) return false;
+        if (_state.ZoneNPCs.Any(n => n.IsEnabled && n.IsAlive && n.X == x && n.Y == y)) return false;
+        int tile = zone.GetTile(x, y, 1);
+        // Authored maps contain diagonal openings beside walls and movable rocks.
+        // Side cells are not entered: the destination still needs to be walkable,
+        // and pushing or pulling a block remains cardinal.
+        return tile == ushort.MaxValue || tile < _gameData!.Tiles.Count &&
+            !_gameData.Tiles[tile].IsCharacter;
+    }
+
+    private bool CanSlidePlayerTo(int dx, int dy)
+    {
+        int x = _state.PlayerX, y = _state.PlayerY;
+        return DiagonalSideClear(x + dx, y) && DiagonalSideClear(x, y + dy) &&
+            SmoothCellClear(x + dx, y + dy, collect: true) && !IsCardinalInteraction(x + dx, y + dy) &&
+            !_state.CurrentZone!.Objects.Any(o => o.Enabled && o.X == x + dx && o.Y == y + dy &&
+                o.Type is ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit or ZoneObjectType.Teleporter or
+                    ZoneObjectType.VehicleToPrimary or ZoneObjectType.VehicleToSecondary);
+    }
+
+    private bool IsCardinalInteraction(int x, int y) => IsScriptedActorTile(_state.CurrentZone!, x, y) ||
+        _sectorPuzzles?.IsBumpTarget(x, y) == true || _state.CurrentZone!.Objects.Any(o => o.Enabled && o.X == x && o.Y == y &&
         o.Type is ZoneObjectType.XWingFromDagobah or ZoneObjectType.XWingToDagobah) ||
         _state.CurrentZone.GetTile(x, y, 1) is var tile && tile < _gameData!.Tiles.Count && _gameData.Tiles[tile].IsDraggable;
 
@@ -111,7 +137,7 @@ public unsafe partial class GameEngine
         if (dx == 0 && dy == 0) return false;
         int x = _state.PlayerX, y = _state.PlayerY;
         bool diagonal = dx != 0 && dy != 0;
-        if (diagonal && (pull || !SmoothCellClear(x + dx, y) || !SmoothCellClear(x, y + dy) ||
+        if (diagonal && (pull || !DiagonalSideClear(x + dx, y) || !DiagonalSideClear(x, y + dy) ||
             !SmoothCellClear(x + dx, y + dy, collect: true) || IsCardinalInteraction(x + dx, y + dy) ||
             _state.CurrentZone.Objects.Any(o => o.Enabled && o.X == x + dx && o.Y == y + dy &&
                 o.Type is ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit or ZoneObjectType.Teleporter or
@@ -141,6 +167,10 @@ public unsafe partial class GameEngine
                 if (_messages.HasDialogue || _actionExecutor?.IsBusy == true || !_state.HeroVisible ||
                     previousZone != _state.CurrentZoneId) return true;
             }
+            if (!diagonal && !pull && !IsCardinalInteraction(x + dx, y + dy))
+                foreach (var slide in dx == 0 ? new[] { (-1, dy), (1, dy) } : new[] { (dx, 1), (dx, -1) })
+                    if (CanSlidePlayerTo(slide.Item1, slide.Item2) &&
+                        RequestSmoothPlayerStep(slide.Item1, slide.Item2, facing, false)) return true;
             return false;
         }
         var step = new MovementStep(x, y, dx, dy, 1.0 / (6 * Math.Max(0.1, _inputMoveStrength)), facing, pull)

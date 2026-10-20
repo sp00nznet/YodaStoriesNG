@@ -90,7 +90,7 @@ in slot 0 and the position in slots 1 to 3. The tables below give the real order
 | `0x09` | `EnterByPlane` | - | The hero arrived by vehicle rather than on foot. |
 | `0x0A` | `TileAtIs` | **tile**, x, y, layer | The tile at (x, y, layer) is `tile`. **Note the order.** |
 | `0x0B` | `MonsterIsDead` | index | Monster `index` in this zone is dead. |
-| `0x0C` | `HasNoActiveMonsters` | - | Every monster in this zone is dead. |
+| `0x0C` | `HasNoActiveMonsters` | - | No enabled living monsters remain. |
 | `0x0D` | `HasItem` | tile | The inventory contains `tile`. `-1` means the zone's own puzzle item. |
 | `0x0E` | `RequiredItemIs` | tile | The zone's required item is `tile`. |
 | `0x0F` | `EndingIs` | tile | The current goal item is `tile`. |
@@ -101,13 +101,13 @@ in slot 0 and the position in slots 1 to 3. The tables below give the real order
 | `0x14` | `HealthIsGreaterThan` | value | Hero health > `value`. |
 | `0x15` | *unused* | - | Present in the format, never used. |
 | `0x16` | `FindItemIs` | tile | The zone's find-item is `tile`. |
-| `0x17` | `PlacedItemIsNot` | x, y, layer, tileA, tileB | Inverse of `PlacedItemIs`. |
+| `0x17` | `PlacedItemIsNot` | x, y, layer, tileA, tileB | An item was offered at this target, but differs from tileB (`-1` means the required item). False when nothing was offered. |
 | `0x18` | `HeroIsAt` | x, y | The hero is standing at (x, y). |
 | `0x19` | `SectorCounterIs` | value | The zone sector-counter equals `value`. |
 | `0x1A` | `SectorCounterIsLessThan` | value | Sector-counter < `value`. |
 | `0x1B` | `SectorCounterIsGreaterThan` | value | Sector-counter > `value`. |
 | `0x1C` | `GamesWonIs` | value | Total games won equals `value`. |
-| `0x1D` | `DropsQuestItemAt` | x, y | The player dropped the quest item at (x, y). |
+| `0x1D` | `DropsQuestItemAt` | x, y | An enabled quest-item hotspot exists at (x, y). |
 | `0x1E` | `HasAnyRequiredItem` | - | The inventory holds any item this zone requires. |
 | `0x1F` | `CounterIsNot` | value | Zone counter != `value`. |
 | `0x20` | `RandomIsNot` | value | Zone random != `value`. |
@@ -128,7 +128,7 @@ in slot 0 and the position in slots 1 to 3. The tables below give the real order
 | `0x00` | `PlaceTile` | x, y, layer, tile | Put `tile` at (x, y, layer). `-1` removes. |
 | `0x01` | `RemoveTile` | x, y, layer | Clear (x, y, layer). |
 | `0x02` | `MoveTile` | srcX, srcY, layer, dstX, dstY | Move a tile within the zone. |
-| `0x03` | `DrawTile` | 5 numbers | Draw a tile without changing zone data. |
+| `0x03` | `DrawTile` | x, y, tile (last two slots unused) | Draw a temporary frame without changing zone data. |
 | `0x06` | `SetTileNeedsDisplay` | x, y | Mark one tile for redraw. |
 | `0x07` | `SetRectNeedsDisplay` | x, y, w, h | Mark a rectangle for redraw. |
 | `0x09` | `Redraw` | - | Redraw the whole scene now. |
@@ -141,7 +141,7 @@ in slot 0 and the position in slots 1 to 3. The tables below give the real order
 | `0x10` | `HideHero` | - | Hide the hero sprite. |
 | `0x11` | `ShowHero` | - | Show it again. |
 | `0x12` | `MoveHeroTo` | x, y | Teleport to (x, y) in this zone. |
-| `0x13` | `MoveHeroBy` | dx, dy, absX, absY, - | Move relative, or absolute if the relative pair is zero. |
+| `0x13` | `MoveHeroBy` | fromX, fromY, toX, toY, mode | Scripted movement to the destination (Yoda); `-1,-1` uses the current source. |
 | `0x21` | `ChangeZone` | zoneId, x, y | Move to another zone at (x, y). |
 | `0x25` | `AddHealth` | value | Add `value` to health, capped at maximum. Negative values damage. |
 
@@ -149,7 +149,7 @@ in slot 0 and the position in slots 1 to 3. The tables below give the real order
 
 | Op | Name | Arguments | Effect |
 |---|---|---|---|
-| `0x1B` | `DropItem` | tile, x, y | Drop `tile` into the zone at (x, y). `-1` means the zone's find-item. |
+| `0x1B` | `DropItem` | tile, x, y | Drop `tile` at (x, y), or a free adjacent square if occupied. If surrounded, award it directly. `-1` means the zone's find-item. |
 | `0x1C` | `AddItem` | tile | Add `tile` to the inventory. |
 | `0x1D` | `RemoveItem` | tile | Remove one `tile` from the inventory. |
 
@@ -291,12 +291,12 @@ Honest accounting of where this engine does not match
 [WebFun](https://codeberg.org/cyco/WebFun), which is the closest thing to a specification
 the format has.
 
-- **`ConditionOpcode` declares aliases that collide.** `NpcIs` and `HasNpc` are declared with
-  the same values as `SectorCounterIs` (`0x19`) and `SectorCounterIsLessThan` (`0x1A`).
-  Because C# cannot switch on two names for one value, opcodes `0x19` and `0x1A` are
-  currently evaluated as NPC-interaction checks rather than sector-counter comparisons. Real
-  scripts use them as sector-counter checks. This is the largest remaining scripting
-  divergence and is on the [roadmap](ROADMAP.md).
+- **Sector counters are distinct from ordinary counters.** Native condition opcodes
+  `0x19`-`0x1B` and `0x21` compare the current zone's sector counter with argument 0.
+  Instructions `0x22` and `0x23` set/add argument 0. These counters use the reserved
+  `zoneId + 3000` variable range, which is already saved. Synthetic NPC-interaction
+  checks and zone-type changes use separate extension opcodes, avoiding the former
+  collisions with native instructions.
 - **Several executor bugs fixed while getting Indiana Jones to play, all affecting both
   games.** Each made scripts misfire quietly:
   - `DisableAction` set a variable nothing read, so every "do this once" action re-ran every
@@ -313,9 +313,6 @@ the format has.
 - **Counters were keyed wrong too, and now are not.** `CounterIs`, `SetCounter` and
   `AddToCounter` used to take a counter id and a value; the original keeps one counter per
   zone and every counter opcode takes a single argument. Fixed for both games.
-- **Sector-counter opcodes take a key plus a value** in this engine
-  (`variable[arg0 + 3000] op arg1`), where the original has one counter per zone compared
-  against `arg0`.
 - **`ConditionOpcode` and `InstructionOpcode` declare members past the real range** -
   conditions `0x24`, `0x25`, `0x30` and instructions `0x26` to `0x28`. No data file contains
   them; they are engine-internal and can never fire from parsed script data.
@@ -334,3 +331,39 @@ sector's prerequisite. `SetVariable` writes the tile slot read by `IsVariable`.
 
 If you are extending the script engine, `webfun-reference/src/engine/script/` is the file to
 read: one small module per opcode, each with the original's semantics in about ten lines.
+
+### Scripted conversations
+
+Speech instructions can run on bumps or walking when their conditions match. With the
+game dialogue UI attached, the interpreter waits for each bubble to be dismissed or
+expire before continuing its action. This keeps NPC departure animations after the
+conversation. `SpeakNpc` arguments are map coordinates, not character indices.
+
+Ben's scripted Force reward is deferred until his departure animation finishes. Its
+drop square must be reachable from Luke and free of upper scenery; if no neighboring
+square is available, the reward goes into inventory. The authored scripts control Ben's
+repeat appearances, health requirements, and whether Luke already owns the Force; the
+engine does not disable the encounter after a successful handoff.
+
+## Zone script audit corrections
+
+The headless `--zone-script-audit` command scans every stored action and replays the
+corrected operations. See [ZONE-SCRIPT-AUDIT.md](ZONE-SCRIPT-AUDIT.md) for coverage and
+remaining authored references that cannot be resolved safely.
+
+- `DropsQuestItemAt(x,y)` asks whether an enabled quest-item hotspot exists there. It
+  does not wait for the player to drop something.
+- `DrawTile(x,y,tile)` paints a temporary frame above the scene using the same camera
+  transform. It never changes collision tiles. Full redraw, the corresponding tile or
+  rectangle redraw, and zone replacement clear temporary frames.
+- `HasNoActiveMonsters` ignores disabled or dead actors and counts enabled living
+  native actors regardless of hostility. Missing monster indices do not count as dead.
+- `ZoneIsSolved` sees generated sector progress and saved solved-zone state. Solving
+  either through scripts or generated pickups/trades records the sector's room zones too.
+- Negative `AddItem` values are ignored, following the reference implementation. Invalid
+  negative inventory entries in older saves are discarded on load.
+- `RemoveItem` consumes one real copy, including an equipped weapon when no spare is in
+  the bag, and removes ownership/ammo only when no copies remain.
+- `StopSound` now stops active effects and clears queued audio. Whether the original
+  opcode stopped only music remains uncertain; WebFun also leaves this operation empty.
+- Unknown conditions fail closed, so unsupported conditions cannot launch an action.

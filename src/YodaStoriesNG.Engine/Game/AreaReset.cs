@@ -8,7 +8,7 @@ public unsafe partial class GameEngine
     private readonly HashSet<Zone> _areasWithMovedObjects = new();
     private sealed record AreaInitialState(ushort[,,] Tiles, ZoneType Type,
         (ZoneObject Object, bool Enabled, ushort Argument)[] Hotspots,
-        int? Counter, int? Random, int? Initialized, HashSet<(int Zone, int Action)> DisabledActions);
+        int? Counter, int? Random, int? Initialized, int? SectorCounter, HashSet<(int Zone, int Action)> DisabledActions);
 
     private void CaptureInitialArea(Zone zone)
     {
@@ -18,6 +18,7 @@ public unsafe partial class GameEngine
             _state.Counters.TryGetValue(zone.Id, out var counter) ? counter : null,
             _state.ZoneRandom.TryGetValue(zone.Id, out var random) ? random : null,
             _state.Variables.TryGetValue(zone.Id + 1000, out var initialized) ? initialized : null,
+            _state.Variables.TryGetValue(zone.Id + 3000, out var sectorCounter) ? sectorCounter : null,
             _state.DisabledActions.Where(a => a.Zone == zone.Id).ToHashSet());
     }
 
@@ -63,6 +64,7 @@ public unsafe partial class GameEngine
             Restore(_state.Counters, zone.Id, initial.Counter);
             Restore(_state.ZoneRandom, zone.Id, initial.Random);
             Restore(_state.Variables, zone.Id + 1000, initial.Initialized);
+            Restore(_state.Variables, zone.Id + 3000, initial.SectorCounter);
         }
 
         // Item handoffs remain one-time events even when the physical puzzle is retried.
@@ -94,6 +96,7 @@ public unsafe partial class GameEngine
     {
         ResetUnsolvedArea();
         _initialAreas.Clear();
+        _doorReturnPoints.Clear();
         _areasWithMovedObjects.Clear();
     }
 }

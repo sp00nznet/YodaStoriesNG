@@ -703,14 +703,15 @@ public class DtaParser
         if (nameEnd > 10)
             character.Name = System.Text.Encoding.ASCII.GetString(data, 10, nameEnd - 10);
 
-        // The type is the uint16 after the name, at byte 26: 1 hero, 2 enemy, 4 weapon.
-        // (This used to be read from byte 4 - the 'H' of "ICHA", 72 for everyone - so Yoda
-        // Stories fell back to guessing from names, and still does until it is moved over.)
-        // Indiana Jones has no friendly characters: its townsfolk are tiles with scripts, so
-        // guessing let "Rock" - a rolling boulder - pass for someone to talk to.
-        character.Type = _data.GameType == GameType.IndianaJones
-            ? (CharacterType)BitConverter.ToUInt16(data, 26)
-            : InferCharacterType(character.Name, index);
+        // Both games store the character type after the fixed-size name field.
+        var storedType = (CharacterType)BitConverter.ToUInt16(data, 26);
+        character.Type = storedType is CharacterType.Hero or CharacterType.Enemy or CharacterType.Weapon
+            ? storedType : InferCharacterType(character.Name, index);
+        // Yoda uses an animated CHAR record for the collectible companion as well.
+        // Townsfolk and puzzle NPCs otherwise live in the scripted tile layer.
+        if (_data.GameType == GameType.YodaStories &&
+            character.Name.StartsWith("R2", StringComparison.OrdinalIgnoreCase))
+            character.Type = CharacterType.Friendly;
 
         // CHAR stores three animation frames, each with eight tile slots. The game uses
         // slots 0, 1, 3, and 6 for up, down, left, and right respectively. Slot 7 of the
@@ -749,7 +750,7 @@ public class DtaParser
     }
 
     /// <summary>
-    /// Infers character type from name since the data file type field doesn't parse correctly.
+    /// Fallback for character records whose stored type is unrecognized.
     /// </summary>
     private CharacterType InferCharacterType(string name, int index)
     {
