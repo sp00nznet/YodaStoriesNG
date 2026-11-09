@@ -1,5 +1,8 @@
 # Debug tools
 
+For the headless puzzle catalogue, offline local solutions, and replay-verified
+bot plans, see [Local puzzle plans](LOCAL-PUZZLE-PLANS.md).
+
 The engine ships with more inspection surface than most reimplementations, because
 reverse-engineering a format is mostly a matter of seeing what you just parsed. Everything
 here is available in a normal build - there is no separate debug configuration.
