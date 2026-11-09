@@ -24,13 +24,7 @@ public class Tile
     public bool IsItem => (Flags & TileFlags.Item) != 0;
     public bool IsCharacter => (Flags & TileFlags.Character) != 0;
 
-    /// <summary>
-    /// Whether it stops the hero. Objects, and characters standing in the tile layer (Indy's
-    /// pilots) - walked through, their bump scripts never fired.
-    /// </summary>
-    // ponytail: the original blocks on any tile in the object layer at all; items and
-    // decorations stay walkable here because the engine picks items up by walking onto them.
-    public bool IsSolid => IsObject || IsCharacter;
+
 }
 
 /// <summary>

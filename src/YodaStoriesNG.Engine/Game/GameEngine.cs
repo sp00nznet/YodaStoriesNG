@@ -233,6 +233,7 @@ public unsafe partial class GameEngine : IDisposable
 
         var parser = new DtaParser();
         _gameData = parser.Parse(dataFilePath);
+        CaptureOriginalAreas();
 
         // Set palette animation for game type (different games have different cycling color ranges)
         Palette.SetGameType(_gameData.GameType);
@@ -254,17 +255,7 @@ public unsafe partial class GameEngine : IDisposable
             return false;
         }
 
-        // Initialize action executor
-        _actionExecutor = new ActionExecutor(_gameData, _state);
-        _actionExecutor.OnHeroRelocated += CancelSmoothMovement;
-        _actionExecutor.IsDialogueActive = () => _messages.HasDialogue;
-        _actionExecutor.OnDialogue += (speaker, text) => _messages.ShowDialogue(speaker, text);
-        _actionExecutor.OnItemAdded += RegisterScriptedItem;
-
-        // Wire script events once; SuppressDialogue handles initialization.
-        _actionExecutor.OnMessage += (text) => _messages.ShowMessage(text, MessageType.Info);
-        _actionExecutor.OnPlaySound += (soundId) => _sounds?.PlaySound(soundId);
-        _actionExecutor.OnStopSound += () => _sounds?.StopAllSounds();
+        InitializeActionExecutor();
 
         LoadSounds(_dataPath);
 
@@ -307,6 +298,7 @@ public unsafe partial class GameEngine : IDisposable
         _menuBar.OnSetScale += SetGraphicsScale;
         _movementBindings = KeyBindings.Load();
         _smoothMovement = _smoothMovementRequested = _movementBindings.SmoothMovement;
+        _state.SmoothMovementEnabled = _smoothMovement;
         _menuBar.SmoothMovement = _smoothMovementRequested;
         _menuBar.OnToggleSmoothMovement += () => SetSmoothMovement(!_smoothMovementRequested);
         _menuBar.OnShowKeyboardControls += ShowKeyboardControls;
@@ -452,8 +444,9 @@ public unsafe partial class GameEngine : IDisposable
 
             // Update game data
             CancelSmoothMovement();
-            ResetAreaTracking();
+            _doorReturnPoints.Clear();
             _gameData = newGameData;
+            CaptureOriginalAreas();
 
             // Each game has its own palette; switch before the atlas is rebuilt from it
             Palette.SetGameType(_gameData.GameType);
@@ -561,7 +554,7 @@ public unsafe partial class GameEngine : IDisposable
 
         // Finish the outgoing visit before applying another game's collection flags.
         CancelSmoothMovement();
-        ResetAreaTracking();
+        _doorReturnPoints.Clear();
         // Apply save data to game state
         SaveGameManager.ApplyToGameState(saveData, _state);
         // Older saves kept collected weapons only in the cycling list.
@@ -590,6 +583,8 @@ public unsafe partial class GameEngine : IDisposable
         var world = new WorldMap
         {
             Planet = worldData.Planet,
+            Seed = worldData.Seed,
+            GenerationSize = worldData.GenerationSize,
             MissionNumber = worldData.MissionNumber,
             StartingZoneId = worldData.StartingZoneId,
             LandingZoneId = worldData.LandingZoneId,
@@ -695,14 +690,51 @@ public unsafe partial class GameEngine : IDisposable
         }
     }
 
+    private void InitializeActionExecutor()
+    {
+        // Initialize action executor
+        _actionExecutor = new ActionExecutor(_gameData!, _state);
+        _actionExecutor.OnHeroRelocated += () =>
+        {
+            CancelSmoothMovement();
+            _bot?.NotifyScriptedRelocation();
+        };
+        _actionExecutor.DebugTrace = (kind,detail) => _bot?.TraceDebug(kind,detail);
+        _actionExecutor.IsDialogueActive = () => _messages.HasDialogue;
+        _actionExecutor.ItemUseScriptCompleted += (item,x,y) =>
+        {
+            if(_sectorPuzzles?.CanPlaceItem(item,x,y)!=true || !_state.HasItem(item)) return;
+            if(_sectorPuzzles.PlaceItem(item,x,y) && _state.CurrentZone is { } zone)
+            {
+                _sectorPuzzles.Refresh(zone);
+                SyncSectorMission();
+            }
+        };
+        _actionExecutor.OnDialogue += (speaker, text) => _messages.ShowDialogue(speaker, text);
+        _actionExecutor.OnItemAdded += RegisterScriptedItem;
+        _actionExecutor.OnItemRemoved += item=>_bot?.NoteScriptConsumedItem(item);
+        _actionExecutor.OnActionStarted += (zone,action)=>_bot?.NoteScriptActionStarted(zone,action);
+
+        // Wire script events once; SuppressDialogue handles initialization.
+        _actionExecutor.OnMessage += (text) => _messages.ShowMessage(text, MessageType.Info);
+        _actionExecutor.OnPlaySound += (soundId) => _sounds?.PlaySound(soundId);
+        _actionExecutor.OnStopSound += () => _sounds?.StopAllSounds();
+
+    }
+
     /// <summary>
     /// Starts a new game.
     /// </summary>
     public void StartNewGame()
     {
+        _localPuzzleCache.Clear();_puzzleDataFingerprint=null;
+        _bot?.Stop();
         CancelSmoothMovement();
-        ResetAreaTracking();
+        _doorReturnPoints.Clear();
         _state.Reset();
+        RestoreOriginalAreas();
+        _puzzleDataFingerprint=PuzzleCatalogue.Compile(_gameData!).DataFingerprint;
+        _state.WorldSize = _selectedWorldSize;
         ResetPlayerAnimation();
         _messages.Clear();
 
@@ -728,8 +760,7 @@ public unsafe partial class GameEngine : IDisposable
         _worldGenerator = new WorldGenerator(_gameData!);
         _worldGenerator.DumpDagobahInfo();  // Debug: print Dagobah zone analysis
         var world = _worldGenerator.GenerateWorld(_selectedWorldSize);
-        _state.WorldSeed = world.Seed;
-        Console.WriteLine($"Generated {_selectedWorldSize} world ({world.GridWidth}x{world.GridHeight} grid), seed {world.Seed}");
+        Console.WriteLine($"Generated {_selectedWorldSize} world ({world.GridWidth}x{world.GridHeight} grid)");
 
         _sectorPuzzles = null;
         if (world.Sectors.Count > 0)
@@ -777,27 +808,48 @@ public unsafe partial class GameEngine : IDisposable
             _actionExecutor.SuppressDialogue = false;
         }
 
-        // Initialize debug tools
-        _debugTools = new DebugTools(_gameData!, _state, _worldGenerator);
-        _debugOverlay = new DebugOverlay(_gameData!, _state, _worldGenerator);
-        _debugMapWindow = new DebugMapWindow(_state, _worldGenerator, _gameData!);
-        _scriptViewer = new ScriptEditorWindow(_state, _gameData!);
-        _scriptViewer.OnTeleportToZone += TeleportToZoneFromEditor;
-        _scriptViewer.OnJumpToBot += JumpToBotZone;
-        _assetViewer = new AssetViewerWindow(_gameData!);
-        _saveInspector = new SaveGameEditor();
-        _zoneEditor = new ZoneEditorWindow(_state, _gameData!);
-        _zoneEditor.OnTeleportToZone += TeleportToZoneFromEditor;
+        if (!_headless)
+        {
+            // Initialize debug tools
+            _debugTools = new DebugTools(_gameData!, _state, _worldGenerator);
+            _debugOverlay = new DebugOverlay(_gameData!, _state, _worldGenerator);
+            _debugMapWindow = new DebugMapWindow(_state, _worldGenerator, _gameData!);
+            _scriptViewer = new ScriptEditorWindow(_state, _gameData!);
+            _scriptViewer.OnTeleportToZone += TeleportToZoneFromEditor;
+            _scriptViewer.OnJumpToBot += JumpToBotZone;
+            _assetViewer = new AssetViewerWindow(_gameData!);
+            _saveInspector = new SaveGameEditor();
+            _zoneEditor = new ZoneEditorWindow(_state, _gameData!);
+            _zoneEditor.OnTeleportToZone += TeleportToZoneFromEditor;
+        }
 
         // Initialize bot and auto-start for debugging
         if (_worldGenerator != null)
         {
-            _bot = new MissionBot(_state, _gameData!, _worldGenerator);
+            _bot = new MissionBot(_state, _gameData!, _worldGenerator, BotActionPending,
+                (zone, x, y) => !IsGroundBlocked(zone, x, y) && !IsScriptedActorTile(zone, x, y),PlanLocalPuzzle);
             _bot.OnActionRequested += HandleBotAction;
             // Don't auto-start - let user enable with B key
             // _bot.Start();
             // _messages.ShowMessage("Bot AUTO-STARTED - Press B to disable", MessageType.System);
         }
+    }
+
+    private string? _botWaitReason;
+    private int _botWaitCalls;
+    private bool BotActionPending()
+    {
+        string? reason=_playerStep!=null ? $"step:{_playerStep.FromX},{_playerStep.FromY}->{_playerStep.ToX},{_playerStep.ToY}" :
+            _actionExecutor?.IsBusy==true ? "script" : _actionExecutor?.RequestedZoneChange!=null ? "zone-change" :
+            _messages.HasDialogue ? "dialogue" : null;
+        _botWaitCalls=reason==_botWaitReason ? _botWaitCalls+1 : 0;
+        if(reason!=null && (reason!=_botWaitReason || _botWaitCalls==120))
+            _bot?.TraceDebug("engine-pending",new { Reason=reason,ZoneChange=_actionExecutor?.RequestedZoneChange,
+                PendingInstruction=_actionExecutor?.PendingInstructionIndex,StepElapsed=_playerStep?.Elapsed,
+                StepDuration=_playerStep?.Duration,_smoothMovement,_smoothMovementRequested,MovementUIBlocked,
+                HeroControlAvailable,_state.Health,_discardMovementTime,Dialogue=_messages.HasDialogue });
+        _botWaitReason=reason;
+        return reason!=null;
     }
 
     /// <summary>
@@ -807,10 +859,13 @@ public unsafe partial class GameEngine : IDisposable
     {
         if (_bot == null && _worldGenerator != null)
         {
-            _bot = new MissionBot(_state, _gameData!, _worldGenerator);
+            _bot = new MissionBot(_state, _gameData!, _worldGenerator, BotActionPending,
+                (zone, x, y) => !IsGroundBlocked(zone, x, y) && !IsScriptedActorTile(zone, x, y),PlanLocalPuzzle);
             _bot.OnActionRequested += HandleBotAction;
         }
         _bot?.Start();
+        CancelSmoothMovement();
+        _bot?.SyncDoorReturns(_doorReturnPoints);
         _messages.ShowMessage("Bot ENABLED - Press B to disable", MessageType.System);
     }
 
@@ -820,6 +875,7 @@ public unsafe partial class GameEngine : IDisposable
     public void DisableBot()
     {
         _bot?.Stop();
+        CancelSmoothMovement();
         _messages.ShowMessage("Bot DISABLED", MessageType.System);
     }
 
@@ -870,6 +926,9 @@ public unsafe partial class GameEngine : IDisposable
     /// </summary>
     private void HandleBotAction(BotActionType type, int x, int y, Direction dir)
     {
+        _bot?.TraceDebug("engine-action",new { Type=type,X=x,Y=y,Direction=dir,
+            SmoothMovement=_smoothMovement,StepPending=_playerStep!=null,
+            ScriptBusy=_actionExecutor?.IsBusy,Dialogue=_messages.HasDialogue });
         switch (type)
         {
             case BotActionType.Move:
@@ -896,6 +955,21 @@ public unsafe partial class GameEngine : IDisposable
                 TryMovePlayer(dx, dy, dir, false);
                 break;
 
+            case BotActionType.Bump:
+                // The action button can bump a walkable middle-layer picture
+                // too (for example a searchable roof). Moving onto it does not
+                // necessarily run its Bump script.
+                if(_state.CurrentZone!=null && HeroControlAvailable && !_state.IsPaused && !_messages.HasDialogue &&
+                    _playerStep==null && _actionExecutor?.IsBusy!=true &&
+                    (Math.Abs(x-_state.PlayerX)+Math.Abs(y-_state.PlayerY)==1 || HasAuthoredBumpStance(x,y)) &&
+                    _state.CurrentZone.GetTile(x,y,1)!=ushort.MaxValue)
+                {
+                    _state.PlayerDirection=dir;
+                    if(_sectorPuzzles?.Bump(x,y)==true) SyncSectorMission();
+                    else BumpInto(x,y);
+                }
+                break;
+
             case BotActionType.Pull:
             {
                 var (pdx, pdy) = dir switch { Direction.Up => (0, -1), Direction.Down => (0, 1), Direction.Left => (-1, 0), _ => (1, 0) };
@@ -917,6 +991,11 @@ public unsafe partial class GameEngine : IDisposable
                 _state.SelectedItem = savedItem; // Restore item after talking
                 break;
 
+            case BotActionType.UseItemAt:
+                _state.PlayerDirection = dir;
+                UseItemAt(_state.SelectedItem,x,y,_state.CurrentZoneId);
+                break;
+
             case BotActionType.UseItem:
                 _state.PlayerDirection = dir;
                 UseItem();
@@ -931,7 +1010,7 @@ public unsafe partial class GameEngine : IDisposable
     /// <summary>
     /// Loads a zone by ID.
     /// </summary>
-    public void LoadZone(int zoneId, int? spawnX = null, int? spawnY = null, bool enteredByPlane = false)
+    public void LoadZone(int zoneId, int? spawnX = null, int? spawnY = null, bool enteredByPlane = false, bool enteredThroughDoor = false)
     {
         if (zoneId < 0 || zoneId >= _gameData!.Zones.Count)
         {
@@ -949,19 +1028,18 @@ public unsafe partial class GameEngine : IDisposable
         CancelSmoothMovement();
         if (!ReferenceEquals(_state.CurrentZone, zone))
         {
-            ResetUnsolvedArea();
             _state.Projectiles.Clear();
         }
-        CaptureInitialArea(zone);
         _state.CurrentZoneId = zoneId;
         _state.CurrentZone = zone;
         _actionExecutor?.ResetForZone();
         if (enteredByPlane && _gameData.GameType == GameType.YodaStories)
             PrepareXWingLanding(zone);
         _state.MarkZoneVisited(zoneId);
-        // HideHero is zone-script state. A new zone must not inherit a hidden hero from a
-        // previous bump or interrupted cutscene; zone-entry actions can hide it again.
-        _state.HeroVisible = true;
+        // Flights can cross intermediate animation rooms which do not repeat
+        // HideHero. Preserve that explicit flight state until ShowHero lands Luke;
+        // ordinary room entry still clears an interrupted source cutscene.
+        _state.HeroVisible = !enteredByPlane || _state.HeroVisible;
 
         // Notify script viewer of zone change
         _scriptViewer?.JumpToCurrentZone();
@@ -1008,6 +1086,11 @@ public unsafe partial class GameEngine : IDisposable
             }
         }
 
+        // Some nested-room templates place a live doorway inside a tiny opaque
+        // wall pocket. Preserve the room layout while opening the shortest
+        // one- or two-tile approach from the actual entry landing.
+        DoorwayAccess.OpenSealedRoomEntrances(_gameData,_state,_worldGenerator?.CurrentWorld,zone);
+
         Console.WriteLine($"Zone {zoneId}: {zone.Width}x{zone.Height}, planet: {zone.Planet}, spawn: ({_state.PlayerX},{_state.PlayerY})");
 
         // Debug: show zone objects
@@ -1047,10 +1130,27 @@ public unsafe partial class GameEngine : IDisposable
         // Execute zone entry actions (suppress dialogue - it should only show from player interaction)
         if (_actionExecutor != null)
         {
+            // Prevent authored counter gates from trapping the player behind
+            // a route when the current room has no way to reach their value.
+            if (_state.CurrentZone is { } enteringZone)
+                WorldGenerator.RepairUnreachableSectorCounterGates(enteringZone, _state);
             _actionExecutor.SuppressDialogue = true;
-            _actionExecutor.ExecuteZoneActions(ActionTrigger.ZoneEnter, enteredByPlane);
+            // Native arrival scripts run after room transitions as well as flights.
+            // Door arrivals do not prepare or redraw an X-wing landing.
+            // Walking across an outdoor boundary must not run the vehicle
+            // disembarking sequence and relocate the hero onto a dock.
+            bool arrivalPhase=enteredByPlane || enteredThroughDoor;
+            _actionExecutor.ExecuteZoneActions(ActionTrigger.ZoneEnter, arrivalPhase);
             _actionExecutor.SuppressDialogue = false;
         }
+
+        // Zone entry scripts can place authored locks and terrain after
+        // world generation. Re-check required interactions against the live
+        // initialized layout so a generated route repair is not invalidated
+        // on the first visit.
+        if (_worldGenerator?.CurrentWorld is { } currentWorld && _state.CurrentZone is { } activeZone)
+            _worldGenerator.RepairInitializedSectorInteraction(currentWorld, zoneId, activeZone,
+                _state.PlayerX, _state.PlayerY, _state);
 
         // Entry scripts choose which alternative reward hotspots are enabled.
         _sectorPuzzles?.Refresh(zone);
@@ -1072,6 +1172,9 @@ public unsafe partial class GameEngine : IDisposable
             var currentTime = DateTime.UtcNow;
             var deltaTime = (currentTime - lastTime).TotalSeconds;
             lastTime = currentTime;
+            // A synchronous route search pauses gameplay. Do not advance enemies,
+            // movement or the bot's watchdog by the time spent computing a plan.
+            deltaTime = Math.Max(0, deltaTime - (_bot?.ConsumePlanningSeconds() ?? 0));
 
             // Process input
             ProcessInput();
@@ -1119,7 +1222,13 @@ public unsafe partial class GameEngine : IDisposable
                 if (evt.Window.WindowID == mainWindowId)
                 {
                     if (evt.Window.Event == (byte)SDLWindowEventID.FocusLost)
-                    { _movementFocused = false; CancelSmoothMovement(); }
+                    {
+                        _movementFocused = false;
+                        _suppressHeldMovement = true;
+                        ClearItemDrag();
+                        // Preserve autonomous steps and queued bot actions in the background.
+                        if (_bot?.IsRunning != true) CancelSmoothMovement();
+                    }
                     else if (evt.Window.Event == (byte)SDLWindowEventID.FocusGained)
                     { _movementFocused = true; _suppressHeldMovement = true; _discardMovementTime = true; }
                 }
@@ -1604,7 +1713,6 @@ public unsafe partial class GameEngine : IDisposable
         const int SDLK_RIGHT = 1073741903;
         const int SDLK_0 = 48;
         const int SDLK_1 = 49;
-        const int SDLK_8 = 56;
         const int SDLK_9 = 57;
         const int SDLK_PAGEUP = 1073741899;
         const int SDLK_PAGEDOWN = 1073741902;
@@ -1625,7 +1733,6 @@ public unsafe partial class GameEngine : IDisposable
         const int SDLK_w = 119;
         const int SDLK_x = 120;
         const int SDLK_F1 = 1073741882;
-        const int SDLK_F2 = 1073741883;
 
         // Handle debug overlay input first
         if (_debugOverlay?.IsVisible == true)
@@ -2000,7 +2107,6 @@ public unsafe partial class GameEngine : IDisposable
         }
 
         // Pull the block to where the player was standing
-        MarkObjectsMoved(_state.CurrentZone);
         _state.CurrentZone.SetTile(oldPlayerX, oldPlayerY, 1, behindTile);
         _state.CurrentZone.SetTile(behindX, behindY, 1, 0xFFFF);
         _messages.ShowMessage("*pull*", MessageType.Info);
@@ -2014,9 +2120,7 @@ public unsafe partial class GameEngine : IDisposable
         var tile = _gameData.Tiles[tileId];
         if (tile.IsObject || !(tile.IsItem || tile.IsWeapon || tile.IsCharacter)) return false;
         // A trade target remains an actor until its script explicitly hands it over.
-        if (zone.Actions.Any(a => a.Conditions.Any(c =>
-            c.Opcode is ConditionOpcode.PlacedItemIs or ConditionOpcode.PlacedItemIsNot && c.Arguments.Count >= 4 &&
-            c.Arguments[0] == x && c.Arguments[1] == y && c.Arguments[2] == 1 && c.Arguments[3] == tileId))) return true;
+        if (ScriptedActorTiles.IsTradeTarget(zone,x,y,tileId)) return true;
         // Flavor text which has finished/disabled itself must not permanently lock a pickup.
         if (_actionExecutor != null && ReferenceEquals(zone, _state.CurrentZone))
             return _actionExecutor.WouldHandleBump(x, y);
@@ -2028,12 +2132,12 @@ public unsafe partial class GameEngine : IDisposable
 
     private void TryMovePlayer(int dx, int dy, Direction direction, bool tryPull = false)
     {
-        if (_smoothMovement && !_committingSmoothStep)
+        if (_smoothMovement && !_committingSmoothStep && _bot?.IsRunning != true)
         {
             RequestSmoothPlayerStep(dx, dy, direction, tryPull);
             return;
         }
-        if (_actionExecutor?.IsBusy == true || !_state.HeroVisible)
+        if (_actionExecutor?.IsBusy == true || !HeroControlAvailable)
             return;
 
         _state.PlayerDirection = direction;
@@ -2061,6 +2165,9 @@ public unsafe partial class GameEngine : IDisposable
             TravelToPlanet(xwingHotspot);
             return;
         }
+        var vehicleHotspot = _state.CurrentZone.Objects.FirstOrDefault(obj =>
+            obj.Enabled && obj.X == newX && obj.Y == newY &&
+            obj.Type is ZoneObjectType.VehicleToPrimary or ZoneObjectType.VehicleToSecondary);
 
         // The sector's trading NPC is a tile that talks when bumped
         if (_sectorPuzzles?.Bump(newX, newY) == true)
@@ -2086,7 +2193,6 @@ public unsafe partial class GameEngine : IDisposable
         if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
         {
             var tile = _gameData.Tiles[middleTile];
-            bool diagonal = dx != 0 && dy != 0;
 
             if (tile.IsDraggable && dx != 0 && dy != 0) return;
             if (tile.IsDraggable)
@@ -2099,13 +2205,12 @@ public unsafe partial class GameEngine : IDisposable
                 if (pushX >= 0 && pushX < _state.CurrentZone.Width &&
                     pushY >= 0 && pushY < _state.CurrentZone.Height)
                 {
-                    // Only into an empty square, as the original (WebFun hero.ts _doDrag): a block
-                    // pushed onto an item used to overwrite it.
                     var destTile = _state.CurrentZone.GetTile(pushX, pushY, 1);
-                    if (!IsGroundBlocked(_state.CurrentZone, pushX, pushY) && destTile == 0xFFFF)
+                    if (!IsGroundBlocked(_state.CurrentZone, pushX, pushY) &&
+                        (destTile == 0xFFFF || (destTile < _gameData.Tiles.Count &&
+                            (!_gameData.Tiles[destTile].IsObject))))
                     {
                         // Push the block
-                        MarkObjectsMoved(_state.CurrentZone);
                         _state.CurrentZone.SetTile(pushX, pushY, 1, middleTile);
                         _state.CurrentZone.SetTile(newX, newY, 1, 0xFFFF);
                         _messages.ShowMessage("*push*", MessageType.Info);
@@ -2127,12 +2232,12 @@ public unsafe partial class GameEngine : IDisposable
                     return;
                 }
             }
-            else if (tile.IsSolid && !IsNPCMapSprite(newX, newY, middleTile))
+            else if (tile.IsObject && vehicleHotspot == null)
             {
                 // Collision - trigger bump action
                 var bumpZone = _state.CurrentZone;
                 BumpInto(newX, newY);
-                if (!_smoothMovement && !tryPull && (dx == 0 || dy == 0) &&
+                if (_bot?.IsRunning != true && !_smoothMovement && !tryPull && (dx == 0 || dy == 0) &&
                     ReferenceEquals(bumpZone, _state.CurrentZone) && !_messages.HasDialogue &&
                     _actionExecutor?.IsBusy != true && _state.HeroVisible)
                     foreach (var slide in dx == 0 ? new[] { (-1, dy), (1, dy) } : new[] { (dx, 1), (dx, -1) })
@@ -2145,14 +2250,6 @@ public unsafe partial class GameEngine : IDisposable
             }
         }
 
-        // A tile a bump script is waiting for is bumped, not walked over - in the original
-        // anything in the object layer stops you. (Pacal is an item tile; walking onto him
-        // picked him up and skipped the thank-you that wins the game.)
-        if (middleTile != 0xFFFF && _actionExecutor?.WouldHandleBump(newX, newY) == true)
-        {
-            BumpInto(newX, newY);
-            return;
-        }
         // Reserved destinations cannot be entered while another actor is moving.
         if (_smoothMovement && MovementReserved(newX, newY)) return;
 
@@ -2209,8 +2306,14 @@ public unsafe partial class GameEngine : IDisposable
         if (ReferenceEquals(arrivalZone, _state.CurrentZone))
             _sectorPuzzles?.Refresh(_state.CurrentZone!);
 
-        // Check for zone objects at new position
-        CheckZoneObjects();
+        // A native monster can drop its reward on a doorway. Preserve ordinary
+        // hotspot pickup ordering, but postpone travel until the loose tile is collected.
+        int arrivalTile=_state.CurrentZone!.GetTile(newX,newY,1);
+        bool pickupBeforeTravel=arrivalTile<_gameData!.Tiles.Count &&
+            (_gameData.Tiles[arrivalTile].IsItem || _gameData.Tiles[arrivalTile].IsWeapon) &&
+            !_gameData.Tiles[arrivalTile].IsObject && !IsScriptedActorTile(_state.CurrentZone,newX,newY) &&
+            _state.CurrentZone.Objects.Any(o=>o.Enabled && o.X==newX && o.Y==newY && IsTravelHotspot(o));
+        CheckZoneObjects(deferTravel:pickupBeforeTravel);
         if (!ReferenceEquals(arrivalZone, _state.CurrentZone)) return;
 
         // Check for Item tiles on layer 1 that can be picked up
@@ -2272,6 +2375,12 @@ public unsafe partial class GameEngine : IDisposable
             }
         }
 
+        if(pickupBeforeTravel && _state.CurrentZone.GetTile(newX,newY,1)==ushort.MaxValue &&
+            _actionExecutor?.IsBusy!=true && _state.HeroVisible && !_messages.HasDialogue)
+        {
+            CheckZoneObjects();
+            if(!ReferenceEquals(arrivalZone,_state.CurrentZone)) return;
+        }
         // Check for nearby friendly NPCs
         CheckNearbyNPCs();
     }
@@ -2308,83 +2417,15 @@ public unsafe partial class GameEngine : IDisposable
     /// <summary>
     /// Checks if a position is walkable (not blocked by walls or objects).
     /// </summary>
-    private bool IsGroundBlocked(Zone zone, int x, int y)
-    {
-        int ground = zone.GetTile(x, y, 0);
-        if (ground >= _gameData!.Tiles.Count || !_gameData.Tiles[ground].IsObject) return false;
-        // A walkable surface such as a bridge can cover otherwise impassable ground.
-        int surface = zone.GetTile(x, y, 1);
-        return surface >= _gameData.Tiles.Count || !_gameData.Tiles[surface].IsFloor ||
-            _gameData.Tiles[surface].IsObject;
-    }
+    // Native movement probes the middle layer. Object art may also be used as
+    // background (bridges, door approaches, and scenery under roofs).
+    private bool IsGroundBlocked(Zone zone, int x, int y) => TileCollision.IsGroundBlocked(_gameData!, zone, x, y);
 
-    private bool IsSpawnPositionWalkable(int x, int y, Zone zone)
-    {
-        // Check bounds
-        if (x < 0 || x >= zone.Width || y < 0 || y >= zone.Height)
-            return false;
+    private bool IsSpawnPositionWalkable(int x,int y,Zone zone) =>
+        ZoneArrival.SpawnWalkable(_gameData!,zone,x,y,(z,cx,cy)=>!IsGroundBlocked(z,cx,cy) && !IsScriptedActorTile(z,cx,cy));
 
-        if (IsGroundBlocked(zone, x, y)) return false;
-        if (IsScriptedActorTile(zone, x, y)) return false;
-
-        // Check middle layer tile
-        var middleTile = zone.GetTile(x, y, 1);
-        if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
-        {
-            var tile = _gameData.Tiles[middleTile];
-            if (tile.IsSolid && !tile.IsDraggable)
-                return false;
-        }
-
-        return true;
-    }
-
-    /// <summary>
-    /// Finds the nearest walkable position to a target position using spiral search.
-    /// </summary>
-    private (int x, int y)? FindNearestWalkablePosition(int startX, int startY, Zone zone)
-    {
-        // Spiral search pattern
-        int maxRadius = Math.Max(zone.Width, zone.Height);
-
-        for (int radius = 1; radius < maxRadius; radius++)
-        {
-            // Search in a square pattern around the start point
-            for (int dy = -radius; dy <= radius; dy++)
-            {
-                for (int dx = -radius; dx <= radius; dx++)
-                {
-                    // Only check perimeter of the square
-                    if (Math.Abs(dx) != radius && Math.Abs(dy) != radius)
-                        continue;
-
-                    int x = startX + dx;
-                    int y = startY + dy;
-
-                    if (IsSpawnPositionWalkable(x, y, zone))
-                        return (x, y);
-                }
-            }
-        }
-
-        // Fallback: try center of zone
-        int centerX = zone.Width / 2;
-        int centerY = zone.Height / 2;
-        if (IsSpawnPositionWalkable(centerX, centerY, zone))
-            return (centerX, centerY);
-
-        // Last resort: find any walkable position
-        for (int y = 1; y < zone.Height - 1; y++)
-        {
-            for (int x = 1; x < zone.Width - 1; x++)
-            {
-                if (IsSpawnPositionWalkable(x, y, zone))
-                    return (x, y);
-            }
-        }
-
-        return null;
-    }
+    private (int x,int y)? FindNearestWalkablePosition(int x,int y,Zone zone) =>
+        ZoneArrival.NearestSpawn(_gameData!,zone,x,y,(z,cx,cy)=>!IsGroundBlocked(z,cx,cy) && !IsScriptedActorTile(z,cx,cy));
 
     private void HandleZoneTransition(int dx, int dy)
     {
@@ -2511,7 +2552,8 @@ public unsafe partial class GameEngine : IDisposable
                         }
 
                         LoadZone(destZoneId, spawnX, spawnY,
-                            enteredByPlane: obj.Type is ZoneObjectType.VehicleToSecondary or ZoneObjectType.VehicleToPrimary);
+                            enteredByPlane: obj.Type is ZoneObjectType.VehicleToSecondary or ZoneObjectType.VehicleToPrimary,
+                            enteredThroughDoor: obj.Type is ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit);
                         return;
                     }
                     break;
@@ -2601,6 +2643,15 @@ public unsafe partial class GameEngine : IDisposable
                     spawnY = edgeCheckY;
                 }
 
+                // Loading restores surviving actors at their authored spawn positions.
+                // Do not place the hero on one, even if its floor tile is walkable.
+                if (ZoneArrival.HasLivingActor(destZone, spawnX, spawnY, _state))
+                {
+                    Console.WriteLine($"Edge transition blocked: dest zone {connectedZoneId} actor at ({spawnX},{spawnY})");
+                    _messages.ShowMessage("Can't go that way", MessageType.Info);
+                    return;
+                }
+
                 Console.WriteLine($"Edge transition {direction}: zone {_state.CurrentZoneId} -> {connectedZoneId} at ({spawnX},{spawnY})");
                 _state.PreviousZoneId = _state.CurrentZoneId;
                 LoadZone(connectedZoneId.Value, spawnX, spawnY);
@@ -2632,7 +2683,12 @@ public unsafe partial class GameEngine : IDisposable
         SyncSectorMission();
     }
 
-    private void CheckZoneObjects()
+    private static bool IsTravelHotspot(ZoneObject obj) => obj.Type is
+        ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit or ZoneObjectType.Teleporter or
+        ZoneObjectType.VehicleToPrimary or ZoneObjectType.VehicleToSecondary or
+        ZoneObjectType.XWingFromDagobah or ZoneObjectType.XWingToDagobah;
+
+    private void CheckZoneObjects(bool deferTravel=false)
     {
         foreach (var obj in _state.CurrentZone!.Objects)
         {
@@ -2641,6 +2697,8 @@ public unsafe partial class GameEngine : IDisposable
 
             if (obj.X != _state.PlayerX || obj.Y != _state.PlayerY)
                 continue;
+
+            if(deferTravel && IsTravelHotspot(obj)) continue;
 
             switch (obj.Type)
             {
@@ -2723,15 +2781,8 @@ public unsafe partial class GameEngine : IDisposable
                         var destZone = _gameData.Zones[destZoneId];
                         int? spawnX = null, spawnY = null;
 
-                        // A vehicle lands on its counterpart (WebFun use-transport.ts).
-                        bool byVehicle = obj.Type is ZoneObjectType.VehicleToSecondary or ZoneObjectType.VehicleToPrimary;
-                        var counterpart = obj.Type == ZoneObjectType.VehicleToSecondary
-                            ? ZoneObjectType.VehicleToPrimary : ZoneObjectType.VehicleToSecondary;
-                        if (byVehicle && destZone.Objects.FirstOrDefault(o => o.Type == counterpart) is { } landing)
-                            (spawnX, spawnY) = (landing.X, landing.Y);
-
                         // Look for a door that leads back to current zone, or a spawn point
-                        foreach (var destObj in byVehicle && spawnX.HasValue ? Enumerable.Empty<ZoneObject>() : destZone.Objects)
+                        foreach (var destObj in destZone.Objects)
                         {
                             // Check for door leading back, or door with 65535 (return door)
                             if ((destObj.Type == ZoneObjectType.DoorEntrance || destObj.Type == ZoneObjectType.DoorExit) &&
@@ -2749,7 +2800,8 @@ public unsafe partial class GameEngine : IDisposable
                         }
 
                         LoadZone(destZoneId, spawnX, spawnY,
-                            enteredByPlane: obj.Type is ZoneObjectType.VehicleToSecondary or ZoneObjectType.VehicleToPrimary);
+                            enteredByPlane: obj.Type is ZoneObjectType.VehicleToSecondary or ZoneObjectType.VehicleToPrimary,
+                            enteredThroughDoor: obj.Type is ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit);
                     }
                     break;
 
@@ -2816,7 +2868,7 @@ public unsafe partial class GameEngine : IDisposable
                 (useX, useY) = (_state.PlayerX, _state.PlayerY);
             if (_state.CurrentZone == null || useX < 0 || useY < 0 ||
                 useX >= _state.CurrentZone.Width || useY >= _state.CurrentZone.Height ||
-                Math.Abs(useX - _state.PlayerX) + Math.Abs(useY - _state.PlayerY) > 1)
+                !ItemUseReach.Contains(_gameData!,usedItemId,_state.PlayerX,_state.PlayerY,useX,useY))
             {
                 _messages.ShowMessage("Move next to the target to use that item.", MessageType.Info);
                 return;
@@ -2849,7 +2901,12 @@ public unsafe partial class GameEngine : IDisposable
             bool scripted = _actionExecutor?.HandledItemPlacement == true;
             bool waiting = _actionExecutor?.IsBusy == true || _messages.HasDialogue || _actionExecutor?.RequestedZoneChange != null;
             bool sectorHandled = false;
-            if (_sectorPuzzles != null && !scripted && !waiting && _state.HasItem(usedItemId))
+            // A broad animation script may run for a placed-item condition
+            // before the generated sector puzzle sees the matching lock. Let
+            // the native puzzle handle its exact required-item hotspot when
+            // the script left the item in inventory and did not solve it.
+            if (_sectorPuzzles != null && !waiting && _state.HasItem(usedItemId) &&
+                (!scripted || _sectorPuzzles.CanPlaceItem(usedItemId,useX,useY)))
                 sectorHandled = _sectorPuzzles.PlaceItem(usedItemId, useX, useY);
             if (_sectorPuzzles != null && _state.CurrentZone != null)
             {
@@ -3493,6 +3550,7 @@ public unsafe partial class GameEngine : IDisposable
             Type = projType
         };
         _state.Projectiles.Add(projectile);
+        ApplyScriptedWeaponStrike(weaponId);
 
         if (_state.SelectedWeapon.HasValue)
             PlayWeaponSound(WeaponCharacterFor(_state.SelectedWeapon.Value));
@@ -3681,8 +3739,9 @@ public unsafe partial class GameEngine : IDisposable
 
         // 2. Spawn the zone's IZAX monsters
         {
-            foreach (var entity in _state.CurrentZone.Monsters)
+            for (int monsterIndex = 0; monsterIndex < _state.CurrentZone.Monsters.Count; monsterIndex++)
             {
+                var entity = _state.CurrentZone.Monsters[monsterIndex];
                 // Skip invalid entries
                 if (entity.CharacterId == 0xFFFF)
                     continue;
@@ -3690,12 +3749,16 @@ public unsafe partial class GameEngine : IDisposable
                 var npc = new NPC
                 {
                     CharacterId = entity.CharacterId,
+                    NativeMonsterIndex = monsterIndex,
                     X = entity.X,
                     Y = entity.Y,
                     StartX = entity.X,
                     StartY = entity.Y,
+                    Waypoints=Enumerable.Range(0,entity.Waypoints.Length/2)
+                        .Select(i=>(X:entity.Waypoints[i*2],Y:entity.Waypoints[i*2+1]))
+                        .Where(p=>p.X>=0 && p.Y>=0).ToArray(),
                     Direction = Direction.Down,
-                    IsEnabled = true,
+                    IsEnabled = !_state.DisabledMonsters.Contains($"{_state.CurrentZoneId}_{monsterIndex}"),
                     // Store the item this NPC will give when interacted with
                     // Loot is stored as tile + 1, so 0 and -1 both mean "nothing of its own"
                     CarriedItemId = entity.Loot > 0 ? entity.Loot - 1 : null,
@@ -3707,6 +3770,16 @@ public unsafe partial class GameEngine : IDisposable
                 // generated quest item; it does not mean this enemy drops nothing.
                 npc.DropsLoot = entity.DropsLoot;
                 npc.LootItemId = entity.Loot > 0 ? entity.Loot - 1 : -1;
+
+                // Keep the entry for MonsterIsDead/indexed scripts, but never respawn
+                // a defeated monster or award its loot again on a room revisit.
+                if (_state.DefeatedMonsters.Contains($"{_state.CurrentZoneId}_{monsterIndex}"))
+                {
+                    npc.Health = 0;
+                    npc.IsEnabled = false;
+                    npc.DropsLoot = false;
+                    npc.HasGivenItem = true;
+                }
 
                 // Log IZAX NPC spawn
                 var npcName = GetCharacterName(npc.CharacterId) ?? $"TileID #{npc.CharacterId}";
@@ -3777,7 +3850,12 @@ public unsafe partial class GameEngine : IDisposable
                 npc.Damage = character.AuxData.Damage;
             }
 
-            // Apply character weapon data for health (ignore invalid/placeholder values like 0xFFFF)
+            // CHWP health -1 makes a native actor invulnerable.
+            npc.IsInvulnerable=character.Weapon?.Health==ushort.MaxValue;
+            if(character.MovementType==3) npc.Behavior=NPCBehavior.Wandering;
+            else if(character.MovementType==11) npc.Behavior=NPCBehavior.Fleeing;
+            else if(character.MovementType==12) npc.Behavior=NPCBehavior.Animation;
+            else if(character.MovementType==10) npc.Behavior=NPCBehavior.Patrol;
             if (character.Weapon != null && character.Weapon.Health > 0 && character.Weapon.Health < 1000)
             {
                 npc.MaxHealth = character.Weapon.Health;
@@ -4230,6 +4308,7 @@ public unsafe partial class GameEngine : IDisposable
         if (_actionExecutor?.RequestedZoneChange is { } requested)
         {
             bool arrivingByVehicle = !_state.HeroVisible;
+            _state.SetSectorCounter(requested.ZoneId,_state.GetSectorCounter(_state.CurrentZoneId));
             _actionExecutor.ResetForZone();
             LoadZone(requested.ZoneId, requested.X, requested.Y, arrivingByVehicle);
             return true;
@@ -4237,6 +4316,19 @@ public unsafe partial class GameEngine : IDisposable
 
         if (_actionExecutor?.IsBusy == true || _state.CurrentZone == null)
             return false;
+
+        if (_actionExecutor?.PlacedOnVehicle is { } vehicle)
+        {
+            _actionExecutor.PlacedOnVehicle = null;
+            if (_state.CurrentZone.Objects.Contains(vehicle) && vehicle.Enabled &&
+                _state.PlayerX == vehicle.X && _state.PlayerY == vehicle.Y)
+            {
+                int source = _state.CurrentZoneId;
+                _bot?.TraceDebug("scripted-vehicle-departure",new { Zone=source,vehicle.X,vehicle.Y,Destination=vehicle.Argument });
+                CheckZoneObjects();
+                return source != _state.CurrentZoneId;
+            }
+        }
 
         var hotspot = _state.CurrentZone.Objects.FirstOrDefault(obj => obj.Enabled &&
             obj.X == _state.PlayerX && obj.Y == _state.PlayerY &&
@@ -4267,17 +4359,6 @@ public unsafe partial class GameEngine : IDisposable
         // Dialogue timers must advance even while their script is suspended.
         _messages.Update(deltaTime);
         UpdateSmoothMovement(deltaTime);
-
-        // The airfield's flight ends with a script putting the hero on the plane's square;
-        // standing there is what takes off (WebFun HotspotExecutionMode.Stand).
-        // (Checked once the speech that usually goes with it has been dismissed.)
-        // Remembered rather than read off the hero, whom input can move before then.
-        if (_actionExecutor?.PlacedOnVehicle is { } vehicle && !_messages.HasDialogue)
-        {
-            _actionExecutor.PlacedOnVehicle = null;
-            (_state.PlayerX, _state.PlayerY) = (vehicle.X, vehicle.Y);
-            CheckZoneObjects();
-        }
 
         // Update animation
         _state.AnimationTimer += deltaTime;
@@ -4317,8 +4398,7 @@ public unsafe partial class GameEngine : IDisposable
             _playerAnimationTimer = 0;
         }
 
-        // Speech pauses its script until dismissed, and the bot does not run while a script
-        // is paused - so the bot "presses a key" here, or every line waits out its timer.
+        // Bot actions cannot dismiss speech while its script is suspended.
         if (_bot?.IsRunning == true && _messages.HasDialogue)
             _messages.DismissDialogue();
 
@@ -4328,7 +4408,7 @@ public unsafe partial class GameEngine : IDisposable
             return;
         if (_actionExecutor?.IsBusy == true)
         {
-            if (_smoothMovement) CancelSmoothMovement();
+            if (_smoothMovement && !HeroControlAvailable) CancelSmoothMovement();
             UpdateCamera();
             return;
         }
@@ -4346,7 +4426,7 @@ public unsafe partial class GameEngine : IDisposable
             return;
         if (_actionExecutor?.IsBusy == true)
         {
-            if (_smoothMovement) CancelSmoothMovement();
+            if (_smoothMovement && !HeroControlAvailable) CancelSmoothMovement();
             UpdateCamera();
             return;
         }
@@ -4487,7 +4567,7 @@ public unsafe partial class GameEngine : IDisposable
             return;
 
         // ~85% chance to fire per eligible tick (rand() % 7 != 3 fires, so 6/7 ~ 85%)
-        if (_random.Next(7) == 3)
+        if (NpcRandom.Next(7) == 3)
             return;  // Miss this chance
 
         // Determine direction to player
@@ -4592,7 +4672,9 @@ public unsafe partial class GameEngine : IDisposable
                 if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
                 {
                     var tile = _gameData.Tiles[middleTile];
-                    if (tile.IsObject && !tile.IsDraggable)
+                    if (tile.IsObject && !tile.IsDraggable &&
+                        (projectile.IsEnemyProjectile || _gameData.GameType!=GameType.YodaStories ||
+                         !ScriptedWeaponUse.Permeable(_gameData,middleTile)))
                     {
                         projectile.IsActive = false;
                     }
@@ -4665,6 +4747,9 @@ public unsafe partial class GameEngine : IDisposable
     /// </summary>
     private void HandleNPCDeath(NPC npc)
     {
+        if (npc.NativeMonsterIndex >= 0 &&
+            !_state.DefeatedMonsters.Add($"{_state.CurrentZoneId}_{npc.NativeMonsterIndex}"))
+            return;
         // Release a defeated actor's reservations immediately, including mid-step deaths.
         _npcSteps.Remove(npc);
         var npcName = GetCharacterName(npc.CharacterId) ?? "Target";
@@ -4707,7 +4792,7 @@ public unsafe partial class GameEngine : IDisposable
     private void UpdateWanderingNPC(NPC npc)
     {
         // Random movement within wander radius of start position
-        var direction = _random.Next(4);
+        var direction = NpcRandom.Next(4);
         int dx = 0, dy = 0;
 
         switch (direction)
@@ -4741,7 +4826,7 @@ public unsafe partial class GameEngine : IDisposable
         var dy = Math.Sign(_state.PlayerY - npc.Y);
 
         // Prefer horizontal or vertical based on distance
-        if (_random.Next(2) == 0 && dx != 0)
+        if (NpcRandom.Next(2) == 0 && dx != 0)
         {
             npc.Direction = dx > 0 ? Direction.Right : Direction.Left;
             if (IsValidNPCPosition(npc.X + dx, npc.Y, npc))
@@ -4757,9 +4842,22 @@ public unsafe partial class GameEngine : IDisposable
             if (IsValidNPCPosition(npc.X, npc.Y + dy, npc))
             {
                 npc.Y += dy;
+                return;
             }
         }
     }
+
+    internal static IEnumerable<(int X,int Y)> FleeAlternatives(int x,int y,int playerX,int playerY)
+    {
+        int sx=Math.Sign(x-playerX),sy=Math.Sign(y-playerY);
+        // The native movement probe can sidestep a blocked cardinal target
+        // diagonally. Static corner artwork does not forbid that destination.
+        var sides=sy==0 && sx!=0 ? new[] { (X:sx,Y:-1),(X:sx,Y:1) } :
+            sx==0 && sy!=0 ? new[] { (X:-1,Y:sy),(X:1,Y:sy) } : Array.Empty<(int X,int Y)>();
+        return sides;
+    }
+    private IEnumerable<(int X,int Y)> FleeAlternatives(NPC npc) =>
+        FleeAlternatives(npc.X,npc.Y,_state.PlayerX,_state.PlayerY);
 
     private void UpdateFleeingNPC(NPC npc)
     {
@@ -4767,7 +4865,7 @@ public unsafe partial class GameEngine : IDisposable
         var dx = -Math.Sign(_state.PlayerX - npc.X);
         var dy = -Math.Sign(_state.PlayerY - npc.Y);
 
-        if (_random.Next(2) == 0 && dx != 0)
+        if (NpcRandom.Next(2) == 0 && dx != 0)
         {
             npc.Direction = dx > 0 ? Direction.Right : Direction.Left;
             if (IsValidNPCPosition(npc.X + dx, npc.Y, npc))
@@ -4783,8 +4881,18 @@ public unsafe partial class GameEngine : IDisposable
             if (IsValidNPCPosition(npc.X, npc.Y + dy, npc))
             {
                 npc.Y += dy;
+                return;
             }
         }
+        foreach(var escape in FleeAlternatives(npc))
+            if(IsValidNPCPosition(npc.X+escape.X,npc.Y+escape.Y,npc))
+            {
+                npc.Direction=StepFacing(escape.X,escape.Y,npc.Direction);
+                npc.X+=escape.X; npc.Y+=escape.Y;
+                return;
+            }
+        if(npc.X==_state.PlayerX || npc.Y==_state.PlayerY)
+            npc.Direction=GetDirectionToward(npc.X,npc.Y,_state.PlayerX,_state.PlayerY);
     }
 
     private Direction GetDirectionToward(int fromX, int fromY, int toX, int toY)
@@ -4825,7 +4933,7 @@ public unsafe partial class GameEngine : IDisposable
         if (middleTile != 0xFFFF && middleTile < _gameData!.Tiles.Count)
         {
             var tile = _gameData.Tiles[middleTile];
-            if (tile.IsSolid && !tile.IsDraggable && !IsNPCMapSprite(x, y, middleTile))
+            if (tile.IsObject && !tile.IsDraggable)
                 return false;
         }
 
@@ -5438,21 +5546,24 @@ public unsafe partial class GameEngine : IDisposable
     /// Gets the character index for a weapon tile.
     /// </summary>
     /// <summary>Runs the zone's bump scripts for walking (or pressing action) into (x, y).</summary>
-    /// <summary>Somewhere the hero can step without pushing: in the zone, no object, no one standing there.</summary>
-    private bool IsOpenFloor(int x, int y)
-    {
-        var zone = _state.CurrentZone;
-        if (zone == null || x < 0 || y < 0 || x >= zone.Width || y >= zone.Height) return false;
-        if (IsGroundBlocked(zone, x, y)) return false;
-        var t = zone.GetTile(x, y, 1);
-        if (t != 0xFFFF && (t >= _gameData!.Tiles.Count ||
-            _gameData.Tiles[t].IsSolid && !IsNPCMapSprite(x, y, t))) return false;
-        return !_state.ZoneNPCs.Any(n => n.IsEnabled && n.IsAlive && n.X == x && n.Y == y);
-    }
-
     private void BumpInto(int x, int y)
     {
         if (_actionExecutor == null) return;
+        var zone=_state.CurrentZone;
+        var door=zone?.Objects.FirstOrDefault(h=>h.Enabled && h.X==x && h.Y==y &&
+            h.Type is ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit);
+        bool hasAuthoredBump=zone?.Actions.Select((action,index)=>(action,index)).Any(p=>
+            !_state.DisabledActions.Contains((zone.Id,p.index)) && p.action.Conditions.Any(c=>
+                c.Opcode==ConditionOpcode.Bump && c.Arguments.Count>=2 &&
+                c.Arguments[0]==x && c.Arguments[1]==y)) == true;
+        // Some doors are entered by bumping their hotspot; they have no tile
+        // removal script to make the entrance walkable. Keep scripted/locked
+        // door bumps on their authored path.
+        if(door!=null && !hasAuthoredBump)
+        {
+            TravelThroughDoor(door);
+            return;
+        }
         _actionExecutor.BumpX = x;
         _actionExecutor.BumpY = y;
         _actionExecutor.ExecuteZoneActions(ActionTrigger.Bump);
@@ -5576,6 +5687,7 @@ public unsafe partial class GameEngine : IDisposable
 
     public void Dispose()
     {
+        _bot?.Stop();
         // Clean up controller
         if (_controller != null)
         {

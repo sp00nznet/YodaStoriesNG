@@ -42,9 +42,6 @@ public class GameState
 
     /// <summary>Each zone's random value, from RollDice/SetRandom (WebFun zone.random).</summary>
     public Dictionary<int, int> ZoneRandom { get; set; } = new();
-
-    /// <summary>The world's seed and each zone's dice rolls so far: what makes a roll repeatable.</summary>
-    public int WorldSeed { get; set; }
     public Dictionary<int, int> ZoneRolls { get; set; } = new();
 
     /// <summary>Actions turned off by DisableAction, as (zone id, action index), for the rest of the game.</summary>
@@ -95,11 +92,12 @@ public class GameState
     // X-Wing position (for rendering in Dagobah zones)
     public (int X, int Y)? XWingPosition { get; set; }
 
-    /// <summary>True while the zone just reached by plane or boat runs its arrival scripts.</summary>
-    public bool ArrivingByVehicle { get; set; }
-
     // NPCs in current zone
     public List<NPC> ZoneNPCs { get; set; } = new();
+    public bool SmoothMovementEnabled { get; set; }
+    // Native monster indices remain stable, even after their actors are defeated.
+    public HashSet<string> DefeatedMonsters { get; set; } = new();
+    public HashSet<string> DisabledMonsters { get; set; } = new();
 
     // Active projectiles
     public List<Projectile> Projectiles { get; set; } = new();
@@ -138,6 +136,8 @@ public class GameState
         CameraX = 0;
         CameraY = 0;
         ZoneNPCs.Clear();
+        DefeatedMonsters.Clear();
+        DisabledMonsters.Clear();
         CollectedObjects.Clear();
         IsAttacking = false;
         AttackTimer = 0;

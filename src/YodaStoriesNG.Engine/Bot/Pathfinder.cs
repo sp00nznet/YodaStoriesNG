@@ -9,6 +9,125 @@ namespace YodaStoriesNG.Engine.Bot;
 public class Pathfinder
 {
     private readonly GameData _gameData;
+    private readonly GameState? _state;
+    public Func<Zone, int, int, bool>? AdditionalWalkability { get; set; }
+    public (int Zone, int X, int Y)? TransitionTarget { get; set; }
+    public bool AllowDiagonal { get; set; }
+    public bool PreferCardinal { get; set; }
+    public bool AvoidFloorSwitches { get; set; }
+
+    public IEnumerable<(int X, int Y)> WalkingNeighbors(Zone zone, int x, int y,
+        List<NPC>? npcs = null, int? zoneId = null)
+    {
+        foreach (var (dx, dy) in new[] { (0,-1),(0,1),(-1,0),(1,0),(-1,-1),(1,-1),(-1,1),(1,1) })
+        {
+            int nx = x + dx, ny = y + dy;
+            if (!IsWalkable(zone, nx, ny, npcs, zoneId)) continue;
+            if (dx != 0 && dy != 0)
+            {
+                if (!AllowDiagonal || !DiagonalSideClear(zone, x + dx, y, npcs) ||
+                    !DiagonalSideClear(zone, x, y + dy, npcs)) continue;
+                // Boarding and scripted bump interactions remain cardinal.
+                // Open doorways can have a diagonal-only authored approach.
+                if (zone.Objects.Any(h => h.Enabled && h.X == nx && h.Y == ny && h.Type is
+                    ZoneObjectType.Teleporter or
+                    ZoneObjectType.VehicleToPrimary or ZoneObjectType.VehicleToSecondary or
+                    ZoneObjectType.XWingFromDagobah or ZoneObjectType.XWingToDagobah) ||
+                    zone.Actions.Any(a => a.Conditions.Any(c =>
+                        c.Arguments.Count >= 3 && c.Arguments[0] == nx && c.Arguments[1] == ny &&
+                        (c.Opcode == ConditionOpcode.Bump && zone.GetTile(nx,ny,1) == unchecked((ushort)c.Arguments[2]) ||
+                         c.Opcode == ConditionOpcode.PlacedItemIs && c.Arguments.Count >= 4 && c.Arguments[2] is >= 0 and <= 2 &&
+                         zone.GetTile(nx,ny,c.Arguments[2]) == unchecked((ushort)c.Arguments[3]))))) continue;
+            }
+            yield return (nx, ny);
+        }
+    }
+
+    private bool DiagonalSideClear(Zone zone, int x, int y, List<NPC>? npcs)
+    {
+        if (x < 0 || y < 0 || x >= zone.Width || y >= zone.Height ||
+            npcs?.Any(n => n.IsEnabled && n.IsAlive && n.X == x && n.Y == y) == true) return false;
+        int tile = zone.GetTile(x,y,1);
+        if (TileCollision.IsGroundBlocked(_gameData,zone,x,y) ||
+            _state?.SmoothMovementEnabled==true && tile<_gameData.Tiles.Count && _gameData.Tiles[tile].IsObject) return false;
+        // Side cells are not entered. Static NPC art follows the same corner
+        // rule as wall art, while IsWalkable still validates the destination.
+        return tile == ushort.MaxValue || tile < _gameData.Tiles.Count;
+    }
+
+    public bool IsUnrelatedTransition(Zone zone, int x, int y)
+    {
+        bool intended = TransitionTarget is { } goal && goal.Zone == zone.Id && goal.X == x && goal.Y == y;
+        if (intended) return false;
+        if (AvoidFloorSwitches && zone.Actions.Any(a=>a.Conditions.Any(c=>
+            c.Opcode==ConditionOpcode.StandingOn && c.Arguments.Count>=3 && c.Arguments[0]==x && c.Arguments[1]==y &&
+            zone.GetTile(x,y,0)==unchecked((ushort)c.Arguments[2])) && CouldTrigger(zone,a) &&
+            HasRouteDisruptingEffect(zone,a))) return true;
+        if (zone.Objects.Any(h => h.Enabled && h.X == x && h.Y == y && h.Type is
+            ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit or ZoneObjectType.Teleporter or
+            ZoneObjectType.VehicleToPrimary or ZoneObjectType.VehicleToSecondary or
+            ZoneObjectType.XWingFromDagobah or ZoneObjectType.XWingToDagobah)) return true;
+        // Cockpit scripts may board from a different cell than the transport hotspot.
+        return zone.Actions.Any(a => a.Conditions.Any(c =>
+            c.Opcode is ConditionOpcode.Bump or ConditionOpcode.StandingOn or ConditionOpcode.HeroIsAt && c.Arguments.Count >= 2 &&
+            c.Arguments[0] == x && c.Arguments[1] == y &&
+            (c.Opcode==ConditionOpcode.HeroIsAt && !a.Conditions.Any(g=>g.Opcode is
+                ConditionOpcode.Bump or ConditionOpcode.PlacedItemIs or ConditionOpcode.PlacedItemIsNot) || c.Arguments.Count>=3 &&
+                c.Opcode!=ConditionOpcode.HeroIsAt &&
+             zone.GetTile(x,y,c.Opcode==ConditionOpcode.Bump ? 1 : 0)==unchecked((ushort)c.Arguments[2]))) &&
+            a.Instructions.Any(i => i.Opcode is InstructionOpcode.ChangeZone or InstructionOpcode.HideHero) && CouldTrigger(zone,a));
+    }
+
+    private bool HasRouteDisruptingEffect(Zone zone,Data.Action action)
+    {
+        if(action.Instructions.Any(i=>i.Opcode is InstructionOpcode.PlaceTile or InstructionOpcode.RemoveTile or
+            InstructionOpcode.MoveTile or InstructionOpcode.ChangeZone or InstructionOpcode.HideHero or
+            InstructionOpcode.MoveHeroTo or InstructionOpcode.MoveHeroBy)) return true;
+        // A floor plate can first set a counter and let a later Walk action
+        // perform the relocation. Follow that authored chain so the route
+        // avoids the plate even when the teleport is several script actions away.
+        if(_state==null)
+            return action.Instructions.Any(i=>i.Opcode is InstructionOpcode.SetCounter or InstructionOpcode.SetRandom or
+                       InstructionOpcode.AddToCounter or InstructionOpcode.RollDice) &&
+                zone.Actions.Any(a=>a.Instructions.Any(i=>i.Opcode is InstructionOpcode.HideHero or
+                    InstructionOpcode.MoveHeroTo or InstructionOpcode.MoveHeroBy));
+        var movement=ScriptedPassage.ArrivalAction(zone,action,_state,_gameData.GameType);
+        return movement!=null && ScriptedPassage.Arrival(movement,_gameData.GameType)!=null;
+    }
+
+    // Reject only guards whose current value is known. Unknown guards remain
+    // conservative; an inactive random-layout branch must not wall off a floor.
+    private bool CouldTrigger(Zone zone,Data.Action action)
+    {
+        if(_state==null) return true;
+        if(_state.DisabledActions.Contains((zone.Id,zone.Actions.IndexOf(action)))) return false;
+        // A room's initializer can still choose its counters, random value and
+        // layout. Their default values do not prove a future trigger inactive.
+        if(zone.Id!=_state.CurrentZoneId && !_state.VisitedZones.Contains(zone.Id)) return true;
+        foreach(var condition in action.Conditions)
+        {
+            var a=condition.Arguments;
+            if(a.Count==0) continue;
+            int random=_state.ZoneRandom.GetValueOrDefault(zone.Id),counter=_state.GetCounter(zone.Id);
+            bool possible=condition.Opcode switch {
+                ConditionOpcode.RandomIs=>random==a[0],
+                ConditionOpcode.RandomIsNot=>random!=a[0],
+                ConditionOpcode.RandomIsGreaterThan=>random>a[0],
+                ConditionOpcode.RandomIsLessThan=>random<a[0],
+                ConditionOpcode.CounterIs=>counter==a[0],
+                ConditionOpcode.CounterIsNot=>counter!=a[0],
+                ConditionOpcode.SectorCounterIs=>_state.GetSectorCounter(zone.Id)==a[0],
+                ConditionOpcode.SectorCounterIsNot=>_state.GetSectorCounter(zone.Id)!=a[0],
+                ConditionOpcode.SectorCounterIsGreaterThan=>_state.GetSectorCounter(zone.Id)>a[0],
+                ConditionOpcode.SectorCounterIsLessThan=>_state.GetSectorCounter(zone.Id)<a[0],
+                ConditionOpcode.TileAtIs or ConditionOpcode.IsVariable when a.Count>=4=>
+                    zone.GetTile(a[1],a[2],a[3])==unchecked((ushort)a[0]),
+                ConditionOpcode.ZoneNotInitialized=>!_state.VisitedZones.Contains(zone.Id),
+                _=>true };
+            if(!possible) return false;
+        }
+        return true;
+    }
 
     // Temporary blocklist for positions that movement failed on (cleared on zone change)
     private readonly HashSet<(int zoneId, int x, int y)> _blockedPositions = new();
@@ -16,9 +135,10 @@ public class Pathfinder
     private readonly HashSet<(int zoneId, int x, int y)> _permanentBlockedPositions = new();
     private int _currentZoneId = -1;
 
-    public Pathfinder(GameData gameData)
+    public Pathfinder(GameData gameData,GameState? state=null)
     {
         _gameData = gameData;
+        _state = state;
     }
 
     /// <summary>
@@ -97,22 +217,11 @@ public class Pathfinder
         if (startX == endX && startY == endY)
             return new List<(int X, int Y)>();
 
-        // If target is not walkable, find nearest walkable position
+        // Exact movement must reach its requested tile. Interaction callers use
+        // FindPathToAdjacent explicitly; silently substituting another square
+        // made the planner prove pickups that the executor could never perform.
         if (!IsWalkable(zone, endX, endY, npcs, zoneId))
-        {
-            var nearestWalkable = FindNearestWalkable(zone, endX, endY, npcs, zoneId);
-            if (nearestWalkable == null)
-                return null;
-            (endX, endY) = nearestWalkable.Value;
-        }
-
-        // Floor switches that are live - trapdoors among them - are stepped on on purpose
-        // or not at all: crossing one on the way elsewhere teleported the bot back into a pit.
-        var traps = zone.Actions.SelectMany(a => a.Conditions)
-            .Where(c => c.Opcode == Data.ConditionOpcode.StandingOn && c.Arguments.Count >= 3 &&
-                        zone.GetTile(c.Arguments[0], c.Arguments[1], 0) == c.Arguments[2])
-            .Select(c => ((int)c.Arguments[0], (int)c.Arguments[1]))
-            .Where(t => t != (endX, endY)).ToHashSet();
+            return null;
 
         var openSet = new PriorityQueue<PathNode, int>();
         var closedSet = new HashSet<(int, int)>();
@@ -144,15 +253,12 @@ public class Pathfinder
 
             closedSet.Add(currentPos);
 
-            // Check all neighbors. The original moves diagonally too, with no corner check.
-            var neighbors = new (int dx, int dy)[] { (0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (1, -1), (-1, 1), (1, 1) };
-            foreach (var (dx, dy) in neighbors)
+            foreach (var (nx, ny) in WalkingNeighbors(zone, current.X, current.Y, npcs, zoneId))
             {
-                int nx = current.X + dx;
-                int ny = current.Y + dy;
+                int dx = nx - current.X, dy = ny - current.Y;
                 var neighborPos = (nx, ny);
 
-                if (closedSet.Contains(neighborPos) || traps.Contains(neighborPos))
+                if (closedSet.Contains(neighborPos))
                     continue;
 
                 if (!IsWalkable(zone, nx, ny, npcs, zoneId))
@@ -161,13 +267,10 @@ public class Pathfinder
                 // A block only gives way if walking into it pushes it somewhere free, which
                 // depends on the direction. (The engine refuses otherwise, and the bot used to
                 // plan straight through push-block mazes and get stuck in them.)
-                // Diagonally nothing is pushed.
-                if (IsDraggableAt(zone, nx, ny) && (dx != 0 && dy != 0 || !IsFreeFloor(zone, nx + dx, ny + dy)))
+                if (IsDraggableAt(zone, nx, ny) && !IsFreeFloor(zone, nx + dx, ny + dy))
                     continue;
 
-                // Pushing is a last resort: walking through a block moves it, often back
-                // where a puzzle needed it gone.
-                int tentativeGScore = gScore[currentPos] + (IsDraggableAt(zone, nx, ny) ? 20 : 1);
+                int tentativeGScore = gScore[currentPos] + (dx != 0 && dy != 0 ? (PreferCardinal ? 30 : 14) : 10);
 
                 if (!gScore.ContainsKey(neighborPos) || tentativeGScore < gScore[neighborPos])
                 {
@@ -191,9 +294,14 @@ public class Pathfinder
         if (x < 0 || x >= zone.Width || y < 0 || y >= zone.Height)
             return false;
 
+        if (IsUnrelatedTransition(zone, x, y)) return false;
+
         // Check temporary blocklist
         if (zoneId.HasValue && IsTemporarilyBlocked(zoneId.Value, x, y))
             return false;
+
+        if (TileCollision.IsGroundBlocked(_gameData, zone, x, y) ||
+            AdditionalWalkability?.Invoke(zone, x, y) == false) return false;
 
         // Check middle layer for blocking tiles
         // This must match TryMovePlayer's collision logic in GameEngine.cs
@@ -201,9 +309,23 @@ public class Pathfinder
         if (middleTile != 0xFFFF && middleTile < _gameData.Tiles.Count)
         {
             var tile = _gameData.Tiles[middleTile];
-            // Block if it's an object (matching game engine's IsObject check)
-            // Draggable objects can be pushed, so they're technically passable for pathfinding
-            if (tile.IsSolid && !tile.IsDraggable)
+            // Pushing/pulling is a separate action; a walking route cannot cross a block.
+            if (tile.IsDraggable || tile.IsObject)
+                return false;
+            // A character picture with an authored bump/use script is an actor
+            // hotspot in the engine too. The bot must route around it unless it
+            // is the explicit transition destination; otherwise its first move
+            // can be rejected by TryMovePlayer even though A* included the cell.
+            bool intendedTransition = TransitionTarget is { } target &&
+                target.Zone == zone.Id && target.X == x && target.Y == y;
+            if (!intendedTransition && tile.IsCharacter &&
+                (zone.Objects.Any(obj=>obj.Enabled && obj.X==x && obj.Y==y &&
+                    obj.Type is ZoneObjectType.SpawnLocation or ZoneObjectType.PuzzleNPC) ||
+                 ScriptedActorTiles.IsTradeTarget(zone,x,y,middleTile) ||
+                 zone.Actions.Select((action,index)=>(action,index)).Any(pair=>
+                    (_state == null || !_state.DisabledActions.Contains((zone.Id,pair.index))) &&
+                    pair.action.Conditions.Any(c=>c.Opcode==ConditionOpcode.Bump && c.Arguments.Count>=3 &&
+                        c.Arguments[0]==x && c.Arguments[1]==y && c.Arguments[2]==middleTile))))
                 return false;
         }
 
@@ -217,8 +339,7 @@ public class Pathfinder
             }
         }
 
-        // Note: Top layer (roofs) are non-colliding per TileFlags definition
-        // The game engine only checks middle layer for collision
+        // Roofs occlude actors but do not block their ground path.
 
         return true;
     }
@@ -233,7 +354,8 @@ public class Pathfinder
     private bool IsFreeFloor(Zone zone, int x, int y)
     {
         if (x < 0 || x >= zone.Width || y < 0 || y >= zone.Height) return false;
-        return zone.GetTile(x, y, 1) == 0xFFFF; // a block only moves into an empty square
+        var id = zone.GetTile(x, y, 1);
+        return id == 0xFFFF || id < _gameData.Tiles.Count && !_gameData.Tiles[id].IsObject;
     }
 
     /// <summary>
@@ -285,11 +407,22 @@ public class Pathfinder
     /// <summary>
     /// Finds path to adjacent position next to target (for interaction).
     /// </summary>
+    public static (int X,int Y)[] InteractionCells(int x,int y,bool diagonal=false,bool extendedCardinal=false) => extendedCardinal
+        ? InteractionCells(x,y,diagonal).Concat(new[] { (x,y-2),(x,y+2),(x-2,y),(x+2,y) }).ToArray()
+        : diagonal
+        ? new[] { (x,y-1),(x,y+1),(x-1,y),(x+1,y),(x-1,y-1),(x+1,y-1),(x-1,y+1),(x+1,y+1) }
+        : new[] { (x,y-1),(x,y+1),(x-1,y),(x+1,y) };
+
     public (List<(int X, int Y)>? Path, (int X, int Y) FinalPos)? FindPathToAdjacent(
-        Zone zone, int startX, int startY, int targetX, int targetY, List<NPC>? npcs = null, int? zoneId = null)
+        Zone zone, int startX, int startY, int targetX, int targetY, List<NPC>? npcs = null, int? zoneId = null, bool allowDiagonalInteraction = false, bool extendedCardinalInteraction = false)
     {
         // Try all adjacent positions to the target
-        var adjacent = new (int dx, int dy)[] { (0, -1), (0, 1), (-1, 0), (1, 0) };
+        var adjacent = InteractionCells(0,0,allowDiagonalInteraction,extendedCardinalInteraction);
+        // An authored landing may leave the actor on a doorway/return trigger.
+        // It can interact from there without first proving it could walk back
+        // onto that intentionally avoided transition tile.
+        if(adjacent.Contains((startX-targetX,startY-targetY)))
+            return (new List<(int X,int Y)>(),(startX,startY));
         List<(int X, int Y)>? bestPath = null;
         (int X, int Y) bestFinalPos = (0, 0);
 
@@ -317,7 +450,8 @@ public class Pathfinder
 
     private static int Heuristic(int x1, int y1, int x2, int y2)
     {
-        return Math.Max(Math.Abs(x1 - x2), Math.Abs(y1 - y2)); // diagonal steps cost one
+        int dx = Math.Abs(x1 - x2), dy = Math.Abs(y1 - y2);
+        return 10 * Math.Max(dx, dy) + 4 * Math.Min(dx, dy);
     }
 
     private static List<(int X, int Y)> ReconstructPath(Dictionary<(int, int), (int, int)> cameFrom, (int, int) current)

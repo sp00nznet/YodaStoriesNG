@@ -29,6 +29,40 @@ public unsafe partial class GameEngine
             return engine;
         }
 
+        // Collision and navigation must agree even without an engine callback.
+        var terrain = Scene();
+        var terrainZone = terrain._state.CurrentZone!;
+        terrainZone.SetTile(4, 3, 0, 1);
+        var terrainNav = new Bot.Pathfinder(terrain._gameData!, terrain._state);
+        Require(terrain.IsGroundBlocked(terrainZone, 4, 3) && !terrainNav.IsWalkable(terrainZone, 4, 3),
+            "solid ground was walkable in the engine or planner");
+        terrainZone.SetTile(4, 3, 1, 0);
+        Require(!terrain.IsGroundBlocked(terrainZone, 4, 3) && terrainNav.IsWalkable(terrainZone, 4, 3),
+            "a walkable bridge did not cover solid ground");
+        foreach (bool smooth in new[] { false, true })
+        {
+            var exact = Scene();
+            exact._smoothMovement = exact._smoothMovementRequested = smooth;
+            exact._gameData!.Tiles[1].Flags |= TileFlags.Transparency;
+            exact._bot = new Bot.MissionBot(exact._state, exact._gameData!, new WorldGenerator(exact._gameData!));
+            typeof(Bot.MissionBot).GetField("_isRunning", System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic)!.SetValue(exact._bot, true);
+            exact.ApplyPendingMovementMode();
+            Require(!exact._state.SmoothMovementEnabled && exact._smoothMovementRequested == smooth,
+                "bot movement changed the user's preference or kept planning smooth steps");
+            exact._state.CurrentZone!.SetTile(4, 3, 1, 1);
+            Require(!new Bot.Pathfinder(exact._gameData, exact._state).IsWalkable(exact._state.CurrentZone, 4, 3),
+                "alpha transparency made a solid object walkable");
+            exact.HandleBotAction(Bot.BotActionType.Move, 4, 3, Direction.Right);
+            Require(exact._state.PlayerX == 3 && exact._state.PlayerY == 3 && exact._playerStep == null,
+                "a rejected bot move slid to a different, unplanned destination");
+            typeof(Bot.MissionBot).GetField("_isRunning", System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic)!.SetValue(exact._bot, false);
+            exact.ApplyPendingMovementMode();
+            Require(exact._state.SmoothMovementEnabled == smooth,
+                "manual movement did not recover its original setting after the bot stopped");
+        }
+
         // Distances and time, including irregular frame lengths and diagonal normalization.
         foreach (double hz in new[] { 30.0, 60.0, 144.0 })
         {
@@ -50,6 +84,22 @@ public unsafe partial class GameEngine
         Require(Math.Abs(diagonal.Duration - Math.Sqrt(2) / 6) < 1e-8, "diagonal speed boost");
         Require(diagonal.Conflicts(new MovementStep(1, 0, -1, 1, 1, Direction.Left)), "crossing diagonals were not reserved");
         Require(diagonal.Conflicts(new MovementStep(1, 1, -1, -1, 1, Direction.Left)), "actor swap was not reserved");
+
+        var pausedStep=Scene();
+        pausedStep.RequestSmoothPlayerStep(1,0,Direction.Right,false);
+        pausedStep.UpdateSmoothMovement(1.0/12);
+        var heldStep=pausedStep._playerStep;
+        pausedStep._state.CurrentZone!.Actions.Add(new Data.Action {
+            Conditions={new Condition { Opcode=ConditionOpcode.CounterIs,Arguments={0} }},
+            Instructions={new Instruction { Opcode=InstructionOpcode.Wait,Arguments={0} },
+                new Instruction { Opcode=InstructionOpcode.DisableAction }} });
+        pausedStep._actionExecutor!.ExecuteZoneActions(ActionTrigger.Walk);
+        pausedStep.UpdateSmoothMovement(1);
+        Require(ReferenceEquals(heldStep,pausedStep._playerStep) && Math.Abs(heldStep!.Elapsed-1.0/12)<1e-8,
+            "background script wait discarded or advanced the paused player step");
+        pausedStep._actionExecutor.ExecuteZoneActions(ActionTrigger.Walk);
+        pausedStep.UpdateSmoothMovement(1.0/12);
+        Require(pausedStep._state.PlayerX==4,"paused player step did not resume after a background wait");
 
         var e = Scene();
         e._state.CurrentZone!.SetTile(4, 3, 1, 3);
@@ -129,7 +179,24 @@ public unsafe partial class GameEngine
 
         e = Scene();
         e._state.CurrentZone!.Objects.Add(new ZoneObject { X = 4, Y = 4, Type = ZoneObjectType.DoorEntrance, Enabled = true });
-        Require(!e.RequestSmoothPlayerStep(1, 1, Direction.Down, false), "diagonal door approach was accepted");
+        Require(e.RequestSmoothPlayerStep(1, 1, Direction.Down, false), "open doorway rejected its diagonal approach");
+        e.CancelSmoothMovement();
+        e = Scene();
+        e._state.CurrentZone!.Objects.Add(new ZoneObject { X = 4, Y = 4, Type = ZoneObjectType.VehicleToPrimary, Enabled = true });
+        Require(!e.RequestSmoothPlayerStep(1, 1, Direction.Down, false), "diagonal boarding was accepted");
+        e = Scene();
+        e._state.CurrentZone!.Objects.Add(new ZoneObject { X=4,Y=3,Type=ZoneObjectType.DoorEntrance,Argument=1,Enabled=true });
+        e._state.CurrentZone.SetTile(4,3,1,3);
+        var destination=new Zone { Id=1,Width=18,Height=18,TileGrid=new ushort[18,18,3] };
+        for(int y=0;y<18;y++) for(int x=0;x<18;x++)
+        { destination.SetTile(x,y,1,ushort.MaxValue); destination.SetTile(x,y,2,ushort.MaxValue); }
+        destination.Objects.Add(new ZoneObject { X=1,Y=1,Type=ZoneObjectType.DoorExit,Argument=ushort.MaxValue,Enabled=true });
+        e._gameData!.Zones.Add(destination);
+        Require(e.RequestSmoothPlayerStep(1,0,Direction.Right,false),"doorway reward step was rejected");
+        e.UpdateSmoothMovement(1.0/6);
+        Require(e._state.HasItem(3),"travel discarded the loose item on its portal");
+        Require(e._state.CurrentZoneId==1,"collecting a portal reward prevented the intended travel");
+
         foreach (var behavior in new[] { NPCBehavior.Fleeing, NPCBehavior.Patrol })
         {
             e = Scene();
@@ -195,6 +262,28 @@ public unsafe partial class GameEngine
         e.UpdateSmoothMovement(Math.Sqrt(2) / 6);
         Require(e._state.CurrentZone.GetTile(2,2,1) == 2 && e._state.CurrentZone.GetTile(3,3,1) == ushort.MaxValue,
             "late Shift pulled a block diagonally");
+        foreach(bool smooth in new[] { false,true })
+        {
+            e=Scene(); e._smoothMovement=smooth;
+            e._gameData!.Characters.Add(new Character { Type=CharacterType.Enemy,MovementType=11,
+                Weapon=new CharacterWeapon { Reference=-1,Health=ushort.MaxValue } });
+            var fugitive=new NPC { CharacterId=0,X=4,Y=3 };
+            e.ConfigureNPCFromCharacter(fugitive); e._state.ZoneNPCs.Add(fugitive);
+            Require(fugitive.Behavior==NPCBehavior.Fleeing && fugitive.IsInvulnerable,
+                "authored fleeing actor lost its movement or invulnerability");
+            e._state.CurrentZone!.SetTile(5,3,1,1);
+            if(smooth)
+            {
+                e.StartSmoothNPCStep(fugitive);
+                Require(e._npcSteps.TryGetValue(fugitive,out var escape) && escape.ToY!=3 && escape.ToX>=4,
+                    "fleeing actor remained trapped against a wall instead of taking a clear side step");
+            }
+            else
+            {
+                e.UpdateFleeingNPC(fugitive);
+                Require(fugitive.X>=4 && fugitive.Y!=3,"tile movement did not use a clear fleeing side step");
+            }
+        }
         var legacy = JsonSerializer.Deserialize<KeyBindings>("{}");
         var enabled = JsonSerializer.Deserialize<KeyBindings>(JsonSerializer.Serialize(new KeyBindings { SmoothMovement = true }));
         Require(legacy?.SmoothMovement == false && enabled?.SmoothMovement == true, "settings round trip or legacy default failed");

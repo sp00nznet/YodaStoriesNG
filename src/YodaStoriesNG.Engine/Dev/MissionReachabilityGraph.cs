@@ -110,6 +110,11 @@ public static class MissionReachabilityGraph
             reachableZones.Add(world.StartingZoneId);
         if (world.StartingItemId is int startingItem && startingItem > 0)
             inventory.Add(startingItem);
+        // Indy hands over the first chain item during the reachable town
+        // briefing rather than storing it in Yoda's StartingItemId field.
+        if(data.GameType==GameType.IndianaJones && world.Mission?.PuzzleChain.FirstOrDefault() is
+            { RequiredItemId:0,RewardItemId:>0 } briefing && world.Sectors.Values.Any(s=>
+                s.Type==ZoneType.Town && s.Zone==briefing.ZoneId)) inventory.Add(briefing.RewardItemId);
 
         // Find zones, puzzle rewards and travel gates to a fixed point. This mirrors how a
         // player can expand the map as items become available, without loading a game window.
