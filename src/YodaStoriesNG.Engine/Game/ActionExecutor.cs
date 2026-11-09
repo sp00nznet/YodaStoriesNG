@@ -10,6 +10,15 @@ public class ActionExecutor
 {
     private readonly GameData _gameData;
     private readonly GameState _state;
+    private readonly Random _random = new();
+    private int NextZoneRoll(int sides)
+    {
+        if(CurrentWorld?.Seed is not int seed) return _random.Next(sides);
+        int zone=_state.CurrentZoneId, roll=_state.ZoneRolls.GetValueOrDefault(zone);
+        _state.ZoneRolls[zone]=roll+1;
+        return new Random(unchecked(seed*486187739+zone*7919+roll)).Next(sides);
+    }
+
 
     // Action execution context
     // The zone's own random value: a zone rolls its layout once and checks it for ever after,
@@ -20,18 +29,6 @@ public class ActionExecutor
         set => _state.ZoneRandom[_state.CurrentZoneId] = value;
     }
     private Zone? _currentZone;
-
-    /// <summary>
-    /// A die roll that depends only on the world seed, the zone and how many times that zone
-    /// has rolled - not on frame timing or the order zones were visited - so a seed replays.
-    /// </summary>
-    private int NextZoneRoll(int sides)
-    {
-        var zone = _state.CurrentZoneId;
-        var n = _state.ZoneRolls.GetValueOrDefault(zone);
-        _state.ZoneRolls[zone] = n + 1;
-        return new Random(unchecked(_state.WorldSeed * 486187739 + zone * 7919 + n)).Next(sides);
-    }
     private ActionTrigger _currentTrigger;
     private int _currentActionIndex = -1;
     private bool _enteredByPlane;
@@ -41,7 +38,7 @@ public class ActionExecutor
     private ActionTrigger _pendingTrigger;
     private bool _pendingEnteredByPlane;
     private bool _pendingZoneWasUninitialized;
-    private (int? Item, int X, int Y, int? Npc) _pendingPlacement;
+    private (int? Item, int X, int Y, int? Npc, bool Weapon) _pendingPlacement;
     private bool _pendingHandledItemPlacement;
     private readonly List<(Zone Zone, int X, int Y)> _pendingForceDrops = new();
     private readonly Dictionary<(int X, int Y), int> _drawnTiles = new();
@@ -53,13 +50,12 @@ public class ActionExecutor
     public bool SuppressDialogue { get; set; }
 
     // Current interaction context
+    private bool _weaponPlacement;
     public int? PlacedItemId { get; set; }
     public int PlacedX { get; set; } = -1;   // the tile the item was used on
     public int PlacedY { get; set; } = -1;
     public int? DroppedItemId { get; set; }
     public int? InteractingNpcId { get; set; }
-    /// <summary>A script put the hero on a vehicle, which should take them (WebFun "Stand").</summary>
-    public ZoneObject? PlacedOnVehicle { get; set; }
     public int BumpX { get; set; }
     public int BumpY { get; set; }
 
@@ -79,10 +75,14 @@ public class ActionExecutor
     public int PendingInstructionIndex { get; set; }
 
     public bool IsBusy => PendingInstructions != null;
+    internal bool HasDeferredDrops => _pendingForceDrops.Count > 0;
     public bool HandledItemPlacement { get; private set; }
+    public event Action<int,int,int>? ItemUseScriptCompleted;
     public (int ZoneId, int X, int Y)? RequestedZoneChange { get; private set; }
 
     /// <summary>Cancel a suspended script when leaving its zone.</summary>
+    public ZoneObject? PlacedOnVehicle { get; set; }
+
     public void ResetForZone()
     {
         PendingInstructions = null;
@@ -91,9 +91,11 @@ public class ActionExecutor
         _pendingActionIndex = -1;
         _currentActionIndex = -1;
         RequestedZoneChange = null;
+        PlacedOnVehicle = null;
         _pendingForceDrops.Clear();
         _drawnTiles.Clear();
         PlacedItemId = null;
+        _weaponPlacement=false;
         PlacedX = PlacedY = -1;
         InteractingNpcId = null;
         HandledItemPlacement = false;
@@ -104,7 +106,10 @@ public class ActionExecutor
     public event Action<string, string>? OnDialogue;
     public Func<bool>? IsDialogueActive { get; set; }
     public event Action<int>? OnItemAdded;
+    public event Action<int>? OnItemRemoved;
+    public event Action<int,int>? OnActionStarted;
     public event Action<string>? OnMessage;
+    public System.Action<string,object?>? DebugTrace { get; set; }
     public event System.Action? OnHeroRelocated;
     public event Action<int>? OnPlaySound;
     public event System.Action? OnStopSound;
@@ -136,20 +141,25 @@ public class ActionExecutor
 
         _enteredByPlane = trigger == ActionTrigger.ZoneEnter && enteredByPlane;
         _zoneWasUninitialized = !_state.Variables.ContainsKey(_currentZone.Id + 1000);
-        var incomingPlacement = (PlacedItemId, PlacedX, PlacedY, InteractingNpcId);
+        var incomingPlacement = (PlacedItemId, PlacedX, PlacedY, InteractingNpcId, _weaponPlacement);
+        bool resumedItemUse=false;
+        int completedItem=-1,completedX=-1,completedY=-1;
         try
         {
             int nextActionIndex = 0;
             // Resume pending instructions from a previous Wait
             if (PendingInstructions != null)
             {
+                resumedItemUse=_pendingTrigger==ActionTrigger.UseItem && _pendingPlacement.Item1.HasValue;
                 var remaining = PendingInstructions;
                 var startIdx = PendingInstructionIndex;
                 _currentActionIndex = _pendingActionIndex;
                 _currentTrigger = trigger = _pendingTrigger;
                 _enteredByPlane = _pendingEnteredByPlane;
                 _zoneWasUninitialized = _pendingZoneWasUninitialized;
-                (PlacedItemId, PlacedX, PlacedY, InteractingNpcId) = _pendingPlacement;
+                (PlacedItemId, PlacedX, PlacedY, InteractingNpcId, _weaponPlacement) = _pendingPlacement;
+                if(resumedItemUse && PlacedItemId is int pendingItem)
+                    (completedItem,completedX,completedY)=(pendingItem,PlacedX,PlacedY);
                 HandledItemPlacement = _pendingHandledItemPlacement;
                 PendingInstructions = null;
                 PendingInstructionIndex = 0;
@@ -166,6 +176,19 @@ public class ActionExecutor
                 var action = _currentZone.Actions[i];
                 if (EvaluateConditions(action.Conditions, trigger))
                 {
+                    // Walk/idle scripts often keep assigning the counter or
+                    // random value it already has. Skipping these pure no-op
+                    // setters avoids rerunning the same authored action on
+                    // every update without suppressing actions with effects.
+                    if(action.Instructions.Count>0 && action.Instructions.All(instruction =>
+                        instruction.Opcode switch
+                        {
+                            InstructionOpcode.SetCounter => instruction.Arguments.Count>0 &&
+                                _state.GetCounter(_currentZone.Id)==instruction.Arguments[0],
+                            InstructionOpcode.SetRandom => instruction.Arguments.Count>0 &&
+                                _state.ZoneRandom.GetValueOrDefault(_currentZone.Id)==instruction.Arguments[0],
+                            _=>false,
+                        })) continue;
                     if (trigger == ActionTrigger.UseItem && action.Conditions.Any(c =>
                         c.Opcode is ConditionOpcode.PlacedItemIs or ConditionOpcode.PlacedItemIsNot))
                         HandledItemPlacement = true;
@@ -180,8 +203,10 @@ public class ActionExecutor
         }
         finally
         {
-            (PlacedItemId, PlacedX, PlacedY, InteractingNpcId) = incomingPlacement;
+            bool itemUseFinished=resumedItemUse && completedItem>=0 && !IsBusy && !RequestedZoneChange.HasValue;
+            (PlacedItemId, PlacedX, PlacedY, InteractingNpcId, _weaponPlacement) = incomingPlacement;
             _enteredByPlane = false;
+            if(itemUseFinished) ItemUseScriptCompleted?.Invoke(completedItem,completedX,completedY);
             if (!IsBusy && !RequestedZoneChange.HasValue)
             {
                 foreach (var drop in _pendingForceDrops.ToArray())
@@ -218,15 +243,16 @@ public class ActionExecutor
     }
 
     /// <summary>Probe an item's authored target without executing or changing a script.</summary>
-    public bool WouldHandleItemPlacement(int item, int x, int y)
+    public bool WouldHandleItemPlacement(int item, int x, int y,bool weapon=false)
     {
         var zone = _state.CurrentZone;
         if (zone == null) return false;
         var previousZone = _currentZone;
-        var previous = (PlacedItemId, PlacedX, PlacedY, InteractingNpcId);
+        var previous = (PlacedItemId, PlacedX, PlacedY, InteractingNpcId, _weaponPlacement);
         try
         {
             _currentZone = zone;
+            _weaponPlacement=weapon;
             PlacedItemId = item; PlacedX = x; PlacedY = y;
             InteractingNpcId = _state.ZoneNPCs.FirstOrDefault(n => n.IsEnabled && n.IsAlive &&
                 !n.IsHostile && n.X == x && n.Y == y)?.CharacterId;
@@ -238,8 +264,19 @@ public class ActionExecutor
         finally
         {
             _currentZone = previousZone;
-            (PlacedItemId, PlacedX, PlacedY, InteractingNpcId) = previous;
+            (PlacedItemId, PlacedX, PlacedY, InteractingNpcId, _weaponPlacement) = previous;
         }
+    }
+
+    public void ExecuteWeaponPlacement(int item,int x,int y)
+    {
+        var previous=(PlacedItemId,PlacedX,PlacedY,InteractingNpcId,_weaponPlacement);
+        try
+        {
+            (PlacedItemId,PlacedX,PlacedY,InteractingNpcId,_weaponPlacement)=(item,x,y,null,true);
+            ExecuteZoneActions(ActionTrigger.UseItem);
+        }
+        finally { (PlacedItemId,PlacedX,PlacedY,InteractingNpcId,_weaponPlacement)=previous; }
     }
 
     private bool EvaluateConditions(List<Condition> conditions, ActionTrigger trigger)
@@ -252,8 +289,15 @@ public class ActionExecutor
                 c.Opcode is ConditionOpcode.ZoneEntered or ConditionOpcode.ZoneNotInitialized or ConditionOpcode.EnterByPlane))
             return false;
 
+        var authored=_currentZone?.Actions.FirstOrDefault(a=>ReferenceEquals(a.Conditions,conditions));
+        bool introduction=trigger==ActionTrigger.ZoneEnter && authored!=null &&
+            ZoneArrival.IsOutdoorIntroduction(_gameData.GameType,authored);
         foreach (var condition in conditions)
         {
+            // Indy reuses the arrival flag for NPC introductions. Evaluate
+            // those authored guards on outdoor entry without also running a
+            // vehicle animation that relocates the hero to its dock.
+            if(condition.Opcode==ConditionOpcode.EnterByPlane && introduction) continue;
             if (!EvaluateCondition(condition, trigger))
                 return false;
         }
@@ -280,16 +324,13 @@ public class ActionExecutor
             case ConditionOpcode.ZoneEntered:
                 return trigger == ActionTrigger.ZoneEnter;
 
-            // The tile walked INTO is (x, y) and holds tile arg 2 on some layer (WebFun
-            // conditions/bump.ts). This used to compare the hero's own position, which can
-            // never be a tile that blocks him - so no bump script ever ran.
+            // Bump identifies the middle-layer tile at the contacted cell. A floor
+            // marker beneath a moved object must not activate its old bump script.
             case ConditionOpcode.Bump:
                 if (trigger != ActionTrigger.Bump || args.Count < 3 || _currentZone == null)
                     return false;
                 return BumpX == args[0] && BumpY == args[1] &&
-                       (_currentZone.GetTile(args[0], args[1], 0) == args[2] ||
-                        _currentZone.GetTile(args[0], args[1], 1) == args[2] ||
-                        _currentZone.GetTile(args[0], args[1], 2) == args[2]);
+                       _currentZone.GetTile(args[0], args[1], 1) == unchecked((ushort)args[2]);
 
             // Hero at (x, y) and the floor tile there is arg 2 (WebFun conditions/standing-on.ts).
             case ConditionOpcode.Standing:
@@ -359,7 +400,7 @@ public class ActionExecutor
                     return false;
                 // Script operands are signed 16-bit; tile slots store the same bits
                 // unsigned. In particular, -1 names the empty tile (0xFFFF).
-                return _currentZone.GetTile(args[1], args[2], args[3]) == unchecked((ushort)args[0]);
+                return ScriptedActorTiles.Read(_gameData,_state,_currentZone,args[1],args[2],args[3]) == unchecked((ushort)args[0]);
 
             // Takes no arguments - it asks whether THIS zone is solved.
             case ConditionOpcode.ZoneIsSolved:
@@ -387,11 +428,11 @@ public class ActionExecutor
             {
                 if (trigger != ActionTrigger.UseItem || args.Count < 5 || !PlacedItemId.HasValue || _currentZone == null)
                     return false;
-                if (args[0] < 0 || args[1] < 0 || args[2] < 0 || args[3] < 0)
+                if (args[0] < 0 || args[1] < 0 || args[2] is < 0 or > 2 || args[3] < -1)
                     return false;
                 int item = args[4] >= 0 ? args[4] : CurrentSector?.RequiredItem ?? -1;
                 return PlacedItemId == item && PlacedX == args[0] && PlacedY == args[1] &&
-                       _currentZone.GetTile(args[0], args[1], args[2]) == args[3];
+                       (args[3] == -1 || _currentZone.GetTile(args[0], args[1], args[2]) == args[3]);
             }
 
             case ConditionOpcode.NoItemPlaced:
@@ -433,9 +474,10 @@ public class ActionExecutor
                 return false;
 
             case ConditionOpcode.HasNoActiveMonsters:
-                // Native scripts ask whether any enabled monster remains. Death is
-                // represented separately from enabled state in this engine.
-                return _state.ZoneNPCs.All(n => !n.IsEnabled || !n.IsAlive);
+                // The original AllEnemiesDead checks for surviving native
+                // entities, including disabled actors reserved for later waves.
+                // Hiding a wave must not complete and disable its reward script.
+                return _state.ZoneNPCs.Where(n=>n.NativeMonsterIndex>=0).All(n=>!n.IsAlive);
 
             case ConditionOpcode.RequiredItemIs:
                 // Check if current sector's required item matches arg
@@ -459,7 +501,7 @@ public class ActionExecutor
 
             // Only run landing cutscenes when the engine explicitly loaded this zone by plane.
             case ConditionOpcode.EnterByPlane:
-                return trigger == ActionTrigger.ZoneEnter && (_enteredByPlane || _state.ArrivingByVehicle);
+                return trigger == ActionTrigger.ZoneEnter && _enteredByPlane;
 
             case ConditionOpcode.HeroIsAt:
                 // Check if hero is at position
@@ -468,6 +510,7 @@ public class ActionExecutor
                 return _state.PlayerX == args[0] && _state.PlayerY == args[1];
 
             case ConditionOpcode.PlacedItemIsNot:
+                if(_weaponPlacement) return false;
             {
                 // A rejected offer is still an item-placement event, not the absence
                 // of an offer. Use the same target and item slots as PlacedItemIs.
@@ -480,6 +523,14 @@ public class ActionExecutor
                 return PlacedItemId != item && PlacedX == args[0] && PlacedY == args[1] &&
                        _currentZone.GetTile(args[0], args[1], args[2]) == args[3];
             }
+
+            case ConditionOpcode.IndyGameWon:
+                return _state.IsGameWon;
+            case ConditionOpcode.IndyGameLost:
+                return _state.IsGameOver;
+            case ConditionOpcode.StartingItemIs:
+                return args.Count>0 && (CurrentWorld?.StartingItemId ??
+                    CurrentMission?.PuzzleChain.FirstOrDefault()?.RewardItemId)==args[0];
 
             case ConditionOpcode.EndingIs:
                 // Ending identifies the mission itself. The final sector's required
@@ -537,6 +588,7 @@ public class ActionExecutor
 
     private void ExecuteInstructions(List<Instruction> instructions, int startIndex = 0)
     {
+        if(startIndex==0) OnActionStarted?.Invoke(_state.CurrentZoneId,_currentActionIndex);
         if (instructions.Count > 0 && startIndex == 0)
         {
             Console.WriteLine($"  Executing {instructions.Count} instructions");
@@ -544,6 +596,11 @@ public class ActionExecutor
 
         for (int i = startIndex; i < instructions.Count; i++)
         {
+            DebugTrace?.Invoke("script-instruction",new { Zone=_state.CurrentZoneId,
+                Action=_currentActionIndex,Trigger=_currentTrigger,Index=i,
+                instructions[i].Opcode,instructions[i].Arguments,Counter=_state.GetCounter(_state.CurrentZoneId),
+                Conditions=_currentZone!=null && _currentActionIndex>=0 && _currentActionIndex<_currentZone.Actions.Count
+                    ? _currentZone.Actions[_currentActionIndex].Conditions.Select(c=>new { c.Opcode,c.Arguments }).ToArray() : null });
             if (instructions[i].Opcode == InstructionOpcode.Wait)
             {
                 // Save remaining instructions to resume next tick
@@ -571,7 +628,7 @@ public class ActionExecutor
         _pendingTrigger = _currentTrigger;
         _pendingEnteredByPlane = _enteredByPlane;
         _pendingZoneWasUninitialized = _zoneWasUninitialized;
-        _pendingPlacement = (PlacedItemId, PlacedX, PlacedY, InteractingNpcId);
+        _pendingPlacement = (PlacedItemId, PlacedX, PlacedY, InteractingNpcId, _weaponPlacement);
         _pendingHandledItemPlacement = HandledItemPlacement;
     }
 
@@ -614,6 +671,17 @@ public class ActionExecutor
                 c.Arguments[0] == x && c.Arguments[1] == y && c.Arguments[2] == tileId ||
             c.Opcode == ConditionOpcode.PlacedItemIs && c.Arguments.Count >= 4 &&
                 c.Arguments[0] == x && c.Arguments[1] == y && c.Arguments[2] == 1 && c.Arguments[3] == tileId);
+        // The recipient can be a different actor from the released reward.
+        // Removing a trade actor and dropping that same item is still a handoff.
+        addressesItem |= ScriptedActorTiles.IsTradeTarget(_currentZone,x,y,tileId);
+        // Dialogue can set a signal and perform the actual release in a later
+        // action. That action has RandomIs/CounterIs guards rather than Bump.
+        // Removing the addressed character before dropping its identical item
+        // still completes the pickup; recreating it would restart its dialogue.
+        addressesItem |= _currentZone.Actions.Select((a,i)=>(a,i)).Any(p=>
+            !_state.DisabledActions.Contains((_currentZone.Id,p.i)) && p.a.Conditions.Any(c=>
+                c.Opcode==ConditionOpcode.Bump && c.Arguments.Count>=3 &&
+                c.Arguments[0]==x && c.Arguments[1]==y && c.Arguments[2]==tileId));
         return addressesItem && action.Instructions.Any(i => i.Opcode == InstructionOpcode.RemoveTile &&
             i.Arguments.Count >= 3 && i.Arguments[0] == x && i.Arguments[1] == y && i.Arguments[2] == 1) &&
             _currentZone.GetTile(x, y, 1) != tileId;
@@ -622,7 +690,17 @@ public class ActionExecutor
     private void DropScriptItem(int tileId, int x, int y)
     {
         if (_currentZone == null || tileId < 0 || tileId >= _gameData.Tiles.Count) return;
-        if (IsScriptedPickupHandoff(tileId, x, y))
+        // Some pickup animations hide Luke and resume only after HasItem.
+        // Dropping their reward onto the map deadlocks that authored handoff:
+        // ordinary movement is deliberately disabled while Luke is hidden.
+        bool hiddenHandoff = !_state.HeroVisible && _currentActionIndex >= 0 &&
+            _currentActionIndex < _currentZone.Actions.Count &&
+            _currentZone.Actions[_currentActionIndex].Instructions.Any(i=>i.Opcode==InstructionOpcode.HideHero) &&
+            _currentZone.Actions.Where((a,i)=>!_state.DisabledActions.Contains((_currentZone.Id,i))).Any(a=>
+                a.Conditions.Any(c=>c.Opcode==ConditionOpcode.HasItem && c.Arguments.Count>0 &&
+                    (c.Arguments[0]==tileId || c.Arguments[0]==-1 && CurrentSector?.FindItem==tileId)) &&
+                a.Instructions.Any(i=>i.Opcode==InstructionOpcode.ShowHero));
+        if (IsScriptedPickupHandoff(tileId, x, y) || hiddenHandoff)
         {
             // RemoveTile + DropItem of the interaction target is the authored pickup.
             // Award it once instead of recreating an identical, bump-triggering map tile.
@@ -727,7 +805,13 @@ public class ActionExecutor
             case InstructionOpcode.RemoveItem:
                 // A negative item means this sector's required item
                 if (args.Count >= 1)
-                    _state.RemoveItem(args[0] < 0 && CurrentSector is { } removeSector ? removeSector.RequiredItem : args[0]);
+                {
+                    int item=args[0]<0 && CurrentSector is { } removeSector ? removeSector.RequiredItem : args[0];
+                    int before=_state.Inventory.Count(i=>i==item);
+                    bool owned=_state.HasItem(item);
+                    _state.RemoveItem(item);
+                    if(_state.Inventory.Count(i=>i==item)<before || owned && !_state.HasItem(item)) OnItemRemoved?.Invoke(item);
+                }
                 break;
 
             case InstructionOpcode.MarkAsSolved:
@@ -764,10 +848,10 @@ public class ActionExecutor
                     OnHeroRelocated?.Invoke();
                     _state.PlayerX = args[0];
                     _state.PlayerY = args[1];
-                    // The last placement wins: a flight ends by setting the hero on the plane.
-                    PlacedOnVehicle = _state.CurrentZone?.Objects.FirstOrDefault(o => o.Enabled &&
-                        o.X == args[0] && o.Y == args[1] &&
-                        o.Type is ZoneObjectType.VehicleToSecondary or ZoneObjectType.VehicleToPrimary);
+                    // Last relocation wins, so landing scripts that disembark clear this.
+                    PlacedOnVehicle = _state.CurrentZone?.Objects.FirstOrDefault(h=>h.Enabled &&
+                        h.X==args[0] && h.Y==args[1] && h.Type is
+                            ZoneObjectType.VehicleToSecondary or ZoneObjectType.VehicleToPrimary);
                 }
                 break;
 
@@ -859,7 +943,10 @@ public class ActionExecutor
                 {
                     int npcIdx = args[0];
                     if (npcIdx >= 0 && npcIdx < _state.ZoneNPCs.Count)
+                    {
                         _state.ZoneNPCs[npcIdx].IsEnabled = true;
+                        _state.DisabledMonsters.Remove($"{_state.CurrentZoneId}_{_state.ZoneNPCs[npcIdx].NativeMonsterIndex}");
+                    }
                 }
                 break;
 
@@ -868,18 +955,28 @@ public class ActionExecutor
                 {
                     int npcIdx = args[0];
                     if (npcIdx >= 0 && npcIdx < _state.ZoneNPCs.Count)
+                    {
                         _state.ZoneNPCs[npcIdx].IsEnabled = false;
+                        if(_state.ZoneNPCs[npcIdx].NativeMonsterIndex>=0)
+                            _state.DisabledMonsters.Add($"{_state.CurrentZoneId}_{_state.ZoneNPCs[npcIdx].NativeMonsterIndex}");
+                    }
                 }
                 break;
 
             case InstructionOpcode.EnableAllMonsters:
                 foreach (var npc in _state.ZoneNPCs)
+                {
                     npc.IsEnabled = true;
+                    _state.DisabledMonsters.Remove($"{_state.CurrentZoneId}_{npc.NativeMonsterIndex}");
+                }
                 break;
 
             case InstructionOpcode.DisableAllMonsters:
                 foreach (var npc in _state.ZoneNPCs)
+                {
                     npc.IsEnabled = false;
+                    if(npc.NativeMonsterIndex>=0) _state.DisabledMonsters.Add($"{_state.CurrentZoneId}_{npc.NativeMonsterIndex}");
+                }
                 break;
 
             case InstructionOpcode.HideHero:
@@ -957,6 +1054,10 @@ public class ActionExecutor
                     {
                         var obj = _currentZone.Objects[idx];
                         obj.Enabled = true;
+                        if(CurrentSector is { } sector && obj.Argument==sector.Npc &&
+                            obj.Type is ZoneObjectType.SpawnLocation or ZoneObjectType.PuzzleNPC &&
+                            _currentZone.GetTile(obj.X,obj.Y,1)==ushort.MaxValue)
+                            _currentZone.SetTile(obj.X,obj.Y,1,obj.Argument);
                     }
                 }
                 break;
@@ -970,6 +1071,10 @@ public class ActionExecutor
                     {
                         var obj = _currentZone.Objects[idx];
                         obj.Enabled = false;
+                        if(CurrentSector is { } sector && obj.Argument==sector.Npc &&
+                            obj.Type is ZoneObjectType.SpawnLocation or ZoneObjectType.PuzzleNPC &&
+                            _currentZone.GetTile(obj.X,obj.Y,1)==obj.Argument)
+                            _currentZone.SetTile(obj.X,obj.Y,1,ushort.MaxValue);
                     }
                 }
                 break;

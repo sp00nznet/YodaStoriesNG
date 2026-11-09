@@ -39,27 +39,15 @@ that follows the chain. Still open:
 
 - **Two instructions are undecoded** (`0x14`, `0x23`) and two conditions are the least
   certain of the table - see [SCRIPTING.md](SCRIPTING.md#indiana-jones-opcode-numbers).
-- **The bot has won a whole game, on one world.** On the reference world (`YSNG_SEED=5`)
-  it takes the briefing, blasts a blockade, solves the ledge room, pulls a crate off the
-  Nitro, clears a boulder row off a pressure plate, flies to one island and back, digs a
-  fare out from behind a column of crates, flies to a second island, trades for the fake
-  map, flies home, and works through the temple - a trapdoor, three locked doors, a gate,
-  Van Loon, the cage - to Pacal and `WinGame`, in about four minutes of game time.
-  `YSNG_SEED=5 YSNG_BOT_SECONDS=900` reproduces it.
-- **Not every run of that world wins, and other worlds stop earlier.** Monsters still move
-  on unseeded randomness and real frame time, so two runs of one seed diverge (zone layouts
-  no longer do - their dice come from the world seed). Other seeds have stopped at puzzles
-  the bot has not met yet: an item in a room none of its tricks reach (seed 2, zone 121),
-  and the plateau traders sealed by cliffs (seed 1, zone 144). Each new world is a new
-  puzzle or two; the bot learns them one at a time.
-- **Unsolved puzzle rooms now reset when you leave them** (#7), so a player can retry from
-  a clean layout. The bot used to solve some block puzzles across several visits, keeping
-  its pushes in between; it now starts over each time. On seed 5 it stops at zone 91
-  around step 3. Fix in the bot: finish a block puzzle in one visit (`Bot/BlockPuzzle.cs`
-  already solves single rooms) instead of leaving partway.
-- **Everything learned here is Indiana Jones-only for now** - the character-type field,
-  the NPC-hotspot fix, `SectorPuzzles`, the generator. Yoda Stories gets them when it moves
-  to the original generator.
+- **Both games now use generated-world dependency graphs and local routes.** The bot
+  follows scripted item exchanges, room transitions and final-room actions. Block
+  puzzles use bounded push/pull searches and replay-checked local plans; moving actors
+  and combat are handled live before continuing the pending dependency.
+- **Area changes persist during a game.** Leaving an unsolved room no longer resets
+  its objects or scripts. Starting a new game restores the original area templates.
+- **Runs can be reproduced and resumed.** Use `--seed`, `--headless-bot`, and the saved
+  replay checkpoints described in [PLAYING.md](PLAYING.md). A passing seed is evidence
+  for that generated world, not a guarantee that every puzzle variant is solved.
 
 ### The bot cannot find R2-D2 when he is a zone monster
 

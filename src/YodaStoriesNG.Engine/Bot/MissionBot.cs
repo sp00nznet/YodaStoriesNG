@@ -16,6 +16,16 @@ public class MissionBot
     private readonly Pathfinder _pathfinder;
     private readonly BotActions _actions;
     private readonly MissionSolver _solver;
+    private BotDebugLog? _debug;
+    private string? _debugState;
+    public string? DebugLogDirectory => _debug?.DirectoryPath;
+    public string? DebugLogRoot { get; set; }
+    public string? ObjectiveDescription => _currentObjective?.Description;
+    public void TraceDebug(string kind,object? detail) => _debug?.Record(kind,detail);
+    private void DebugSnapshot(string reason,bool force=false) => _debug?.Snapshot(reason,force,false,
+        new { State=_currentState,Objective=_currentObjective,Route=_solver.PlannedRoute,
+            Graph=_solver.ActionGraph,NativePlanning=_solver.NativePlanningState,
+            StuckRetries=_stuckCount,NoProgressSeconds=_noMissionProgressTime });
 
     // Bot state
     private bool _isRunning;
@@ -24,35 +34,87 @@ public class MissionBot
     private double _stuckTimer;
     private (int X, int Y, int ZoneId) _lastPosition;
     private int _stuckCount;
+    private double _noMissionProgressTime;
+    private readonly HashSet<string> _seenProgressStates = new();
+    private string? _progressObjectiveKey;
+    private int _bestObjectiveDistance = int.MaxValue;
+    private double _planningSeconds;
+
+    // Planning runs synchronously between frames. The engine excludes that CPU
+    // time from the next gameplay update, including NPCs and inactivity timers.
+    public double ConsumePlanningSeconds()
+    {
+        double elapsed = _planningSeconds;
+        _planningSeconds = 0;
+        return elapsed;
+    }
 
     // Current objective tracking
     private BotObjective? _currentObjective;
     private NPC? _lastTargetNpc;
+    private NPC? _routeBlocker;
+    private int _routeBlockerZone = -1;
     private int? _lastItemUsed;
+    private string? _itemUseWorldState;
+    private (int Zone,int X,int Y,string State)? _doorAttempt;
+    private (int Zone,int Action,int X,int Y,string State,string SemanticState)? _scriptAttempt;
+    private (int Zone,int X,int Y,int ArrivalX,int ArrivalY,string State,string SemanticState)? _passageAttempt;
+
+    private string ItemUseWorldState()
+    {
+        var zone=_state.CurrentZone;
+        string tiles=zone==null ? "" : string.Join(',',Enumerable.Range(0,3).SelectMany(layer=>
+            Enumerable.Range(0,zone.Height).SelectMany(y=>Enumerable.Range(0,zone.Width)
+                .Select(x=>zone.GetTile(x,y,layer)))));
+        return $"{_state.CurrentZoneId}:{_state.GetCounter(_state.CurrentZoneId)}:{_state.GetSectorCounter(_state.CurrentZoneId)}:"+
+            $"{tiles}:disabled={string.Join(',',_state.DisabledActions.Where(a=>a.Zone==_state.CurrentZoneId).OrderBy(a=>a.Action))}:"+
+            $"vars={string.Join(',',_state.Variables.OrderBy(p=>p.Key).Select(p=>$"{p.Key}={p.Value}"))}:"+
+            $"inventory={string.Join(',',_state.Inventory.OrderBy(i=>i))}";
+    }
 
     // Timing constants
     private const double ThinkInterval = 0.15;    // 150ms between decisions
     private const double StuckThreshold = 5.0;    // Consider stuck after 5 seconds (was 3)
     private const int MaxStuckRetries = 10;       // More retries before giving up (was 5)
-    private const int MaxZoneExitAttempts = 10;   // More attempts before marking exit blocked (was 3)
+    private const int MaxZoneExitAttempts = 10;   // Actual boundary requests, never frames spent approaching.
 
-    // Random for exploration
-    private readonly Random _random = new();
 
     // Events
     public event Action<BotActionType, int, int, Direction>? OnActionRequested;
 
-    public MissionBot(GameState state, GameData gameData, WorldGenerator worldGenerator)
+    public MissionBot(GameState state, GameData gameData, WorldGenerator worldGenerator, Func<bool>? movementPending = null,
+        Func<Zone, int, int, bool>? canWalk = null, Func<LocalPuzzleGoal,LocalPuzzleResult>? localPlanner=null)
     {
         _state = state;
         _gameData = gameData;
         _worldGenerator = worldGenerator;
-        _pathfinder = new Pathfinder(gameData);
-        _actions = new BotActions(state, gameData, _pathfinder);
-        _solver = new MissionSolver(state, gameData, worldGenerator);
+        _pathfinder = new Pathfinder(gameData,state) { AdditionalWalkability = canWalk };
+        _actions = new BotActions(state, gameData, _pathfinder) { MovementPending = movementPending };
+        _solver = new MissionSolver(state, gameData, worldGenerator,canWalk);
+        _solver.LocalPlanner=localPlanner;
+
+        _actions.OnRouteBlockedByEnemy += enemy =>
+        {
+            _routeBlocker = enemy;
+            _routeBlockerZone = _state.CurrentZoneId;
+            _actions.Cancel();
+            ClearPendingExit();
+            _currentState = BotState.Combat;
+            Console.WriteLine($"[BOT] Enemy blocks route at ({enemy.X},{enemy.Y}); clearing it first");
+        };
 
         // Wire up action events
-        _actions.OnAction += (type, x, y, dir) => OnActionRequested?.Invoke(type, x, y, dir);
+        _actions.OnAction += (type, x, y, dir) =>
+        {
+            _debug?.Record("action-request",new { Type=type,X=x,Y=y,Direction=dir });
+            OnActionRequested?.Invoke(type, x, y, dir);
+            _debug?.Record("action-result",new { Type=type,X=x,Y=y });
+        };
+        _actions.Trace = (kind,detail) =>
+        {
+            _debug?.Record(kind,detail);
+            if(kind is "path-failed" or "move-rejected") DebugSnapshot(kind);
+        };
 
         _currentState = BotState.Idle;
     }
@@ -61,6 +123,9 @@ public class MissionBot
     /// Whether the bot is currently running.
     /// </summary>
     public bool IsRunning => _isRunning;
+
+    public WorldActionGraph? ActionGraph => _solver.ActionGraph;
+    public IReadOnlyList<WorldActionGraph.Edge> PlannedRoute => _solver.PlannedRoute;
 
     /// <summary>
     /// Current bot state.
@@ -96,22 +161,27 @@ public class MissionBot
     {
         if (_isRunning) return;
 
+        _debug?.Dispose();
+        _debug = new BotDebugLog(_gameData,_state,_worldGenerator,DebugLogRoot);
+        _debugState = null;
         _isRunning = true;
         _currentState = BotState.ThinkingAboutObjective;
         _thinkTimer = 0;
         _stuckTimer = 0;
         _stuckCount = 0;
         _lastPosition = (_state.PlayerX, _state.PlayerY, _state.CurrentZoneId);
-        _committedExplorationZone = null;
-        _committedExplorationDirection = null;
-        _zoneExitAttempts = 0;
+        ClearPendingExit();
+        _noMissionProgressTime = 0;
+        _seenProgressStates.Clear();
+        _progressObjectiveKey=null;
+        _bestObjectiveDistance=int.MaxValue;
         _solver.Reset();
+        _scriptedRelocation=false;
+        _routeBlocker = null;
 
-        // Block X-Wing positions in starting zone to avoid accidental travel
-        BlockXWingPositions();
 
-        Console.WriteLine("[BOT] Started - Explorer mode");
-        Console.WriteLine("[BOT] Will systematically explore zones and interact with everything");
+        Console.WriteLine("[BOT] Started - Mission planner");
+        Console.WriteLine("[BOT] Will follow mission dependencies and planned routes");
     }
 
     /// <summary>
@@ -121,9 +191,13 @@ public class MissionBot
     {
         if (!_isRunning) return;
 
+        DebugSnapshot("bot-stop",true);
+        _debug?.Record("session-stop",new { State=_currentState,NoProgressSeconds=_noMissionProgressTime });
+        _debug?.Dispose();
         _isRunning = false;
         _currentState = BotState.Idle;
         _actions.Cancel();
+        ClearPendingExit();
 
         Console.WriteLine("[BOT] Stopped");
     }
@@ -131,17 +205,103 @@ public class MissionBot
     /// <summary>
     /// Main update method - call each frame.
     /// </summary>
+    private bool _scriptedRelocation;
+    internal void NotifyScriptedRelocation() => _scriptedRelocation=true;
+
     public void Update(double deltaTime)
     {
         if (!_isRunning)
             return;
+        if(_scriptedRelocation)
+        {
+            _scriptedRelocation=false;
+            _actions.Cancel();
+            ClearPendingExit();
+            _debug?.Record("scripted-path-invalidated",new { _state.CurrentZoneId,_state.PlayerX,_state.PlayerY });
+        }
+        if(_state.IsGameWon)
+        {
+            Console.WriteLine("[BOT] Authored victory reached");
+            Stop();
+            return;
+        }
+        // Tile-step execution can navigate authored diagonal corridors without
+        // enabling interpolation. Prefer cardinal routes, but do not erase
+        // diagonal-only connections from the world graph.
+        _pathfinder.AllowDiagonal=true;
+        _pathfinder.PreferCardinal=true;
 
-        // Zone changes are noticed before the next queued move runs: a door now lands you a
-        // step inside the room, and a leftover step toward the old door walks straight back out.
+        string debugState = $"{_currentState}:{_state.CurrentZoneId}:{_state.PlayerX},{_state.PlayerY}:" +
+            string.Join(',',_state.Inventory) + ":" + _state.Health;
+        if(debugState != _debugState)
+        {
+            _debugState = debugState;
+            _debug?.Record("state",new { State=_currentState,Task=CurrentTask,NoProgressSeconds=_noMissionProgressTime });
+        }
+
+        string progress = string.Join(',',_state.Inventory.OrderBy(i => i)) + "|" +
+            string.Join(',',_state.SolvedZones.OrderBy(i => i)) + "|" +
+            string.Join(',',_state.VisitedZones.OrderBy(i => i)) + "|" + _state.DisabledActions.Count + "|" +
+            string.Join(';',_state.Counters.OrderBy(p=>p.Key).Select(p=>$"{p.Key}={p.Value}"))+"|"+
+            string.Join(';',_state.Variables.OrderBy(p=>p.Key).Select(p=>$"{p.Key}={p.Value}"))+"|"+
+            string.Join(';',_state.ZoneRandom.OrderBy(p=>p.Key).Select(p=>$"{p.Key}={p.Value}"))+"|"+
+            (_state.CurrentZone is { } progressZone ? $"{progressZone.Id}:{_state.PlayerX},{_state.PlayerY}:{BlockPuzzlePlanner.Layout(progressZone)}:" +
+                $"{_state.GetCounter(progressZone.Id)}:{_state.GetSectorCounter(progressZone.Id)}:" +
+                string.Join(',',progressZone.Actions.SelectMany(a=>a.Conditions).Select(c=>
+                    c.Opcode==ConditionOpcode.StandingOn && c.Arguments.Count>=3 ? (X:(int)c.Arguments[0],Y:(int)c.Arguments[1],Layer:0) :
+                    c.Opcode is ConditionOpcode.TileAtIs or ConditionOpcode.IsVariable && c.Arguments.Count>=4 ?
+                        (X:(int)c.Arguments[1],Y:(int)c.Arguments[2],Layer:(int)c.Arguments[3]) : (X:-1,Y:-1,Layer:-1))
+                    .Where(p=>p.Item1>=0 && p.Item2>=0 && p.Item3 is >=0 and <3).Distinct()
+                    .Select(p=>progressZone.GetTile(p.Item1,p.Item2,p.Item3))) : "") + "|" +
+            string.Join(';',_state.ZoneNPCs.Where(n => n.IsHostile).Select(n => $"{n.CharacterId},{n.StartX},{n.StartY},{n.Health}"));
+        bool progressStateChanged=_seenProgressStates.Add(progress);
+        bool objectiveCloser=TrackObjectiveProgress();
+        if (progressStateChanged || objectiveCloser) { _noMissionProgressTime = 0; _stuckCount = 0; }
+        else _noMissionProgressTime += deltaTime;
+        if (_noMissionProgressTime >= 45)
+        {
+            Console.WriteLine($"[BOT] Stopped: 45 seconds without new route or mission progress in zone {_state.CurrentZoneId}. Last objective: {_currentObjective?.Description}");
+            Stop();
+            return;
+        }
+
+        // Discard the old route before a queued step can run in a different zone.
         _thinkTimer += deltaTime;
+        // Record the transition while its source instruction is still available.
+        // Clearing a completed scripted passage first hides round trips from
+        // the route planner's cycle detector.
         UpdateStuckDetection(deltaTime);
-
-        // Update action executor
+        if(_currentObjective is { Type:ObjectiveType.GuideActor,TargetNpc:{ } guided } guiding &&
+            (guided.X!=guiding.TargetX || guided.Y!=guiding.TargetY || !guided.IsEnabled || !guided.IsAlive))
+        {
+            _actions.Cancel(); _currentObjective=null;
+            _currentState=BotState.ThinkingAboutObjective;
+        }
+        if (_currentObjective is { Type: ObjectiveType.TraversePassage } passage &&
+            _state.CurrentZoneId == passage.TargetZoneId &&
+            _state.PlayerX == passage.ArrivalX && _state.PlayerY == passage.ArrivalY)
+        {
+            _debug?.Record("passage-arrived", new { Objective = passage });
+            if(_passageAttempt is { } attempted)
+            {
+                bool sameZone=_state.CurrentZoneId==attempted.Zone;
+                bool exactNoProgress=sameZone &&
+                    _solver.CapturePassageProgressState(attempted.Zone)==attempted.State;
+                bool repeatedNoSemanticProgress=sameZone &&
+                    _solver.CapturePassageSemanticState(attempted.Zone)==attempted.SemanticState &&
+                    _solver.RecordUnchangedPassageAttempt(attempted.Zone,attempted.X,attempted.Y,attempted.SemanticState);
+                if(exactNoProgress || repeatedNoSemanticProgress)
+                {
+                    _solver.MarkPassageFailed(attempted.Zone,attempted.X,attempted.Y,
+                        _solver.CapturePassageProgressState(attempted.Zone));
+                    Console.WriteLine($"[BOT] Passage at ({attempted.X},{attempted.Y}) did not advance the mission; deferring it until the area state changes");
+                }
+                _passageAttempt=null;
+            }
+            _actions.Reset();
+            _currentObjective = null;
+            _currentState = BotState.ThinkingAboutObjective;
+        }
         _actions.Update(deltaTime);
 
         // State machine
@@ -169,6 +329,35 @@ public class MissionBot
         }
     }
 
+    private bool TrackObjectiveProgress()
+    {
+        var objective=_currentObjective;
+        if(objective==null)
+        {
+            _progressObjectiveKey=null;
+            _bestObjectiveDistance=int.MaxValue;
+            return false;
+        }
+        bool edgeObjective=objective.Type is ObjectiveType.ChangeZone or ObjectiveType.TraversePassage &&
+            !objective.CrossingX.HasValue && !objective.ApproachX.HasValue;
+        int targetX=objective.ApproachX ?? objective.CrossingX ?? objective.TargetX;
+        int targetY=objective.ApproachY ?? objective.CrossingY ?? objective.TargetY;
+        string key=$"{_state.CurrentZoneId}:{objective.Type}:{objective.TargetZoneId}:"+
+            (edgeObjective ? $"edge:{objective.Direction}" : $"{targetX},{targetY}")+ $":{objective.Direction}:{objective.Description}";
+        if(key!=_progressObjectiveKey)
+        {
+            _progressObjectiveKey=key;
+            _bestObjectiveDistance=int.MaxValue;
+        }
+        int distance=edgeObjective ? objective.Direction switch {
+            Direction.Up=>_state.PlayerY,Direction.Down=>(_state.CurrentZone?.Height ?? 1)-1-_state.PlayerY,
+            Direction.Left=>_state.PlayerX,Direction.Right=>(_state.CurrentZone?.Width ?? 1)-1-_state.PlayerX,
+            _=>int.MaxValue } : Math.Abs(_state.PlayerX-targetX)+Math.Abs(_state.PlayerY-targetY);
+        if(distance>=_bestObjectiveDistance) return false;
+        _bestObjectiveDistance=distance;
+        return true;
+    }
+
     private void Think()
     {
         // Rate limit thinking
@@ -176,15 +365,17 @@ public class MissionBot
             return;
         _thinkTimer = 0;
 
-        // Check for immediate threats (enemies nearby)
-        // Indiana Jones' monsters hit hard and come back when a zone is re-entered, so on
-        // those worlds only fight what is about to be a problem and keep moving otherwise.
-        int threat = _worldGenerator.CurrentWorld is { Sectors.Count: > 0 } ? (_solver.HuntEnemies ? 15 : 3) : 6;
+        // Defend against an adjacent hostile; all other combat comes from the
+        // mission prerequisite or the actual enemy obstructing a planned route.
+        const int threat = 1;
         var enemy = _solver.FindNearestEnemy();
-        if (enemy != null && enemy.DistanceTo(_state.PlayerX, _state.PlayerY) <= threat &&
-            (!_solver.HuntEnemies || _state.CurrentZone == null || _solver.CanGetAt(enemy.X, enemy.Y)))
+        if (enemy != null && Math.Max(Math.Abs(enemy.X - _state.PlayerX), Math.Abs(enemy.Y - _state.PlayerY)) <= threat)
         {
             Console.WriteLine($"[BOT] Enemy detected: {GetNpcName(enemy)} at ({enemy.X},{enemy.Y})!");
+            _routeBlocker = enemy;
+            _routeBlockerZone = _state.CurrentZoneId;
+            _actions.Cancel();
+            ClearPendingExit();
             _currentState = BotState.Combat;
             return;
         }
@@ -206,7 +397,16 @@ public class MissionBot
         }
 
         // Get current objective from solver
-        _currentObjective = _solver.GetCurrentObjective();
+        var planning = System.Diagnostics.Stopwatch.StartNew();
+        try { _currentObjective = _solver.GetCurrentObjective(); }
+        finally
+        {
+            planning.Stop();
+            _planningSeconds += planning.Elapsed.TotalSeconds;
+        }
+        _debug?.Record("planning-finished", new { Seconds=planning.Elapsed.TotalSeconds,
+            Objective=_currentObjective,NativePlanning=_solver.NativePlanningState });
+        if (_solver.ActionGraph is { } graph) graph.NextInstruction = _currentObjective;
         Console.WriteLine($"[BOT] Objective: {_currentObjective.Type} - {_currentObjective.Description}");
 
         _currentState = BotState.ExecutingObjective;
@@ -215,8 +415,48 @@ public class MissionBot
 
     private void StartObjective(BotObjective objective)
     {
+        // Normal route planning should not enter unrelated floor triggers.
+        // Explicit trigger objectives remain reachable because BotActions marks
+        // their requested cell as TransitionTarget while planning the approach.
+        _pathfinder.AvoidFloorSwitches=true;
+        // An approach belongs only to the objective that created it.
+        _pendingZoneExitDirection = null;
+        _debug?.Record("objective",new { Objective=objective,Route=_solver.PlannedRoute });
         switch (objective.Type)
         {
+            case ObjectiveType.WaitForActor:
+                _thinkTimer = 0;
+                _actions.Reset();
+                break;
+            case ObjectiveType.TraversePassage:
+                _passageAttempt=(_state.CurrentZoneId,objective.TargetX,objective.TargetY,
+                    objective.ArrivalX ?? objective.TargetX,objective.ArrivalY ?? objective.TargetY,
+                    _solver.CapturePassageProgressState(_state.CurrentZoneId),
+                    _solver.CapturePassageSemanticState(_state.CurrentZoneId));
+                if (!(objective.RequiredItemId is int passageItem
+                    ? _actions.UseItemOnNpc(passageItem,new NPC { X=objective.TargetX,Y=objective.TargetY,IsEnabled=true,Health=1 })
+                    : objective.PassageRequiresBump
+                    ? _actions.BumpAt(objective.TargetX, objective.TargetY, useTransition: true,
+                        stance:objective.ApproachX is int sx && objective.ApproachY is int sy ? (sx,sy) : null)
+                    : _actions.WalkToPosition(objective.TargetX, objective.TargetY, useTransition: true)))
+                {
+                    _passageAttempt=null;
+                    _solver.MarkUnreachable(objective.TargetX, objective.TargetY);
+                    _currentState = BotState.ThinkingAboutObjective;
+                }
+                break;
+            case ObjectiveType.PlanningBlocked:
+                Console.WriteLine($"[BOT] No executable plan: {objective.Description}");
+                _debug?.Snapshot("planning-blocked",true,true,new { Objective=objective,Route=_solver.PlannedRoute });
+                Stop();
+                break;
+
+            case ObjectiveType.UnresolvedReward:
+                Console.WriteLine($"[BOT] Reward state needs investigation: {objective.Description}");
+                _debug?.Snapshot("unresolved-reward",true,true,new { Objective=objective,Route=_solver.PlannedRoute });
+                Stop();
+                break;
+
             case ObjectiveType.TalkToNpc:
                 if (objective.TargetNpc != null)
                 {
@@ -236,15 +476,20 @@ public class MissionBot
                 break;
 
             case ObjectiveType.UseItemOnNpc:
-                if (objective.TargetNpc != null && objective.RequiredItemId.HasValue)
+                if (objective.RequiredItemId.HasValue)
                 {
-                    _lastTargetNpc = objective.TargetNpc;
+                    // Authored item targets can be map objects rather than NPCs.
+                    // Coordinate-only replay instructions use the same live handler.
+                    var target=objective.TargetNpc ?? new NPC {
+                        X=objective.TargetX,Y=objective.TargetY,IsEnabled=true,Health=1 };
+                    _lastTargetNpc = target;
                     _lastItemUsed = objective.RequiredItemId;
-                    Console.WriteLine($"[BOT] Using item {objective.RequiredItemId} on NPC at ({objective.TargetNpc.X},{objective.TargetNpc.Y})");
-                    if (!_actions.UseItemOnNpc(objective.RequiredItemId.Value, objective.TargetNpc))
+                    _itemUseWorldState = ItemUseWorldState();
+                    Console.WriteLine($"[BOT] Using item {objective.RequiredItemId} at ({target.X},{target.Y})");
+                    if (!_actions.UseItemOnNpc(objective.RequiredItemId.Value, target))
                     {
                         // Can't reach NPC
-                        _solver.MarkUnreachable(objective.TargetNpc.X, objective.TargetNpc.Y);
+                        _solver.MarkUnreachable(target.X, target.Y);
                         _currentState = BotState.ThinkingAboutObjective;
                     }
                 }
@@ -267,7 +512,7 @@ public class MissionBot
                 if (objective.Direction.HasValue)
                 {
                     Console.WriteLine($"[BOT] Moving to zone {objective.TargetZoneId} ({objective.Direction.Value})");
-                    MoveToZoneEdge(objective.Direction.Value);
+                    MoveToZoneEdge(objective.Direction.Value, objective.CrossingX, objective.CrossingY);
                 }
                 else if (objective.TargetZoneId.HasValue)
                 {
@@ -297,18 +542,69 @@ public class MissionBot
                 _actions.UseXWing();
                 break;
 
-            case ObjectiveType.EnterDoor:
-                Console.WriteLine($"[BOT] Entering door at ({objective.TargetX},{objective.TargetY})");
-                _solver.MarkDoorEntered(objective.TargetX, objective.TargetY);
-                if (!_actions.EnterDoor(objective.TargetX, objective.TargetY))
+            case ObjectiveType.AttackTile:
+                if(objective.ApproachX is int aimX && objective.ApproachY is int aimY &&
+                    (_state.PlayerX!=aimX || _state.PlayerY!=aimY))
                 {
+                    if(!_actions.MoveTo(aimX,aimY))
+                    { _solver.MarkUnreachable(aimX,aimY); _currentState=BotState.ThinkingAboutObjective; }
+                    break;
+                }
+                if(objective.RequiredItemId is int weapon && _state.HasItem(weapon) && _state.CurrentZone is { } attackZone &&
+                    ScriptedWeaponUse.CanAim(_gameData,attackZone,weapon,_state.PlayerX,_state.PlayerY,objective.TargetX,objective.TargetY))
+                {
+                    _state.SelectedWeapon=weapon;
+                    var direction=objective.TargetX<_state.PlayerX ? Direction.Left : objective.TargetX>_state.PlayerX ? Direction.Right :
+                        objective.TargetY<_state.PlayerY ? Direction.Up : Direction.Down;
+                    _actions.Attack(direction);
+                }
+                else _currentState=BotState.ThinkingAboutObjective;
+                break;
+
+            case ObjectiveType.BumpTarget:
+                if(objective.ScriptIndex is int scriptIndex)
+                    _scriptAttempt=(_state.CurrentZoneId,scriptIndex,objective.TargetX,objective.TargetY,
+                    _solver.CaptureRouteState(_state.CurrentZoneId),
+                    _solver.CapturePassageSemanticState(_state.CurrentZoneId));
+                if (!_actions.BumpAt(objective.TargetX, objective.TargetY, useTransition: objective.TargetZoneId.HasValue,
+                    stance:objective.ApproachX is int bumpX && objective.ApproachY is int bumpY ? (bumpX,bumpY) : null))
+                {
+                    _scriptAttempt=null;
                     _solver.MarkUnreachable(objective.TargetX, objective.TargetY);
                     _currentState = BotState.ThinkingAboutObjective;
                 }
                 break;
 
+            case ObjectiveType.EnterDoor:
+                int entranceCover=_state.CurrentZone?.GetTile(objective.TargetX,objective.TargetY,1) ?? ushort.MaxValue;
+                if (entranceCover<_gameData.Tiles.Count && _gameData.Tiles[entranceCover].IsDraggable)
+                {
+                    _solver.MarkUnreachable(objective.TargetX,objective.TargetY);
+                    _currentState=BotState.ThinkingAboutObjective;
+                    break;
+                }
+                Console.WriteLine($"[BOT] Entering door at ({objective.TargetX},{objective.TargetY})");
+                _solver.MarkDoorEntered(objective.TargetX, objective.TargetY);
+                int doorZone=_state.CurrentZoneId;
+                string doorState=_solver.CaptureRouteState(doorZone);
+                if (!_actions.EnterDoor(objective.TargetX, objective.TargetY))
+                {
+                    _solver.MarkUnreachable(objective.TargetX, objective.TargetY);
+                    _currentState = BotState.ThinkingAboutObjective;
+                }
+                else _doorAttempt=(doorZone,objective.TargetX,objective.TargetY,doorState);
+                break;
+
             case ObjectiveType.KillEnemy:
+                _routeBlocker = objective.TargetNpc;
+                _routeBlockerZone = _state.CurrentZoneId;
                 _currentState = BotState.Combat;
+                break;
+
+            case ObjectiveType.GuideActor:
+                if(objective.ApproachX is int gx && objective.ApproachY is int gy)
+                    _actions.MoveTo(gx,gy);
+                else _currentState=BotState.ThinkingAboutObjective;
                 break;
 
             case ObjectiveType.PushObject:
@@ -319,6 +615,7 @@ public class MissionBot
                     !(pull ? _actions.PullObject(objective.TargetX, objective.TargetY, pushDir)
                            : _actions.PushObject(objective.TargetX, objective.TargetY, pushDir)))
                 {
+                    _solver.AbandonBlockPlan();
                     _solver.MarkUnreachable(objective.TargetX, objective.TargetY);
                     _currentState = BotState.ThinkingAboutObjective;
                 }
@@ -327,8 +624,18 @@ public class MissionBot
             case ObjectiveType.WalkToPosition:
                 // Walk directly to a position (e.g., to collect R2D2 after talking)
                 Console.WriteLine($"[BOT] Walking to position ({objective.TargetX},{objective.TargetY})");
-                if (!_actions.WalkToPosition(objective.TargetX, objective.TargetY))
+                // Native/local puzzle plans retain the index of the script
+                // that makes this exact cell meaningful. Mark it as the
+                // intended transition so route safety does not reject its
+                // StandingOn trigger while rebuilding the path at execution.
+                if(objective.ScriptIndex is not null) objective.ScriptedInteraction=true;
+                if(objective.ScriptIndex is int walkScriptIndex)
+                    _scriptAttempt=(_state.CurrentZoneId,walkScriptIndex,objective.TargetX,objective.TargetY,
+                        _solver.CaptureRouteState(_state.CurrentZoneId),
+                        _solver.CapturePassageSemanticState(_state.CurrentZoneId));
+                if (!_actions.WalkToPosition(objective.TargetX, objective.TargetY, useTransition:objective.ScriptedInteraction))
                 {
+                    _scriptAttempt=null;
                     _solver.MarkUnreachable(objective.TargetX, objective.TargetY);
                     _currentState = BotState.ThinkingAboutObjective;
                 }
@@ -343,8 +650,70 @@ public class MissionBot
 
     private void ExecuteObjective()
     {
+        if(_currentObjective?.Type==ObjectiveType.GuideActor) return;
+        if (_currentObjective?.Type == ObjectiveType.WaitForActor)
+        {
+            if (_thinkTimer >= 0.5) _currentState = BotState.ThinkingAboutObjective;
+            return;
+        }
+        // Wait for the engine to resolve the boundary request before replanning.
+        if (_zoneExitRequest.HasValue) return;
         if (_actions.IsCompleted)
         {
+            if(_passageAttempt is { } passage)
+            {
+                bool sameArrival=_currentObjective is { Type:ObjectiveType.TraversePassage } &&
+                    _state.CurrentZoneId==passage.Zone &&
+                    _state.PlayerX==passage.ArrivalX && _state.PlayerY==passage.ArrivalY;
+                bool exactNoProgress=sameArrival &&
+                    _solver.CapturePassageProgressState(passage.Zone)==passage.State;
+                bool repeatedNoSemanticProgress=sameArrival &&
+                    _solver.CapturePassageSemanticState(passage.Zone)==passage.SemanticState &&
+                    _solver.RecordUnchangedPassageAttempt(passage.Zone,passage.X,passage.Y,passage.SemanticState);
+                if(exactNoProgress || repeatedNoSemanticProgress)
+                {
+                    _solver.MarkPassageFailed(passage.Zone,passage.X,passage.Y,
+                        _solver.CapturePassageProgressState(passage.Zone));
+                    Console.WriteLine($"[BOT] Passage at ({passage.X},{passage.Y}) returned to an unchanged area; deferring it until the puzzle state changes");
+                }
+                _passageAttempt=null;
+            }
+            if(_scriptAttempt is { } scripted)
+            {
+                if(_currentObjective is { Type:ObjectiveType.BumpTarget or ObjectiveType.WalkToPosition } completedScript &&
+                    completedScript.ScriptIndex==scripted.Action &&
+                    _state.CurrentZoneId==scripted.Zone &&
+                    Math.Max(Math.Abs(_state.PlayerX-scripted.X),Math.Abs(_state.PlayerY-scripted.Y))<=1)
+                {
+                    bool exactNoProgress=_solver.CaptureRouteState(scripted.Zone)==scripted.State;
+                    bool repeatedNoSemanticProgress=_solver.CapturePassageSemanticState(scripted.Zone)==scripted.SemanticState &&
+                        _solver.RecordUnchangedScriptAttempt(scripted.Zone,scripted.Action,scripted.SemanticState);
+                    if(exactNoProgress || repeatedNoSemanticProgress)
+                    {
+                        _solver.MarkScriptFailed(scripted.Zone,scripted.Action,
+                            _solver.CaptureRouteState(scripted.Zone));
+                        Console.WriteLine($"[BOT] Script {scripted.Action} in zone {scripted.Zone} caused no durable state change; deferring it until the area changes");
+                        _noMissionProgressTime=0;
+                        _lastPosition=(_state.PlayerX,_state.PlayerY,_state.CurrentZoneId);
+                    }
+                    else _solver.MarkScriptCompleted(scripted.Zone,scripted.Action);
+                }
+                _scriptAttempt=null;
+            }
+            if(_doorAttempt is { } attempted)
+            {
+                if(_currentObjective is { Type:ObjectiveType.EnterDoor } &&
+                    _state.CurrentZoneId==attempted.Zone &&
+                    Math.Max(Math.Abs(_state.PlayerX-attempted.X),Math.Abs(_state.PlayerY-attempted.Y))<=1 &&
+                    _solver.CaptureRouteState(attempted.Zone)==attempted.State)
+                {
+                    _solver.MarkDoorFailed(attempted.X,attempted.Y,attempted.State);
+                    Console.WriteLine($"[BOT] Door at ({attempted.X},{attempted.Y}) did not change the area; excluding it until the puzzle state changes");
+                    _noMissionProgressTime=0;
+                    _lastPosition=(_state.PlayerX,_state.PlayerY,_state.CurrentZoneId);
+                }
+                _doorAttempt=null;
+            }
             // Mark actions as completed
             if (_currentObjective != null)
             {
@@ -361,8 +730,43 @@ public class MissionBot
                     case ObjectiveType.UseItemOnNpc:
                         if (_lastTargetNpc != null && _lastItemUsed.HasValue)
                         {
-                            _solver.MarkUsedItemOn(_lastTargetNpc, _lastItemUsed.Value);
-                            Console.WriteLine($"[BOT] Used item {_lastItemUsed} on NPC");
+                            if (!_state.HasItem(_lastItemUsed.Value))
+                            {
+                                _solver.NoteConsumedItem(_lastItemUsed.Value);
+                                _solver.FollowOpenedPassage(_lastItemUsed.Value, _currentObjective.TargetX, _currentObjective.TargetY);
+                                if (_currentObjective.ExpectedRewardItemId is int reward && !_state.HasItem(reward))
+                                {
+                                    _solver.AwaitReward(reward);
+                                    Console.WriteLine($"[BOT] Item {_lastItemUsed} consumed; reward {reward} not in inventory yet, looking for its drop");
+                                }
+                                else Console.WriteLine($"[BOT] Item {_lastItemUsed} consumed; replanning from actual inventory");
+                            }
+                            else if (_itemUseWorldState != ItemUseWorldState())
+                            {
+                                // A retained input can still complete a scripted
+                                // offer. Remember the exact sector interaction so
+                                // the planner follows its reward instead of
+                                // triggering a repeatable placement script forever.
+                                _solver.NoteConsumedItem(_lastItemUsed.Value);
+                                _solver.FollowOpenedPassage(_lastItemUsed.Value, _currentObjective.TargetX, _currentObjective.TargetY);
+                                if (_currentObjective.ExpectedRewardItemId is int reward && !_state.HasItem(reward))
+                                {
+                                    _solver.AwaitReward(reward);
+                                    Console.WriteLine($"[BOT] Item {_lastItemUsed} retained; interaction changed the puzzle state, seeking reward {reward}");
+                                }
+                                else Console.WriteLine($"[BOT] Item {_lastItemUsed} retained; interaction changed the puzzle state, replanning");
+                            }
+                            else
+                            {
+                                // Repeating a retained-item interaction with no
+                                // world-state change cannot make progress. Defer
+                                // that sector/item pair and let the bot search
+                                // for another route or prerequisite.
+                                _solver.NoteConsumedItem(_lastItemUsed.Value);
+                                _solver.FollowOpenedPassage(_lastItemUsed.Value,_currentObjective.TargetX,_currentObjective.TargetY);
+                                _noMissionProgressTime=0;
+                                Console.WriteLine($"[BOT] Item {_lastItemUsed} remained held and changed nothing; deferring this interaction while looking for another way forward");
+                            }
                         }
                         break;
 
@@ -381,21 +785,9 @@ public class MissionBot
             if (_pendingZoneExitDirection.HasValue && _state.CurrentZone != null)
             {
                 var dir = _pendingZoneExitDirection.Value;
-                bool atEdge = dir switch
+                if (IsAtBoundary(_state.CurrentZone, dir))
                 {
-                    Direction.Up => _state.PlayerY <= 2,
-                    Direction.Down => _state.PlayerY >= _state.CurrentZone.Height - 3,
-                    Direction.Left => _state.PlayerX <= 2,
-                    Direction.Right => _state.PlayerX >= _state.CurrentZone.Width - 3,
-                    _ => false
-                };
-
-                if (atEdge)
-                {
-                    var connected = _worldGenerator.GetConnectedZone(_state.CurrentZoneId, dir);
-                    Console.WriteLine($"[BOT] At edge, walking {dir}. Target zone: {connected?.ToString() ?? "none"}");
-                    OnActionRequested?.Invoke(BotActionType.Move, 0, 0, dir);
-                    _pendingZoneExitDirection = null;
+                    RequestZoneExit(dir);
                     return;
                 }
             }
@@ -412,9 +804,14 @@ public class MissionBot
         }
     }
 
-    // Track combat approach attempts
-    private int _combatApproachAttempts;
-    private (int X, int Y) _lastCombatPos;
+
+    internal MissionSolver.ReplayIntent CaptureReplayIntent() => _solver.CaptureReplayIntent();
+    internal void NoteScriptConsumedItem(int item) => _solver.NoteConsumedItem(item);
+    internal void NoteDoorEntry(int room,int parent,int x,int y) => _solver.NoteDoorEntry(room,parent,x,y);
+    internal void SyncDoorReturns(IReadOnlyDictionary<int,(int Zone,int X,int Y)> entries) => _solver.SyncDoorReturns(entries);
+    internal void NoteScriptActionStarted(int zone,int action) => _solver.NoteScriptActionStarted(zone,action);
+
+    internal void RestoreReplayIntent(MissionSolver.ReplayIntent intent) => _solver.RestoreReplayIntent(intent);
 
     private void HandleCombat()
     {
@@ -423,197 +820,98 @@ public class MissionBot
             return;
         _thinkTimer = 0;
 
-        var enemy = _solver.FindNearestEnemy();
+        if (_routeBlocker != null && (_routeBlockerZone != _state.CurrentZoneId ||
+            !_routeBlocker.IsEnabled || !_routeBlocker.IsAlive || !_routeBlocker.IsHostile || _routeBlocker.IsInvulnerable))
+        {
+            _routeBlocker = null;
+            _actions.Cancel();
+            _currentState = BotState.ThinkingAboutObjective;
+            return;
+        }
+        var enemy = _routeBlocker;
         if (enemy == null)
         {
             Console.WriteLine("[BOT] All enemies defeated");
-            // Most "unreachable" spots here were only an enemy standing in the way.
-            _solver.ForgetUnreachableHere();
             _currentState = BotState.ThinkingAboutObjective;
-            _combatApproachAttempts = 0;
             return;
         }
 
+        // A scripted Force target can leave the stun weapon equipped. A kill
+        // objective requires damage, so return to an owned damaging weapon.
+        if(_state.SelectedWeapon is int selected && selected>=0 && selected<_gameData.Tiles.Count &&
+            (_gameData.Tiles[selected].Flags & TileFlags.WeaponTheForce)!=0)
+        {
+            var damaging=_state.Inventory.Where(id=>id>=0 && id<_gameData.Tiles.Count &&
+                _gameData.Tiles[id].IsWeapon && (_gameData.Tiles[id].Flags & TileFlags.WeaponTheForce)==0)
+                .OrderByDescending(id=>(_gameData.Tiles[id].Flags & TileFlags.WeaponLightsaber)!=0).FirstOrDefault(-1);
+            if(damaging>=0) _state.SelectedWeapon=damaging;
+        }
         int dist = enemy.DistanceTo(_state.PlayerX, _state.PlayerY);
 
-        // Indiana Jones worlds: the threat is dealt with once nothing is close; don't go hunting.
-        if (_worldGenerator.CurrentWorld is { Sectors.Count: > 0 } && dist > 3 && !_solver.HuntEnemies)
+        // Scripted waves can replace a defeated body at Luke's exact cell.
+        // A directional attack cannot hit the cell the attacker occupies.
+        // First take a real path to an adjacent stance, then attack normally.
+        if(dist==0)
         {
-            _currentState = BotState.ThinkingAboutObjective;
-            _combatApproachAttempts = 0;
+            if(!_actions.IsBusy) _actions.MoveToAdjacent(enemy.X,enemy.Y,allowDiagonalInteraction:true);
             return;
         }
 
-        // Check if we're making progress
-        if (_lastCombatPos == (_state.PlayerX, _state.PlayerY))
+        if (Math.Max(Math.Abs(enemy.X - _state.PlayerX), Math.Abs(enemy.Y - _state.PlayerY)) <= 1)
         {
-            _combatApproachAttempts++;
-            if (_combatApproachAttempts > 10)
-            {
-                Console.WriteLine("[BOT] Stuck in combat, marking enemy unreachable");
-                _solver.MarkUnreachable(enemy.X, enemy.Y);
-                _combatApproachAttempts = 0;
-                _currentState = BotState.ThinkingAboutObjective;
-                return;
-            }
+            _actions.Cancel();
+            _actions.Attack(GetDirectionTo(enemy.X, enemy.Y));
+            return;
         }
-        else
+        // Distance is not a failure: A* can approach any reachable target in this area.
+        if (_actions.IsBusy) return;
+        if (_actions.MoveToAdjacent(enemy.X, enemy.Y, allowDiagonalInteraction: true))
         {
-            _combatApproachAttempts = 0;
-            _lastCombatPos = (_state.PlayerX, _state.PlayerY);
+            return;
         }
-
-        Console.WriteLine($"[BOT] Combat: Player at ({_state.PlayerX},{_state.PlayerY}), Enemy {GetNpcName(enemy)} at ({enemy.X},{enemy.Y}), dist={dist}");
-
-        if (dist <= 1)
+        if(_solver.PrepareEnemyApproach(enemy) is { } preparation)
         {
-            // Adjacent - attack!
-            var dir = GetDirectionTo(enemy.X, enemy.Y);
-            Console.WriteLine($"[BOT] Attacking {GetNpcName(enemy)} in direction {dir}!");
-            _actions.Attack(dir);
-            _combatApproachAttempts = 0;
+            _actions.Cancel();
+            _currentObjective=preparation;
+            _currentState=BotState.ExecutingObjective;
+            StartObjective(preparation);
+            return;
         }
-        else if (dist <= 15)
-        {
-            // Close enough - try to path first
-            if (_actions.IsBusy)
-                return; // Wait for current action to complete
-
-            Console.WriteLine($"[BOT] Approaching enemy at ({enemy.X},{enemy.Y})");
-            if (!_actions.MoveToAdjacent(enemy.X, enemy.Y))
-            {
-                // Can't path to enemy - try direct movement
-                Console.WriteLine("[BOT] Can't path to enemy, trying direct movement");
-
-                // Calculate direct direction
-                int dx = enemy.X - _state.PlayerX;
-                int dy = enemy.Y - _state.PlayerY;
-
-                // Try horizontal first if bigger, otherwise vertical
-                Direction dir;
-                if (Math.Abs(dx) > Math.Abs(dy))
-                    dir = dx > 0 ? Direction.Right : Direction.Left;
-                else
-                    dir = dy > 0 ? Direction.Down : Direction.Up;
-
-                OnActionRequested?.Invoke(BotActionType.Move, 0, 0, dir);
-
-                // If that direction is blocked, try alternate direction
-                if (_combatApproachAttempts > 3)
-                {
-                    // Try the other axis
-                    if (Math.Abs(dy) > 0)
-                        dir = dy > 0 ? Direction.Down : Direction.Up;
-                    else if (Math.Abs(dx) > 0)
-                        dir = dx > 0 ? Direction.Right : Direction.Left;
-                    OnActionRequested?.Invoke(BotActionType.Move, 0, 0, dir);
-                }
-            }
-        }
-        else
-        {
-            // Enemy too far - go back to thinking
-            Console.WriteLine("[BOT] Enemy too far, returning to think");
-            _currentState = BotState.ThinkingAboutObjective;
-            _combatApproachAttempts = 0;
-        }
+        Console.WriteLine($"[BOT] No safe route to enemy at ({enemy.X},{enemy.Y}); deferring it until the map changes");
+        _solver.MarkUnreachable(enemy.X, enemy.Y);
+        _routeBlocker = null;
+        _actions.Cancel();
+        _currentState = BotState.ThinkingAboutObjective;
     }
 
     private void HandleExploration()
     {
-        if (_actions.IsBusy)
+        if (_actions.IsBusy || _thinkTimer < ThinkInterval) return;
+        if(_solver.GetExplorationRecoveryObjective() is { } recovery)
         {
-            if (_actions.IsCompleted)
-            {
-                _actions.Reset();
-            }
+            _currentObjective=recovery;
+            _currentState=BotState.ExecutingObjective;
+            StartObjective(recovery);
             return;
         }
-
-        // Rate limit
-        if (_thinkTimer < ThinkInterval)
-            return;
-        _thinkTimer = 0;
-
-        // If we have a committed target, stick with it
-        if (_committedExplorationZone.HasValue && _committedExplorationDirection.HasValue)
-        {
-            var unexploredZones = _solver.GetUnexploredConnectedZones();
-            bool stillValid = unexploredZones.Contains(_committedExplorationZone.Value) &&
-                              !_solver.IsExitBlocked(_committedExplorationDirection.Value);
-
-            if (stillValid)
-            {
-                Console.WriteLine($"[BOT] Continuing toward zone {_committedExplorationZone} ({_committedExplorationDirection})");
-                MoveToZoneEdge(_committedExplorationDirection.Value);
-                _currentState = BotState.ExecutingObjective;
-                return;
-            }
-            else
-            {
-                // Target no longer valid, clear it
-                Console.WriteLine($"[BOT] Committed target zone {_committedExplorationZone} no longer valid, picking new target");
-                _committedExplorationZone = null;
-                _committedExplorationDirection = null;
-            }
-        }
-
-        // Pick a new exploration target and COMMIT to it
-        var zones = _solver.GetUnexploredConnectedZones();
-        if (zones.Count > 0)
-        {
-            // Pick first available (more predictable than random)
-            var targetZone = zones[0];
-            var dir = _solver.GetDirectionToAdjacentZone(targetZone);
-            if (dir.HasValue)
-            {
-                _committedExplorationZone = targetZone;
-                _committedExplorationDirection = dir.Value;
-                _zoneExitAttempts = 0;
-                Console.WriteLine($"[BOT] Committed to exploring zone {targetZone} via {dir}");
-                MoveToZoneEdge(dir.Value);
-                _currentState = BotState.ExecutingObjective;
-                return;
-            }
-        }
-
-        // No unexplored connected zones - go back to thinking for other objectives
-        _currentState = BotState.ThinkingAboutObjective;
+        Console.WriteLine($"[BOT] Stopped: no executable route for {_currentObjective?.Description}");
+        _debug?.Snapshot("planning-blocked",true,true,new { Objective=_currentObjective,Route=_solver.PlannedRoute });
+        Stop();
     }
 
     private void HandleStuck()
     {
-        // Rate limit
-        if (_thinkTimer < ThinkInterval * 2)
-            return;
+        if (_thinkTimer < ThinkInterval * 2) return;
         _thinkTimer = 0;
-
-        _stuckCount++;
-        Console.WriteLine($"[BOT] Stuck (attempt {_stuckCount}/{MaxStuckRetries})");
-
+        _stuckCount = Math.Min(MaxStuckRetries, _stuckCount + 1);
+        DebugSnapshot("stuck");
         if (_stuckCount >= MaxStuckRetries)
         {
-            // Really stuck - try to change zones
-            Console.WriteLine("[BOT] Max retries reached, trying zone change");
-            var unexploredZones = _solver.GetUnexploredConnectedZones();
-            if (unexploredZones.Count > 0)
-            {
-                var dir = _solver.GetDirectionToAdjacentZone(unexploredZones[0]);
-                if (dir.HasValue)
-                {
-                    MoveToZoneEdge(dir.Value);
-                    _currentState = BotState.ExecutingObjective;
-                    _stuckCount = 0;
-                    return;
-                }
-            }
+            Console.WriteLine($"[BOT] Stopped: no executable mission route after {MaxStuckRetries} replans in zone {_state.CurrentZoneId}. Last objective: {_currentObjective?.Description}");
+            Stop();
+            return;
         }
-
-        // Try random movement
-        var directions = new[] { Direction.Up, Direction.Down, Direction.Left, Direction.Right };
-        var dir2 = directions[_random.Next(directions.Length)];
-        OnActionRequested?.Invoke(BotActionType.Move, 0, 0, dir2);
-
+        // Recalculate from actual state; never wander or leave through an unrelated exit.
         _stuckTimer = 0;
         _currentState = BotState.ThinkingAboutObjective;
     }
@@ -621,17 +919,51 @@ public class MissionBot
     // Track the direction we're trying to exit
     private Direction? _pendingZoneExitDirection;
 
-    // Track committed exploration target to prevent switching
-    private int? _committedExplorationZone;
-    private Direction? _committedExplorationDirection;
     private int _zoneExitAttempts;
+    private (int Zone, int X, int Y, Direction Direction)? _zoneExitRequest;
+    private double _zoneExitWait;
+    private (int Zone, int X, int Y, Direction Direction)? _lastZoneExitAttempt;
+
+    private void ClearPendingExit()
+    {
+        _pendingZoneExitDirection = null;
+        _zoneExitRequest = null;
+        _zoneExitWait = 0;
+        _zoneExitAttempts = 0;
+        _lastZoneExitAttempt = null;
+    }
+
+    private bool IsAtBoundary(Zone zone, Direction dir) => dir switch
+    {
+        Direction.Up => _state.PlayerY == 0,
+        Direction.Down => _state.PlayerY == zone.Height - 1,
+        Direction.Left => _state.PlayerX == 0,
+        Direction.Right => _state.PlayerX == zone.Width - 1,
+        _ => false
+    };
+
+    private void RequestZoneExit(Direction dir)
+    {
+        _pendingZoneExitDirection = null;
+        _zoneExitRequest = (_state.CurrentZoneId, _state.PlayerX, _state.PlayerY, dir);
+        if (_lastZoneExitAttempt != _zoneExitRequest) _zoneExitAttempts = 0;
+        _lastZoneExitAttempt = _zoneExitRequest;
+        _lastPosition = (_state.PlayerX, _state.PlayerY, _state.CurrentZoneId);
+        _stuckTimer = 0;
+        _zoneExitWait = 0;
+        _zoneExitAttempts++;
+        _debug?.Record("exit-request", new { Direction=dir,Attempt=_zoneExitAttempts,
+            Destination=_worldGenerator.GetConnectedZone(_state.CurrentZoneId, dir) });
+        Console.WriteLine($"[BOT] At boundary, walking {dir} (attempt {_zoneExitAttempts})");
+        OnActionRequested?.Invoke(BotActionType.Move, 0, 0, dir);
+    }
 
     /// <summary>
     /// Walks off the zone in <paramref name="dir"/>. The engine only lets you cross where the
     /// tile you leave from and the tile you would land on are both open, so pick the nearest
     /// such crossing on that edge, walk onto it, then step over.
     /// </summary>
-    private void MoveToZoneEdge(Direction dir)
+    private void MoveToZoneEdge(Direction dir, int? crossingX = null, int? crossingY = null)
     {
         var zone = _state.CurrentZone;
         if (zone == null) return;
@@ -643,10 +975,10 @@ public class MissionBot
         {
             foreach (var (x, y) in FindCrossings(zone, dir))
             {
+                if (crossingX.HasValue && crossingY.HasValue && (x != crossingX || y != crossingY)) continue;
                 if (_state.PlayerX == x && _state.PlayerY == y)
                 {
-                    Console.WriteLine($"[BOT] At crossing ({x},{y}), walking {dir}");
-                    OnActionRequested?.Invoke(BotActionType.Move, 0, 0, dir);
+                    RequestZoneExit(dir);
                     return;
                 }
                 if (_actions.MoveTo(x, y))
@@ -694,41 +1026,55 @@ public class MissionBot
         if (currentPos.CurrentZoneId != _lastPosition.ZoneId)
         {
             Console.WriteLine($"[BOT] Zone changed: {_lastPosition.ZoneId} -> {currentPos.CurrentZoneId}");
+                _debug?.Record("zone-change",new { From=_lastPosition.ZoneId,To=_state.CurrentZoneId });
+            DebugSnapshot("zone-change",true);
+            if(_currentObjective is { ArrivalX:int ax,ArrivalY:int ay } arrival &&
+                arrival.TargetZoneId==_state.CurrentZoneId && (ax!=_state.PlayerX || ay!=_state.PlayerY))
+                _debug?.Record("arrival-mismatch",new { ExpectedX=ax,ExpectedY=ay,
+                    ActualX=_state.PlayerX,ActualY=_state.PlayerY,Objective=arrival });
+            _solver.ObserveRouteTransition(_lastPosition.ZoneId,_lastPosition.X,_lastPosition.Y,_currentObjective);
             _solver.OnZoneChanged();
             _actions.Reset();
             if (_currentState == BotState.ExecutingObjective) _currentState = BotState.ThinkingAboutObjective;
             _stuckCount = 0;
             _stuckTimer = 0;
-            // Clear committed exploration target since we changed zones
-            _committedExplorationZone = null;
-            _committedExplorationDirection = null;
-            _zoneExitAttempts = 0;
+            ClearPendingExit();
 
-            // Block X-Wing positions in the new zone to prevent accidentally traveling back
-            BlockXWingPositions();
+        }
+
+        // A scripted wait deliberately keeps Luke still. The mission-progress
+        // watchdog still stops waits whose actor or script never advances.
+        if (_currentObjective?.Type == ObjectiveType.WaitForActor || _actions.IsWaitingForFriendly)
+        {
+            _stuckTimer=0; _stuckCount=0; _lastPosition=currentPos;
+            return;
         }
 
         if (currentPos == _lastPosition)
         {
             _stuckTimer += deltaTime;
 
-            // If we're trying to exit a zone and are stuck, increment exit attempts
-            if (_pendingZoneExitDirection.HasValue && _stuckTimer > 2.0)
+            // Only a request issued at the boundary can fail. Approaching the
+            // crossing, fighting, and in-flight movement are not exit attempts.
+            if (_zoneExitRequest is { } request)
             {
-                _zoneExitAttempts++;
+                if (_actions.MovementPending?.Invoke() != true)
+                    _zoneExitWait += deltaTime;
+                if (_zoneExitWait < 2.0) return;
+                _debug?.Record("exit-rejected", new { request.Direction,Attempt=_zoneExitAttempts,
+                    WaitSeconds=_zoneExitWait });
+                _zoneExitRequest = null;
+                _zoneExitWait = 0;
                 if (_zoneExitAttempts >= MaxZoneExitAttempts)
                 {
-                    // Failed to exit zone multiple times - mark exit as temporarily blocked
-                    Console.WriteLine($"[BOT] Failed to exit via {_pendingZoneExitDirection} after {_zoneExitAttempts} attempts, marking temporarily blocked");
-                    _solver.MarkExitBlocked(_pendingZoneExitDirection.Value);
-                    _pendingZoneExitDirection = null;
-                    _committedExplorationZone = null;
-                    _committedExplorationDirection = null;
+                    Console.WriteLine($"[BOT] Failed to cross {request.Direction} after {_zoneExitAttempts} boundary requests, marking temporarily blocked");
+                    _solver.MarkExitBlocked(request.Direction);
                     _zoneExitAttempts = 0;
-                    _stuckTimer = 0;
-                    _currentState = BotState.ThinkingAboutObjective;
-                    return;
                 }
+                _actions.Reset();
+                _stuckTimer = 0;
+                _currentState = BotState.ThinkingAboutObjective;
+                return;
             }
 
             if (_stuckTimer > StuckThreshold && _currentState != BotState.Stuck)
@@ -740,27 +1086,11 @@ public class MissionBot
         }
         else
         {
+            _zoneExitRequest = null;
+            _zoneExitWait = 0;
+            _zoneExitAttempts = 0;
             _stuckTimer = 0;
             _lastPosition = currentPos;
-        }
-    }
-
-    /// <summary>
-    /// Blocks X-Wing positions to prevent accidentally triggering travel when walking.
-    /// Uses permanent blocklist that survives zone changes.
-    /// </summary>
-    private void BlockXWingPositions()
-    {
-        if (_state.CurrentZone == null) return;
-
-        foreach (var obj in _state.CurrentZone.Objects)
-        {
-            if (obj.Type == ZoneObjectType.XWingFromDagobah ||
-                obj.Type == ZoneObjectType.XWingToDagobah)
-            {
-                Console.WriteLine($"[BOT] Permanently blocking X-Wing position at ({obj.X},{obj.Y})");
-                _pathfinder.MarkPermanentlyBlocked(_state.CurrentZoneId, obj.X, obj.Y);
-            }
         }
     }
 

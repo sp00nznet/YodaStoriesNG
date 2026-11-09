@@ -57,6 +57,10 @@ public class SaveGameManager
                 // Game variables
                 Variables = new Dictionary<int, int>(state.Variables),
                 Counters = new Dictionary<int, int>(state.Counters),
+                ZoneRandom = new(state.ZoneRandom),
+                ZoneRolls = new(state.ZoneRolls),
+                DefeatedMonsters = state.DefeatedMonsters.ToList(),
+                DisabledMonsters = state.DisabledMonsters.ToList(),
 
                 // Quest state
                 SolvedZones = state.SolvedZones.ToList(),
@@ -83,6 +87,8 @@ public class SaveGameManager
                 saveData.WorldData = new SaveWorldData
                 {
                     Planet = world.Planet,
+                    Seed = world.Seed,
+                    GenerationSize = world.GenerationSize,
                     MissionNumber = world.MissionNumber,
                     StartingZoneId = world.StartingZoneId,
                     LandingZoneId = world.LandingZoneId,
@@ -276,6 +282,10 @@ public class SaveGameManager
         // Game variables
         state.Variables = new Dictionary<int, int>(saveData.Variables);
         state.Counters = new Dictionary<int, int>(saveData.Counters);
+        state.ZoneRandom = new(saveData.ZoneRandom ?? new());
+        state.ZoneRolls = new(saveData.ZoneRolls ?? new());
+        state.DefeatedMonsters = new(saveData.DefeatedMonsters ?? new());
+        state.DisabledMonsters = new(saveData.DisabledMonsters ?? new());
 
         // Quest state
         state.SolvedZones = new HashSet<int>(saveData.SolvedZones);
@@ -386,6 +396,10 @@ public class SaveGameData
     // Game variables
     public Dictionary<int, int> Variables { get; set; } = new();
     public Dictionary<int, int> Counters { get; set; } = new();
+    public Dictionary<int, int> ZoneRandom { get; set; } = new();
+    public Dictionary<int, int> ZoneRolls { get; set; } = new();
+    public List<string> DefeatedMonsters { get; set; } = new();
+    public List<string> DisabledMonsters { get; set; } = new();
 
     // Quest state
     public List<int> SolvedZones { get; set; } = new();
@@ -414,6 +428,8 @@ public class SaveGameData
 /// </summary>
 public class SaveWorldData
 {
+    public int? Seed { get; set; }
+    public WorldSize GenerationSize { get; set; } = WorldSize.Medium;
     public Planet Planet { get; set; }
     public int MissionNumber { get; set; }
     public int StartingZoneId { get; set; }

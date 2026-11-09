@@ -48,26 +48,46 @@ public unsafe partial class GameEngine
             if (reciprocal != null) anchor = (reciprocal.X, reciprocal.Y);
         }
 
-        bool CanStand(int x, int y)
+        bool CanStand(int x, int y, bool allowDoor = false)
         {
             if (x < 0 || y < 0 || x >= zone.Width || y >= zone.Height || IsGroundBlocked(zone, x, y) ||
-                IsScriptedActorTile(zone, x, y) || zone.Objects.Any(h => h.Enabled && IsDoor(h) && h.X == x && h.Y == y)) return false;
+                IsScriptedActorTile(zone, x, y) || !allowDoor && zone.Objects.Any(h => h.Enabled && IsDoor(h) && h.X == x && h.Y == y)) return false;
             int tile = zone.GetTile(x, y, 1);
-            return (tile >= _gameData.Tiles.Count || !(_gameData.Tiles[tile].IsObject || _gameData.Tiles[tile].IsCharacter)) &&
-                !zone.Monsters.Any(m => m.X == x && m.Y == y);
+            var spawns=zone.Monsters.Select((m,i)=>(Monster:m,Index:i))
+                .Where(p=>p.Monster.X==x && p.Monster.Y==y).ToList();
+            bool defeatedMarker=spawns.Count>0 && spawns.All(p=>_state.DefeatedMonsters.Contains($"{zone.Id}_{p.Index}"));
+            bool tileOpen=tile >= _gameData.Tiles.Count ||
+                (!_gameData.Tiles[tile].IsObject) &&
+                (!_gameData.Tiles[tile].IsCharacter || defeatedMarker);
+            return tileOpen && spawns.All(p=>_state.DefeatedMonsters.Contains($"{zone.Id}_{p.Index}") ||
+                    _state.DisabledMonsters.Contains($"{zone.Id}_{p.Index}"));
         }
         (int X, int Y)? spawn = null;
         if (anchor is { } at)
         {
+            // Some rooms seal every neighboring cell until Luke stands on the
+            // entrance itself. Preserve that authored landing so its normal
+            // StandingOn script can open the room on the next simulation tick.
+            int entranceTile=zone.GetTile(at.X,at.Y,1);
+            if(DoorwayArrival.HasEntryTrigger(zone,at.X,at.Y,_state) && !IsGroundBlocked(zone,at.X,at.Y) &&
+                !ZoneArrival.HasLivingActor(zone,at.X,at.Y,_state) &&
+                (entranceTile>=_gameData.Tiles.Count || !_gameData.Tiles[entranceTile].IsObject))
+                spawn=at;
+            // If the exit-side square now contains a movable prop, keep the
+            // hero on the clear threshold so it can be pushed away. Choosing a
+            // side square can strand the hero in a disconnected scenery pocket.
+            if(spawn==null && DoorwayArrival.HasMovableExitCover(_gameData,zone,at.X,at.Y) &&
+                CanStand(at.X,at.Y,allowDoor:true)) spawn=at;
             // Remain beside the actual entrance, never on another staircase or in a
             // disconnected pocket reached by a global nearest-walkable search.
-            var offsets = at.Y >= zone.Height - 1 ? new[] { (0,-1), (1,0), (-1,0), (0,1) }
-                : new[] { (0,1), (1,0), (-1,0), (0,-1) };
-            foreach (var (dx, dy) in offsets)
-                if (CanStand(at.X + dx, at.Y + dy)) { spawn = (at.X + dx, at.Y + dy); break; }
-            // Some rooms wall the door in (Indy zone 151: walls either side, an object in
-            // front), so the door tile itself is the only place to arrive - as before.
-            spawn ??= at;
+            var offsets = DoorwayArrival.ExitOffsets(zone,at.Y);
+            if(spawn==null)
+                foreach (var (dx, dy) in offsets)
+                    if (CanStand(at.X + dx, at.Y + dy)) { spawn = (at.X + dx, at.Y + dy); break; }
+            // A surviving actor can occupy the sole square beside a narrow
+            // entrance. Land on its clear doorway instead, so the player can
+            // fight or wait without overlapping the actor or skipping a wall.
+            if(spawn==null && CanStand(at.X,at.Y,allowDoor:true)) spawn=at;
         }
         else
         {
@@ -85,8 +105,12 @@ public unsafe partial class GameEngine
             return;
         }
         if (!returning && door.Type == ZoneObjectType.DoorEntrance)
+        {
             _doorReturnPoints[destination] = (source, door.X, door.Y);
+            _bot?.NoteDoorEntry(destination,source,door.X,door.Y);
+        }
         _state.PreviousZoneId = source;
-        LoadZone(destination, spawn.Value.X, spawn.Value.Y);
+        _state.SetSectorCounter(destination,_state.GetSectorCounter(source));
+        LoadZone(destination, spawn.Value.X, spawn.Value.Y, enteredThroughDoor:true);
     }
 }
