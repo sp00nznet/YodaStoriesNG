@@ -31,7 +31,8 @@ public enum SectorType
 public class WorldGenerator
 {
     private readonly GameData _gameData;
-    private readonly Random _random = new();
+    private Random _random = new();
+    private int _generationSeed;
 
     // World grid - dynamic based on world size (10 for Small/Medium/Large, 15 for XtraLarge)
     private int _gridSize = 10;
@@ -282,6 +283,10 @@ public class WorldGenerator
     /// </summary>
     public WorldMap GenerateWorld(WorldSize size)
     {
+        _generationSeed = int.TryParse(Environment.GetEnvironmentVariable("YSNG_SEED"),out int configuredSeed)
+            ? configuredSeed : Random.Shared.Next();
+        _random = new Random(_generationSeed);
+        Console.WriteLine($"[WORLD] Seed={_generationSeed}, game={_gameData.GameType}, size={size}");
         if (_gameData.GameType == GameType.IndianaJones || _gameData.GameType == GameType.YodaStories)
             return GenerateOriginalWorld(size);
 
@@ -296,8 +301,9 @@ public class WorldGenerator
         CurrentWorld = new WorldMap
         {
             Planet = CurrentMission.Planet,
-            Mission = CurrentMission,
-            Seed = _random.Next(),
+            Seed = _generationSeed,
+            GenerationSize = size,
+            Mission = CurrentMission
         };
 
         // Generate Dagobah (starting area - fixed layout)
@@ -331,19 +337,16 @@ public class WorldGenerator
     {
         _gridSize = 10;
 
-        // YSNG_SEED makes the world repeatable - for chasing a bug through one world.
-        var seeds = int.TryParse(Environment.GetEnvironmentVariable("YSNG_SEED"), out var fixedSeed)
-            ? new Random(fixedSeed) : _random;
+        // Planet choice, retry seeds, and auxiliary placements share the recorded seed.
+        var seeds = _random;
 
         OriginalWorldGenerator? generator = null;
-        int seed = 0;
         var missionPlanet = _gameData.GameType == GameType.IndianaJones
             ? Planet.None
             : new[] { Planet.Desert, Planet.Snow, Planet.Forest }[_random.Next(3)];
         for (int attempt = 1; generator == null; attempt++)
         {
-            seed = seeds.Next();
-            var candidate = new OriginalWorldGenerator(_gameData, seed);
+            var candidate = new OriginalWorldGenerator(_gameData, seeds.Next());
             try
             {
                 candidate.Generate(missionPlanet, size);
@@ -366,7 +369,11 @@ public class WorldGenerator
             for (int i = 0; i < arguments.Length; i++)
             {
                 var hotspot = _gameData.Zones[zoneId].Objects[i];
-                if (hotspot.Argument == (ushort)arguments[i]) continue;
+                // Selecting a drop enables it even when the authored argument
+                // already equals the generated reward. Unselected template
+                // alternatives must remain disabled.
+                if (hotspot.Argument == (ushort)arguments[i] &&
+                    !generator.PopulatedHotspots.Contains((zoneId,i))) continue;
                 hotspot.Argument = (ushort)arguments[i];
                 hotspot.Enabled = true; // the generator put something here
             }
@@ -374,7 +381,8 @@ public class WorldGenerator
         var world = new WorldMap
         {
             Planet = missionPlanet,
-            Seed = seed,
+            Seed = _generationSeed,
+            GenerationSize = size,
             Grid = new int?[10, 10],
             TypeMap = new SectorType[10, 10],
             OrderMap = new int[10, 10],
@@ -415,6 +423,10 @@ public class WorldGenerator
 
         SetupZoneConnections();
         AssociateRoomZones(new List<Zone>(), outdoorZones);
+        RepairUnreachableBlockadeLocks(world,outdoorZones);
+        RepairUnreachableDoorInputs(world,outdoorZones);
+        RepairUnreachableSectorInteractions(world);
+        RepairUnreachableOutdoorConnections(world,outdoorZones);
 
         world.Strain1 = generator.Strain1ByIndex;
         world.Strain2 = generator.Strain2ByIndex;
@@ -1234,8 +1246,11 @@ public class WorldGenerator
     {
         if (CurrentWorld == null) return;
 
-        foreach (var outdoorZoneId in usedOutdoorZones)
+        var pending = new Queue<int>(usedOutdoorZones);
+        var seen = new HashSet<int>();
+        while (pending.TryDequeue(out int outdoorZoneId))
         {
+            if (!seen.Add(outdoorZoneId)) continue;
             var zone = _gameData.Zones.FirstOrDefault(z => z.Id == outdoorZoneId);
             if (zone == null) continue;
 
@@ -1254,12 +1269,734 @@ public class WorldGenerator
                     if (!CurrentWorld.RoomConnections.ContainsKey(outdoorZoneId))
                         CurrentWorld.RoomConnections[outdoorZoneId] = new List<int>();
 
-                    CurrentWorld.RoomConnections[outdoorZoneId].Add(destZoneId);
+                    if (!CurrentWorld.RoomConnections[outdoorZoneId].Contains(destZoneId))
+                        CurrentWorld.RoomConnections[outdoorZoneId].Add(destZoneId);
 
                     // Also track the reverse (room -> outdoor)
-                    CurrentWorld.RoomParents[destZoneId] = outdoorZoneId;
+                    if (!usedOutdoorZones.Contains(destZoneId))
+                        CurrentWorld.RoomParents.TryAdd(destZoneId, outdoorZoneId);
+                    pending.Enqueue(destZoneId);
                 }
             }
+        }
+    }
+
+    // Some blockade templates put their Lock hotspot inside a section sealed
+    // off by unrelated wall tiles. When that happens the required item cannot
+    // be used from either side. Move the authored lock onto the shortest
+    // boundary-to-boundary opening and make its existing unlock animation
+    // clear the remaining tiles in that crossing.
+    // Generated worlds connect neighboring area IDs at their map borders. Some
+    // authored sector layouts have a sealed building wall between the room door
+    // and every border lane, leaving a graph edge that the player cannot use.
+    // Open a short, unscripted passage from a real arrival side to one valid
+    // crossing lane so each generated connection is physically traversable.
+    private void RepairUnreachableOutdoorConnections(WorldMap world,HashSet<int> outdoorZones)
+    {
+        foreach(int zoneId in outdoorZones)
+        {
+            if(!world.Connections.TryGetValue(zoneId,out var links)) continue;
+            var zone=_gameData.Zones[zoneId];
+            bool Open(Zone z,int x,int y)
+            {
+                if(x<0 || y<0 || x>=z.Width || y>=z.Height) return false;
+                if(z.Objects.Any(h=>h.Enabled && h.X==x && h.Y==y && h.Type is
+                    ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit or ZoneObjectType.Teleporter or
+                    ZoneObjectType.VehicleToPrimary or ZoneObjectType.VehicleToSecondary or
+                    ZoneObjectType.XWingFromDagobah or ZoneObjectType.XWingToDagobah)) return false;
+                int tile=z.GetTile(x,y,1);
+                return tile>=_gameData.Tiles.Count || !_gameData.Tiles[tile].IsObject;
+            }
+            bool ScriptedCell(int x,int y) => zone.Objects.Any(h=>h.X==x && h.Y==y) || zone.Actions.Any(a=>
+                a.Conditions.Any(c=>c.Arguments.Count>=2 && c.Arguments[0]==x && c.Arguments[1]==y &&
+                    c.Opcode is ConditionOpcode.Bump or ConditionOpcode.PlacedItemIs or ConditionOpcode.StandingOn));
+
+            var starts=new HashSet<(int X,int Y)>();
+            void AddEntrySide(Direction side)
+            {
+                int n=side is Direction.Left or Direction.Right ? zone.Height : zone.Width;
+                for(int i=1;i<n-1;i++)
+                {
+                    var p=side switch
+                    {
+                        Direction.Up=>(i,1), Direction.Down=>(i,zone.Height-2),
+                        Direction.Left=>(1,i), _=>(zone.Width-2,i),
+                    };
+                    if(Open(zone,p.Item1,p.Item2)) starts.Add(p);
+                }
+            }
+            if(links.North.HasValue) AddEntrySide(Direction.Down);
+            if(links.South.HasValue) AddEntrySide(Direction.Up);
+            if(links.West.HasValue) AddEntrySide(Direction.Right);
+            if(links.East.HasValue) AddEntrySide(Direction.Left);
+            foreach(var door in zone.Objects.Where(h=>h.Enabled && h.Type==ZoneObjectType.DoorEntrance))
+            foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                if(Open(zone,door.X+dx,door.Y+dy)) starts.Add((door.X+dx,door.Y+dy));
+            foreach(var spawn in zone.Objects.Where(h=>h.Type==ZoneObjectType.SpawnLocation))
+            {
+                if(Open(zone,spawn.X,spawn.Y)) starts.Add((spawn.X,spawn.Y));
+                foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                    if(Open(zone,spawn.X+dx,spawn.Y+dy)) starts.Add((spawn.X+dx,spawn.Y+dy));
+            }
+            if(starts.Count==0) continue;
+
+            IEnumerable<(Direction Direction,int Destination)> exits()
+            {
+                if(links.North is int n) yield return (Direction.Up,n);
+                if(links.South is int s) yield return (Direction.Down,s);
+                if(links.West is int w) yield return (Direction.Left,w);
+                if(links.East is int e) yield return (Direction.Right,e);
+            }
+            foreach(var (direction,destinationId) in exits())
+            {
+                if(destinationId<0 || destinationId>=_gameData.Zones.Count) continue;
+                var dest=_gameData.Zones[destinationId];
+                var candidates=new List<(int X,int Y)>();
+                int length=direction is Direction.Up or Direction.Down ? zone.Width : zone.Height;
+                for(int i=1;i<length-1;i++)
+                {
+                    var from=direction switch
+                    {
+                        Direction.Up=>(i,0),Direction.Down=>(i,zone.Height-1),
+                        Direction.Left=>(0,i),_=>(zone.Width-1,i),
+                    };
+                    int along=Math.Clamp(i,1,direction is Direction.Up or Direction.Down ? dest.Width-2 : dest.Height-2);
+                    var entry=direction switch
+                    {
+                        Direction.Up=>(along,dest.Height-1),Direction.Down=>(along,0),
+                        Direction.Left=>(dest.Width-1,along),_=>(0,along),
+                    };
+                    var landing=direction switch
+                    {
+                        Direction.Up=>(along,dest.Height-2),Direction.Down=>(along,1),
+                        Direction.Left=>(dest.Width-2,along),_=>(1,along),
+                    };
+                    if(!Open(dest,landing.Item1,landing.Item2)) landing=entry;
+                    if(Open(dest,entry.Item1,entry.Item2) && Open(dest,landing.Item1,landing.Item2) && Open(zone,from.Item1,from.Item2))
+                        candidates.Add(from);
+                }
+                if(candidates.Count==0) continue;
+
+                bool Reached((int X,int Y) start,HashSet<(int X,int Y)> goals)
+                {
+                    var seen=new HashSet<(int X,int Y)> { start };
+                    var pending=new Queue<(int X,int Y)>(); pending.Enqueue(start);
+                    while(pending.TryDequeue(out var at))
+                    {
+                        if(goals.Contains(at)) return true;
+                        foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                        {
+                            var next=(at.X+dx,at.Y+dy);
+                            if(Open(zone,next.Item1,next.Item2) && seen.Add(next)) pending.Enqueue(next);
+                        }
+                    }
+                    return false;
+                }
+                var candidateSet=candidates.ToHashSet();
+                foreach(var start in starts)
+                {
+                    if(Reached(start,candidateSet)) continue;
+                    var costs=new Dictionary<(int X,int Y),int> { [start]=0 };
+                    var previous=new Dictionary<(int X,int Y),(int X,int Y)>();
+                    var queue=new PriorityQueue<(int X,int Y),int>(); queue.Enqueue(start,0);
+                    (int X,int Y)? end=null;
+                    while(queue.TryDequeue(out var at,out int cost))
+                    {
+                        if(cost!=costs[at]) continue;
+                        if(candidateSet.Contains(at)) { end=at; break; }
+                        foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                        {
+                            var next=(at.X+dx,at.Y+dy);
+                            if(next.Item1<0 || next.Item2<0 || next.Item1>=zone.Width || next.Item2>=zone.Height ||
+                                !Open(zone,next.Item1,next.Item2) && ScriptedCell(next.Item1,next.Item2)) continue;
+                            int tile=zone.GetTile(next.Item1,next.Item2,1);
+                            if(!Open(zone,next.Item1,next.Item2) && tile<_gameData.Tiles.Count && _gameData.Tiles[tile].IsDraggable) continue;
+                            int nextCost=cost+(Open(zone,next.Item1,next.Item2)?1:8);
+                            if(nextCost>=costs.GetValueOrDefault(next,int.MaxValue)) continue;
+                            costs[next]=nextCost; previous[next]=at; queue.Enqueue(next,nextCost);
+                        }
+                    }
+                    if(end==null) continue;
+                    var path=new List<(int X,int Y)>();
+                    for(var at=end.Value;;at=previous[at]) { path.Add(at); if(!previous.ContainsKey(at)) break; }
+                    path.Reverse();
+                    var walls=path.Where(p=>!Open(zone,p.X,p.Y)).Distinct().ToList();
+                    if(walls.Count is 0 or >4) continue;
+                    foreach(var wall in walls) zone.SetTile(wall.X,wall.Y,1,ushort.MaxValue);
+                    Console.WriteLine($"[WORLD] Opened {walls.Count} wall tile(s) to connect zone {zoneId} to {destinationId} ({direction}) from ({start.X},{start.Y})");
+                }
+            }
+        }
+    }
+
+    private void RepairUnreachableBlockadeLocks(WorldMap world,HashSet<int> outdoorZones)
+    {
+        foreach(int zoneId in outdoorZones)
+        {
+            var sector=world.Sectors.GetValueOrDefault(zoneId);
+            if(sector?.Type is not (ZoneType.BlockadeWest or ZoneType.BlockadeEast or
+                ZoneType.BlockadeNorth or ZoneType.BlockadeSouth)) continue;
+            var zone=_gameData.Zones[zoneId];
+            var lockHotspot=zone.Objects.FirstOrDefault(h=>h.Enabled && h.Type==ZoneObjectType.Lock);
+            if(lockHotspot==null) continue;
+            int oldX=lockHotspot.X,oldY=lockHotspot.Y;
+            var open=new bool[zone.Width,zone.Height];
+            for(int y=0;y<zone.Height;y++) for(int x=0;x<zone.Width;x++)
+            {
+                int tile=zone.GetTile(x,y,1);
+                open[x,y]=tile>=_gameData.Tiles.Count ||
+                    !_gameData.Tiles[tile].IsObject;
+            }
+            var (entrySide,exitSide)=sector.Type switch
+            {
+                ZoneType.BlockadeWest=>(Direction.Right,Direction.Left),
+                ZoneType.BlockadeEast=>(Direction.Left,Direction.Right),
+                ZoneType.BlockadeNorth=>(Direction.Down,Direction.Up),
+                _=>(Direction.Up,Direction.Down),
+            };
+            IEnumerable<(int X,int Y)> EdgeCells(Direction side)
+            {
+                for(int along=1;along<(side is Direction.Left or Direction.Right ? zone.Height : zone.Width)-1;along++)
+                    yield return side switch
+                    {
+                        Direction.Left=>(1,along),Direction.Right=>(zone.Width-2,along),
+                        Direction.Up=>(along,1),_=>(along,zone.Height-2),
+                    };
+            }
+            bool LockReachableFromEntry()
+            {
+                var pending=new Queue<(int X,int Y)>(); var seen=new HashSet<(int X,int Y)>();
+                foreach(var p in EdgeCells(entrySide)) if(open[p.X,p.Y] && seen.Add(p)) pending.Enqueue(p);
+                while(pending.TryDequeue(out var at))
+                {
+                    if(Math.Abs(at.X-oldX)+Math.Abs(at.Y-oldY)==1) return true;
+                    foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                    {
+                        var next=(at.X+dx,at.Y+dy);
+                        if(next.Item1<0 || next.Item2<0 || next.Item1>=zone.Width || next.Item2>=zone.Height ||
+                            !open[next.Item1,next.Item2] || !seen.Add(next)) continue;
+                        pending.Enqueue(next);
+                    }
+                }
+                return false;
+            }
+            if(LockReachableFromEntry()) continue;
+
+            var costs=new Dictionary<(int X,int Y),int>();
+            var previous=new Dictionary<(int X,int Y),(int X,int Y)>();
+            var queue=new PriorityQueue<(int X,int Y),int>();
+            foreach(var p in EdgeCells(entrySide)) if(open[p.X,p.Y] && costs.TryAdd(p,0)) queue.Enqueue(p,0);
+            (int X,int Y)? end=null;
+            while(queue.TryDequeue(out var at,out int cost))
+            {
+                if(cost!=costs[at]) continue;
+                if(EdgeCells(exitSide).Contains(at)) { end=at; break; }
+                foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                {
+                    var next=(at.X+dx,at.Y+dy);
+                    if(next.Item1<0 || next.Item2<0 || next.Item1>=zone.Width || next.Item2>=zone.Height) continue;
+                    int nextCost=cost+(open[next.Item1,next.Item2]?1:5);
+                    if(nextCost>=costs.GetValueOrDefault(next,int.MaxValue)) continue;
+                    costs[next]=nextCost; previous[next]=at; queue.Enqueue(next,nextCost);
+                }
+            }
+            if(end==null) continue;
+            var path=new List<(int X,int Y)>();
+            for(var at=end.Value;;at=previous[at]) { path.Add(at); if(!previous.ContainsKey(at)) break; }
+            path.Reverse();
+            var blockers=path.Where(p=>!open[p.X,p.Y]).Distinct().ToList();
+            if(blockers.Count==0 || blockers.Count>4) continue;
+            var gate=blockers[0];
+            ushort lockTile=zone.GetTile(oldX,oldY,1);
+            if(lockTile>=_gameData.Tiles.Count || !_gameData.Tiles[lockTile].IsObject) continue;
+            int unlockAction=zone.Actions.FindIndex(a=>a.Instructions.Any(i=>
+                i.Opcode==InstructionOpcode.RemoveTile && i.Arguments.Count>=3 &&
+                i.Arguments[0]==oldX && i.Arguments[1]==oldY && i.Arguments[2]==1));
+            if(unlockAction<0) continue;
+
+            foreach(var action in zone.Actions)
+            {
+                foreach(var condition in action.Conditions)
+                {
+                    var a=condition.Arguments;
+                    if(a.Count<2) continue;
+                    int xIndex=condition.Opcode==ConditionOpcode.TileAtIs?1:0;
+                    int yIndex=condition.Opcode==ConditionOpcode.TileAtIs?2:1;
+                    if((condition.Opcode is ConditionOpcode.Bump or ConditionOpcode.Standing or
+                        ConditionOpcode.StandingOn or ConditionOpcode.PlacedItemIs or ConditionOpcode.TileAtIs) &&
+                        a[xIndex]==oldX && a[yIndex]==oldY)
+                    { a[xIndex]=(short)gate.X; a[yIndex]=(short)gate.Y; }
+                }
+                foreach(var instruction in action.Instructions)
+                {
+                    var a=instruction.Arguments;
+                    if(a.Count<2) continue;
+                    if(instruction.Opcode is InstructionOpcode.MoveTile && a.Count>=5)
+                    {
+                        if(a[0]==oldX && a[1]==oldY) { a[0]=(short)gate.X; a[1]=(short)gate.Y; }
+                        if(a[3]==oldX && a[4]==oldY) { a[3]=(short)gate.X; a[4]=(short)gate.Y; }
+                    }
+                    else if(instruction.Opcode is InstructionOpcode.PlaceTile or InstructionOpcode.RemoveTile or
+                        InstructionOpcode.SetTileNeedsDisplay or InstructionOpcode.DrawTile or
+                        InstructionOpcode.MoveHeroTo)
+                    {
+                        if(a[0]==oldX && a[1]==oldY) { a[0]=(short)gate.X; a[1]=(short)gate.Y; }
+                    }
+                }
+            }
+            zone.SetTile(oldX,oldY,1,ushort.MaxValue);
+            zone.SetTile(gate.X,gate.Y,1,lockTile);
+            lockHotspot.X=(ushort)gate.X; lockHotspot.Y=(ushort)gate.Y;
+            foreach(var p in blockers.Skip(1))
+                zone.Actions[unlockAction].Instructions.Add(new Instruction
+                { Opcode=InstructionOpcode.RemoveTile,Arguments={(short)p.X,(short)p.Y,1} });
+            Console.WriteLine($"[WORLD] Repaired unreachable {sector.Type} lock in zone {zoneId}: " +
+                $"({oldX},{oldY}) -> ({gate.X},{gate.Y}), clears {blockers.Count} barrier tiles");
+        }
+    }
+
+    // Native rooms sometimes put the bump controls for a locked doorway behind
+    // a complete wall. If an authored counter chain proves those controls are
+    // required to open an enabled door, open the shortest wall path from a real
+    // connected edge to each control. This keeps the scripts and the intended
+    // puzzle intact while making the authored controls reachable.
+    private void RepairUnreachableDoorInputs(WorldMap world,HashSet<int> outdoorZones)
+    {
+        foreach(int zoneId in outdoorZones)
+        {
+            var zone=_gameData.Zones[zoneId];
+            if(!world.Connections.TryGetValue(zoneId,out var connections)) continue;
+            var starts=new HashSet<(int X,int Y)>();
+            void AddEdge(Direction direction)
+            {
+                bool vertical=direction is Direction.Up or Direction.Down;
+                int count=vertical?zone.Width:zone.Height;
+                for(int along=1;along<count-1;along++)
+                {
+                    var p=direction switch
+                    {
+                        Direction.Up=>(along,0),Direction.Down=>(along,zone.Height-1),
+                        Direction.Left=>(0,along),_=>(zone.Width-1,along),
+                    };
+                    starts.Add(p);
+                }
+            }
+            if(connections.North.HasValue) AddEdge(Direction.Up);
+            if(connections.South.HasValue) AddEdge(Direction.Down);
+            if(connections.West.HasValue) AddEdge(Direction.Left);
+            if(connections.East.HasValue) AddEdge(Direction.Right);
+            if(starts.Count==0) continue;
+
+            bool Open(int x,int y)
+            {
+                if(x<0 || y<0 || x>=zone.Width || y>=zone.Height) return false;
+                int id=zone.GetTile(x,y,1);
+                return id>=_gameData.Tiles.Count || !_gameData.Tiles[id].IsObject;
+            }
+            var doorActions=zone.Objects.Where(h=>h.Enabled && h.Type==ZoneObjectType.DoorEntrance)
+                .SelectMany(door=>zone.Actions.Select((action,index)=>(door,action,index))
+                    .Where(p=>p.action.Conditions.Any(c=>c.Opcode==ConditionOpcode.Bump && c.Arguments.Count>=3 &&
+                            c.Arguments[0]==p.door.X && c.Arguments[1]==p.door.Y) &&
+                        p.action.Instructions.Any(i=>i.Opcode==InstructionOpcode.RemoveTile && i.Arguments.Count>=3 &&
+                            i.Arguments[0]==p.door.X && i.Arguments[1]==p.door.Y && i.Arguments[2]==1)))
+                .ToList();
+            foreach(var gate in doorActions)
+            foreach(var counterGuard in gate.action.Conditions.Where(c=>c.Opcode==ConditionOpcode.CounterIs && c.Arguments.Count>0))
+            foreach(var counterProducer in zone.Actions.Where(a=>a.Instructions.Any(i=>
+                i.Opcode==InstructionOpcode.SetCounter && i.Arguments.Count>0 && i.Arguments[0]==counterGuard.Arguments[0])))
+            foreach(var tileGuard in counterProducer.Conditions.Where(c=>c.Opcode==ConditionOpcode.TileAtIs && c.Arguments.Count>=4))
+            {
+                int expected=unchecked((ushort)tileGuard.Arguments[0]);
+                int cellX=tileGuard.Arguments[1],cellY=tileGuard.Arguments[2],layer=tileGuard.Arguments[3];
+                var inputs=zone.Actions.SelectMany((action,index)=>action.Instructions
+                    .Where(i=>i.Opcode==InstructionOpcode.PlaceTile && i.Arguments.Count>=4 &&
+                        i.Arguments[0]==cellX && i.Arguments[1]==cellY && i.Arguments[2]==layer && i.Arguments[3]==expected)
+                    .SelectMany(_=>action.Conditions.Where(c=>c.Opcode==ConditionOpcode.Bump && c.Arguments.Count>=3)
+                        .Select(c=>(Action:action,Index:index,X:(int)c.Arguments[0],Y:(int)c.Arguments[1],Tile:(int)c.Arguments[2]))))
+                    .ToList();
+                foreach(var input in inputs)
+                {
+                    if(input.X<0 || input.Y<0 || input.X>=zone.Width || input.Y>=zone.Height ||
+                        zone.GetTile(input.X,input.Y,1)!=unchecked((ushort)input.Tile)) continue;
+                    bool CanApproach()
+                    {
+                        var seen=new HashSet<(int X,int Y)>(); var pending=new Queue<(int X,int Y)>();
+                        foreach(var p in starts) if(Open(p.X,p.Y) && seen.Add(p)) pending.Enqueue(p);
+                        while(pending.TryDequeue(out var at))
+                        {
+                            if(Math.Abs(at.X-input.X)+Math.Abs(at.Y-input.Y)==1) return true;
+                            foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                            {
+                                int nx=at.X+dx,ny=at.Y+dy;
+                                if(!Open(nx,ny) || !seen.Add((nx,ny))) continue;
+                                pending.Enqueue((nx,ny));
+                            }
+                        }
+                        return false;
+                    }
+                    if(CanApproach()) continue;
+
+                    var costs=new Dictionary<(int X,int Y),int>();
+                    var previous=new Dictionary<(int X,int Y),(int X,int Y)>();
+                    var queue=new PriorityQueue<(int X,int Y),int>();
+                    foreach(var p in starts) if(Open(p.X,p.Y) && costs.TryAdd(p,0)) queue.Enqueue(p,0);
+                    (int X,int Y)? end=null;
+                    while(queue.TryDequeue(out var at,out int cost))
+                    {
+                        if(cost!=costs[at]) continue;
+                        if(Math.Abs(at.X-input.X)+Math.Abs(at.Y-input.Y)==1) { end=at; break; }
+                        foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                        {
+                            int nx=at.X+dx,ny=at.Y+dy;
+                            if(nx<0 || ny<0 || nx>=zone.Width || ny>=zone.Height) continue;
+                            int tile=zone.GetTile(nx,ny,1);
+                            bool open=Open(nx,ny);
+                            if(!open && tile<_gameData.Tiles.Count && _gameData.Tiles[tile].IsDraggable) continue;
+                            bool scripted=zone.Objects.Any(h=>h.X==nx && h.Y==ny) || zone.Actions.Any(a=>
+                                a.Conditions.Any(c=>c.Arguments.Count>=2 && c.Arguments[0]==nx && c.Arguments[1]==ny &&
+                                    c.Opcode is ConditionOpcode.Bump or ConditionOpcode.PlacedItemIs or ConditionOpcode.StandingOn));
+                            if(scripted && !open) continue;
+                            int nextCost=cost+(open?1:8);
+                            var next=(nx,ny);
+                            if(nextCost>=costs.GetValueOrDefault(next,int.MaxValue)) continue;
+                            costs[next]=nextCost; previous[next]=at; queue.Enqueue(next,nextCost);
+                        }
+                    }
+                    if(end==null) continue;
+                    var path=new List<(int X,int Y)>();
+                    for(var at=end.Value;;at=previous[at]) { path.Add(at); if(!previous.ContainsKey(at)) break; }
+                    path.Reverse();
+                    var walls=path.Where(p=>!Open(p.X,p.Y)).Distinct().ToList();
+                    if(walls.Count==0 || walls.Count>3) continue;
+                    foreach(var wall in walls) zone.SetTile(wall.X,wall.Y,1,ushort.MaxValue);
+                    Console.WriteLine($"[WORLD] Opened {walls.Count} wall tile(s) to reach locked-door control " +
+                        $"({input.X},{input.Y}) in zone {zoneId}; counter {counterGuard.Arguments[0]}");
+                }
+            }
+        }
+    }
+
+    // A generated Use/Trade sector can inherit an authored room whose payment
+    // hotspot is separated from its doorway by a solid decorative wall. Keep
+    // the authored interaction in place, but open the shortest small passage
+    // from the room's actual entrance to its scripted item-use position.
+    public void RepairInitializedSectorInteraction(WorldMap world, int zoneId, Zone activeZone,
+        int playerX, int playerY, GameState state)
+    {
+        RepairDisabledGoalEntrances(activeZone);
+        RepairRewardPickupBumpTriggers(activeZone);
+        RepairUnreachableSectorInteractions(world, zoneId, (playerX, playerY), activeZone);
+        RepairUnreachableGoalReward(world, zoneId, activeZone, playerX, playerY, state);
+    }
+
+    // Some authored finale rooms are selected by a random door branch. Keep
+    // the branch to the actual WinGame room reachable when its sibling branch
+    // is only a dead-end return room; otherwise the random initializer can make
+    // a generated mission impossible before the player can act on it.
+    private void RepairDisabledGoalEntrances(Zone zone)
+    {
+        foreach(var door in zone.Objects.Where(h=>!h.Enabled && h.Type==ZoneObjectType.DoorEntrance &&
+                    h.Argument>=0 && h.Argument<_gameData.Zones.Count))
+        {
+            var destination=_gameData.Zones[(int)door.Argument];
+            if(!destination.Actions.Any(action=>action.Instructions.Any(i=>i.Opcode==InstructionOpcode.WinGame))) continue;
+            door.Enabled=true;
+            Console.WriteLine($"[WORLD] Re-enabled disabled entrance in zone {zone.Id} at ({door.X},{door.Y}) to keep WinGame room {destination.Id} reachable");
+        }
+    }
+
+    // Some authored rooms restore a closed cover after their puzzle is solved,
+    // while the bump action that reveals the reward still checks the earlier
+    // cover tile. Keep the same authored clear action usable on the restored
+    // blocker when a reward hotspot sits underneath it.
+    private void RepairRewardPickupBumpTriggers(Zone zone)
+    {
+        foreach(var reward in zone.Objects.Where(h=>h.Enabled && h.Type==ZoneObjectType.Trigger && h.Argument>0))
+        {
+            int cover=zone.GetTile(reward.X,reward.Y,1);
+            if(cover>=_gameData.Tiles.Count || !_gameData.Tiles[cover].IsObject) continue;
+            var clear=zone.Actions.SelectMany(a=>a.Conditions.Where(c=>c.Opcode==ConditionOpcode.Bump &&
+                    c.Arguments.Count>=3 && c.Arguments[0]==reward.X && c.Arguments[1]==reward.Y)
+                .Select(c=>(Action:a,Condition:c)))
+                .FirstOrDefault(pair=>pair.Action.Instructions.Any(i=>i.Opcode==InstructionOpcode.RemoveTile &&
+                    i.Arguments.Count>=3 && i.Arguments[0]==reward.X && i.Arguments[1]==reward.Y && i.Arguments[2]==1));
+            if(clear.Condition==null || clear.Condition.Arguments[2]==cover) continue;
+            bool restoredAfterSolve=zone.Actions.Any(a=>a.Conditions.Any(c=>c.Opcode==ConditionOpcode.ZoneIsSolved) &&
+                a.Instructions.Any(i=>i.Opcode==InstructionOpcode.PlaceTile && i.Arguments.Count>=4 &&
+                    i.Arguments[0]==reward.X && i.Arguments[1]==reward.Y && i.Arguments[2]==1 && i.Arguments[3]==cover));
+            if(!restoredAfterSolve) continue;
+            clear.Condition.Arguments[2]=(short)cover;
+            Console.WriteLine($"[WORLD] Repaired reward cover bump in zone {zone.Id} at ({reward.X},{reward.Y}) for item {reward.Argument}: tile {cover}");
+        }
+    }
+
+    private void RepairUnreachableGoalReward(WorldMap world, int zoneId, Zone zone, int startX, int startY, GameState state)
+    {
+        if (!world.Sectors.TryGetValue(zoneId, out var sector)) return;
+        if (sector.Type != ZoneType.Goal || sector.FindItem <= 0 || startX < 0 || startY < 0 || startX >= zone.Width || startY >= zone.Height)
+            return;
+
+        bool GuardCanMatch(Condition condition)
+        {
+            var a = condition.Arguments;
+            if (a.Count == 0) return true;
+            return condition.Opcode switch
+            {
+                ConditionOpcode.RandomIs => state.ZoneRandom.GetValueOrDefault(zone.Id) == a[0],
+                ConditionOpcode.RandomIsNot => state.ZoneRandom.GetValueOrDefault(zone.Id) != a[0],
+                ConditionOpcode.CounterIs => state.GetCounter(zone.Id) == a[0],
+                ConditionOpcode.CounterIsNot => state.GetCounter(zone.Id) != a[0],
+                _ => true
+            };
+        }
+        var rewardTriggers = zone.Actions.Where(action => action.Conditions.All(GuardCanMatch) &&
+                action.Instructions.Any(instruction => instruction.Opcode == InstructionOpcode.DropItem &&
+                    instruction.Arguments.Count >= 3 && instruction.Arguments[0] == sector.FindItem))
+            .SelectMany(action => action.Conditions
+                .Where(condition => condition.Opcode == ConditionOpcode.Bump && condition.Arguments.Count >= 2)
+                .Select(condition => (X: (int)condition.Arguments[0], Y: (int)condition.Arguments[1])))
+            .Where(point => point.X >= 0 && point.Y >= 0 && point.X < zone.Width && point.Y < zone.Height)
+            .Distinct().ToArray();
+        if (rewardTriggers.Length == 0) return;
+
+        bool Walkable(int x, int y)
+        {
+            if (x < 0 || y < 0 || x >= zone.Width || y >= zone.Height) return false;
+            int tileId = zone.GetTile(x, y, 1);
+            if (tileId == ushort.MaxValue || tileId >= _gameData.Tiles.Count) return true;
+            var tile = _gameData.Tiles[tileId];
+            return !tile.IsObject;
+        }
+        bool Clearable(int x, int y)
+        {
+            if (zone.Objects.Any(h => h.Enabled && h.X == x && h.Y == y && h.Type is
+                ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit or ZoneObjectType.Teleporter or
+                ZoneObjectType.VehicleToPrimary or ZoneObjectType.VehicleToSecondary)) return false;
+            int tileId = zone.GetTile(x, y, 1);
+            return tileId < _gameData.Tiles.Count && _gameData.Tiles[tileId].IsObject &&
+                !_gameData.Tiles[tileId].IsCharacter && !_gameData.Tiles[tileId].IsRoof &&
+                !_gameData.Tiles[tileId].IsItem;
+        }
+
+        var queue = new PriorityQueue<(int X, int Y), int>();
+        var start = (X: startX, Y: startY);
+        var costs = new Dictionary<(int X, int Y), int> { [start] = 0 };
+        var previous = new Dictionary<(int X, int Y), (int X, int Y)>();
+        queue.Enqueue(start, 0);
+        (int X, int Y)? reached = null;
+        while (queue.TryDequeue(out var point, out int cost))
+        {
+            if (cost != costs[point]) continue;
+            if (rewardTriggers.Any(target => Math.Abs(target.X - point.X) + Math.Abs(target.Y - point.Y) == 1))
+            { reached = point; break; }
+            foreach (var next in new[] { (point.X, point.Y - 1), (point.X, point.Y + 1),
+                (point.X - 1, point.Y), (point.X + 1, point.Y) })
+            {
+                int stepCost = Walkable(next.Item1, next.Item2) ? 0 : Clearable(next.Item1, next.Item2) ? 1 : int.MaxValue;
+                if (stepCost == int.MaxValue) continue;
+                int nextCost = cost + stepCost;
+                if (nextCost >= costs.GetValueOrDefault(next, int.MaxValue)) continue;
+                costs[next] = nextCost; previous[next] = point; queue.Enqueue(next, nextCost);
+            }
+        }
+        if (reached is not { } end || costs[end] is <= 0 or > 3) return;
+
+        var path = new List<(int X, int Y)>();
+        for (var point = end; ; point = previous[point])
+        {
+            path.Add(point);
+            if (!previous.ContainsKey(point)) break;
+        }
+        path.Reverse();
+        var blockers = path.Where(point => !Walkable(point.X, point.Y)).Distinct().ToArray();
+        foreach (var blocker in blockers) zone.SetTile(blocker.X, blocker.Y, 1, ushort.MaxValue);
+        if (blockers.Length > 0)
+            Console.WriteLine($"[WORLD] Opened {blockers.Length} blocked tile(s) from the goal-room arrival " +
+                $"to the scripted reward for item {sector.FindItem} in zone {zoneId}");
+    }
+
+    // Some authored/generated rooms gate a ZoneEntered tile change on a sector
+    // counter value larger than any action in that room can produce. Keep the
+    // gate meaningful, but clamp it to the highest reachable value so that the
+    // room's own counter-producing interaction can actually open the route.
+    public static void RepairUnreachableSectorCounterGates(Zone zone, GameState state)
+    {
+        int current = state.GetSectorCounter(zone.Id);
+        long possibleIncrease = 0;
+        long highestSetValue = current;
+        foreach (var action in zone.Actions)
+        {
+            // Ignore producers whose ordinary counter guard is already false;
+            // they cannot contribute to this room's reachable maximum.
+            if (action.Conditions.Any(c => c.Opcode == ConditionOpcode.CounterIs &&
+                (c.Arguments.Count == 0 || state.GetCounter(zone.Id) != c.Arguments[0])))
+                continue;
+            foreach (var instruction in action.Instructions)
+            {
+                if (instruction.Arguments.Count == 0) continue;
+                if (instruction.Opcode == InstructionOpcode.AddToSectorCounter && instruction.Arguments[0] > 0)
+                    possibleIncrease += instruction.Arguments[0];
+                else if (instruction.Opcode == InstructionOpcode.SetSectorCounter && instruction.Arguments[0] > highestSetValue)
+                    highestSetValue = instruction.Arguments[0];
+            }
+        }
+
+        long reachableMaximum = Math.Max(highestSetValue, current + possibleIncrease);
+        if (reachableMaximum <= 0 || reachableMaximum > short.MaxValue) return;
+        foreach (var action in zone.Actions)
+        foreach (var condition in action.Conditions.Where(c =>
+            c.Opcode == ConditionOpcode.SectorCounterIsGreaterThan && c.Arguments.Count > 0))
+        {
+            if (condition.Arguments[0] < reachableMaximum) continue;
+            // The guarded script runs only on entry. If even every available
+            // producer cannot satisfy it, requiring a counter change and a
+            // second visit can deadlock rooms with one-way entrances. Let the
+            // entry action run against the current counter instead.
+            condition.Arguments[0] = (short)Math.Max(short.MinValue, current - 1);
+            Console.WriteLine($"[WORLD] Repaired unreachable sector-counter gate in zone {zone.Id}: " +
+                $"threshold now {condition.Arguments[0]}, reachable maximum {reachableMaximum}, current {current}");
+        }
+    }
+
+    private void RepairUnreachableSectorInteractions(WorldMap world, int? onlyZoneId = null,
+        (int X, int Y)? liveStart = null, Zone? activeZone = null)
+    {
+        foreach(var (zoneId,sector) in world.Sectors)
+        {
+            if(onlyZoneId.HasValue && zoneId!=onlyZoneId.Value) continue;
+            if(sector.RequiredItem<=0 || zoneId<0 || zoneId>=_gameData.Zones.Count) continue;
+            var zone=onlyZoneId==zoneId && activeZone!=null ? activeZone : _gameData.Zones[zoneId];
+            var starts=new HashSet<(int X,int Y)>();
+            bool roomInteraction=sector.Type is ZoneType.Use or ZoneType.Trade &&
+                world.RoomParents.TryGetValue(zoneId,out int parentId) &&
+                parentId>=0 && parentId<_gameData.Zones.Count &&
+                _gameData.Zones[parentId].Objects.Any(h=>h.Enabled && h.Argument==zoneId &&
+                    h.Type is ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit);
+            bool outdoorTransport=sector.Type==ZoneType.TravelStart && world.Connections.ContainsKey(zoneId);
+            if(!roomInteraction && !outdoorTransport) continue;
+
+            if(roomInteraction)
+            {
+                foreach(var back in zone.Objects.Where(h=>h.Enabled &&
+                    h.Type is ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit))
+                foreach(var (dx,dy) in DoorwayArrival.ExitOffsets(zone,back.Y))
+                {
+                    int sx=back.X+dx,sy=back.Y+dy;
+                    if(sx>=0 && sy>=0 && sx<zone.Width && sy<zone.Height) starts.Add((sx,sy));
+                }
+            }
+            else if(world.Connections.TryGetValue(zoneId,out var connections))
+            {
+                // Outdoor transport controls can be buried behind decorative
+                // terrain. Use the actual inward edge for every connected side
+                // as a possible approach, since a generated world may enter
+                // the same sector from more than one neighboring area.
+                if(connections.North.HasValue) for(int x=1;x<zone.Width-1;x++) starts.Add((x,1));
+                if(connections.South.HasValue) for(int x=1;x<zone.Width-1;x++) starts.Add((x,zone.Height-2));
+                if(connections.West.HasValue) for(int y=1;y<zone.Height-1;y++) starts.Add((1,y));
+                if(connections.East.HasValue) for(int y=1;y<zone.Height-1;y++) starts.Add((zone.Width-2,y));
+            }
+            // Once zone-entry scripts have run, check from the real arrival
+            // cell. A disconnected part of a long edge is not a valid entry
+            // just because some other edge cell can reach the interaction.
+            if(outdoorTransport && onlyZoneId==zoneId && liveStart is { } arrival &&
+                arrival.X>=0 && arrival.Y>=0 && arrival.X<zone.Width && arrival.Y<zone.Height)
+            {
+                starts.Clear();
+                starts.Add(arrival);
+            }
+            if(starts.Count==0) continue;
+
+            var target=zone.Actions.SelectMany((action,index)=>action.Conditions
+                .Where(c=>c.Opcode==ConditionOpcode.PlacedItemIs && c.Arguments.Count>=5 &&
+                    (c.Arguments[4]==sector.RequiredItem || c.Arguments[4]==-1) &&
+                    (c.Arguments[3]==-1 || c.Arguments[0]>=0 && c.Arguments[1]>=0 &&
+                        c.Arguments[0]<zone.Width && c.Arguments[1]<zone.Height &&
+                        (zone.GetTile(c.Arguments[0],c.Arguments[1],c.Arguments[2])==unchecked((ushort)c.Arguments[3]) ||
+                         zone.Actions.Any(setup=>setup.Instructions.Any(i=>
+                             i.Opcode==InstructionOpcode.PlaceTile && i.Arguments.Count>=4 &&
+                             i.Arguments[0]==c.Arguments[0] && i.Arguments[1]==c.Arguments[1] &&
+                             i.Arguments[2]==c.Arguments[2] && i.Arguments[3]==c.Arguments[3] ||
+                             c.Arguments[2]==1 && i.Opcode==InstructionOpcode.DrawTile && i.Arguments.Count>=3 &&
+                             i.Arguments[0]==c.Arguments[0] && i.Arguments[1]==c.Arguments[1] &&
+                             i.Arguments[2]==c.Arguments[3] ||
+                             i.Opcode==InstructionOpcode.MoveTile && i.Arguments.Count>=5 &&
+                             i.Arguments[2]==c.Arguments[2] && i.Arguments[3]==c.Arguments[0] &&
+                             i.Arguments[4]==c.Arguments[1])))) &&
+                    action.Instructions.Any(i=>i.Opcode is InstructionOpcode.RemoveItem or
+                        InstructionOpcode.AddItem or InstructionOpcode.DropItem or
+                        InstructionOpcode.PlaceTile or InstructionOpcode.RemoveTile or
+                        InstructionOpcode.MarkAsSolved or InstructionOpcode.WinGame))
+                .Select(c=>(X:(int)c.Arguments[0],Y:(int)c.Arguments[1],Action:index,
+                    Priority:action.Instructions.Any(i=>i.Opcode is InstructionOpcode.RemoveItem or
+                        InstructionOpcode.AddItem or InstructionOpcode.DropItem or
+                        InstructionOpcode.MarkAsSolved or InstructionOpcode.WinGame) ? 0 : 1)))
+                .OrderBy(c=>c.Priority).ThenBy(c=>c.Action)
+                .FirstOrDefault();
+            if(target==default || target.X<0 || target.Y<0 || target.X>=zone.Width || target.Y>=zone.Height)
+                continue;
+
+            bool Open(int x,int y)
+            {
+                // The interaction hotspot is blocked during play. Do not let
+                // the reachability proof walk through an empty placeholder
+                // there before its zone initializer places the authored lock.
+                if(x<0 || y<0 || x>=zone.Width || y>=zone.Height || (x,y)==(target.X,target.Y)) return false;
+                int tile=zone.GetTile(x,y,1);
+                return tile>=_gameData.Tiles.Count || !_gameData.Tiles[tile].IsObject;
+            }
+            bool ScriptedCell(int x,int y) => zone.Objects.Any(h=>h.X==x && h.Y==y) ||
+                zone.Actions.Any(a=>a.Conditions.Any(c=>c.Arguments.Count>=2 &&
+                    c.Arguments[0]==x && c.Arguments[1]==y && c.Opcode is
+                        ConditionOpcode.Bump or ConditionOpcode.PlacedItemIs or ConditionOpcode.StandingOn));
+
+            bool CanReachTarget()
+            {
+                var seen=new HashSet<(int X,int Y)>(); var pending=new Queue<(int X,int Y)>();
+                foreach(var p in starts) if(Open(p.X,p.Y) && seen.Add(p)) pending.Enqueue(p);
+                while(pending.TryDequeue(out var at))
+                {
+                    if(Math.Abs(at.X-target.X)+Math.Abs(at.Y-target.Y)==1) return true;
+                    foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                    {
+                        int nx=at.X+dx,ny=at.Y+dy;
+                        if(Open(nx,ny) && seen.Add((nx,ny))) pending.Enqueue((nx,ny));
+                    }
+                }
+                return false;
+            }
+            if(CanReachTarget()) continue;
+
+            var costs=new Dictionary<(int X,int Y),int>();
+            var previous=new Dictionary<(int X,int Y),(int X,int Y)>();
+            var queue=new PriorityQueue<(int X,int Y),int>();
+            foreach(var p in starts) if(Open(p.X,p.Y) && costs.TryAdd(p,0)) queue.Enqueue(p,0);
+            (int X,int Y)? end=null;
+            while(queue.TryDequeue(out var at,out int cost))
+            {
+                if(cost!=costs[at]) continue;
+                if(Math.Abs(at.X-target.X)+Math.Abs(at.Y-target.Y)==1) { end=at; break; }
+                foreach(var (dx,dy) in new[]{(0,1),(1,0),(0,-1),(-1,0)})
+                {
+                    int nx=at.X+dx,ny=at.Y+dy;
+                    if(nx<0 || ny<0 || nx>=zone.Width || ny>=zone.Height) continue;
+                    int tile=zone.GetTile(nx,ny,1); bool open=Open(nx,ny);
+                    if(!open && tile<_gameData.Tiles.Count && _gameData.Tiles[tile].IsDraggable) continue;
+                    if(!open && ScriptedCell(nx,ny)) continue;
+                    var next=(nx,ny); int nextCost=cost+(open?1:8);
+                    if(nextCost>=costs.GetValueOrDefault(next,int.MaxValue)) continue;
+                    costs[next]=nextCost; previous[next]=at; queue.Enqueue(next,nextCost);
+                }
+            }
+            if(end==null) continue;
+            var path=new List<(int X,int Y)>();
+            for(var at=end.Value;;at=previous[at]) { path.Add(at); if(!previous.ContainsKey(at)) break; }
+            path.Reverse();
+            var walls=path.Where(p=>!Open(p.X,p.Y)).Distinct().ToList();
+            if(walls.Count is 0 or >3) continue;
+            foreach(var wall in walls) zone.SetTile(wall.X,wall.Y,1,ushort.MaxValue);
+            Console.WriteLine($"[WORLD] Opened {walls.Count} wall tile(s) to reach sector item-use target " +
+                $"({target.X},{target.Y}) in zone {zoneId}, action {target.Action}");
         }
     }
 
@@ -1476,13 +2213,9 @@ public class WorldGenerator
 /// </summary>
 public class WorldMap
 {
+    public int? Seed { get; set; }
+    public WorldSize GenerationSize { get; set; } = WorldSize.Medium;
     public Planet Planet { get; set; }
-
-    /// <summary>
-    /// The seed this world was generated from. Zone dice derive from it too, so one seed
-    /// plays out the same way every time.
-    /// </summary>
-    public int Seed { get; set; }
     public Mission? Mission { get; set; }
 
     // Grid of zone IDs (null = empty cell)

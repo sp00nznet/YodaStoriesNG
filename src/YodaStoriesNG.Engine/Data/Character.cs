@@ -8,6 +8,7 @@ public class Character
     public int Id { get; set; }
     public string Name { get; set; } = string.Empty;
     public CharacterType Type { get; set; }
+    public short MovementType { get; set; }
 
     // Animation frame tile IDs
     public CharacterFrames Frames { get; set; } = new();

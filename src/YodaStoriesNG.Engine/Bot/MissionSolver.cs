@@ -4,72 +4,177 @@ using YodaStoriesNG.Engine.Game;
 namespace YodaStoriesNG.Engine.Bot;
 
 /// <summary>
-/// Explorer-based mission solver. Instead of following a fake puzzle chain,
-/// systematically explores zones and interacts with everything, letting
-/// the game's IACT scripts drive actual progression.
+/// Plans mission dependencies and executable routes from the generated world
+/// and its authored scripts. Live actors and object movement are resolved
+/// before the bot resumes the pending mission action.
 /// </summary>
 public partial class MissionSolver
 {
     private readonly GameState _state;
     private readonly GameData _gameData;
     private readonly WorldGenerator _worldGenerator;
+    private readonly Func<Zone,int,int,bool>? _canWalk;
 
     // Track what we've done in each zone
     private readonly HashSet<int> _visitedZones = new();
     private readonly HashSet<(int zoneId, int x, int y)> _talkedToNpcs = new();
-    private readonly HashSet<(int zoneId, int x, int y)> _usedItemsOnNpcs = new();
     private readonly HashSet<(int zoneId, int x, int y)> _collectedItems = new();
     private readonly HashSet<(int zoneId, int x, int y)> _enteredDoors = new();
 
     // Track unreachable positions to avoid infinite loops
     private readonly HashSet<(int zoneId, int x, int y)> _unreachablePositions = new();
+    private string? _reachabilityRevision;
+
+    private void RefreshReachability()
+    {
+        if (_state.CurrentZone is not { } zone) return;
+        string revision = $"{zone.Id}:{BlockPuzzlePlanner.Layout(zone)}:" +
+            string.Join(';', _state.ZoneNPCs.Where(n => n.IsEnabled && n.IsAlive).Select(n => $"{n.CharacterId},{n.X},{n.Y}")) +
+            ":" + string.Join(',', _state.Inventory.OrderBy(i => i));
+        if (revision == _reachabilityRevision) return;
+        _reachabilityRevision = revision;
+        _unreachablePositions.RemoveWhere(p => p.zoneId == zone.Id);
+        _reportedMissingSources.Clear();
+    }
 
     // Track blocked zone exits (from current zone -> target zone) with retry counter
-    private readonly Dictionary<(int fromZone, Direction dir), int> _blockedExits = new();
-    private const int BlockedExitRetryThreshold = 3; // Retry blocked exits after visiting 3 other zones
+    private sealed record BlockedExit(string Layout, string Actors, bool Structural, HashSet<(int X,int Y)> Component);
+    private string? _staticAreaRevision;
+    private HashSet<(int X,int Y)> _staticArea = new();
+    private HashSet<(int X,int Y)> StaticWalkingArea()
+    {
+        if (_state.CurrentZone is not { } zone) return new();
+        string revision = $"{zone.Id}:{_state.SmoothMovementEnabled}:{BlockPuzzlePlanner.Layout(zone)}:" +
+            $"{_state.GetCounter(zone.Id)}:{_state.GetSectorCounter(zone.Id)}:{_state.ZoneRandom.GetValueOrDefault(zone.Id)}:{_state.DisabledActions.Count}";
+        if (revision != _staticAreaRevision || !_staticArea.Contains((_state.PlayerX,_state.PlayerY)))
+        {
+            _staticAreaRevision = revision;
+            _staticArea = WorldActionGraph.WalkableArea(_gameData,zone,_state.PlayerX,_state.PlayerY,
+                new GameState { CurrentZoneId = -1, SmoothMovementEnabled = _state.SmoothMovementEnabled,
+                    Counters=_state.Counters,Variables=_state.Variables,ZoneRandom=_state.ZoneRandom,
+                    VisitedZones=_state.VisitedZones,DisabledActions=_state.DisabledActions },_canWalk);
+        }
+        return _staticArea;
+    }
+    private string NavigationActors() => string.Join(';', _state.ZoneNPCs.Where(n => n.IsEnabled && n.IsAlive)
+        .Select(n => $"{n.CharacterId},{n.X},{n.Y}"));
+    private readonly Dictionary<(int fromZone, Direction dir), BlockedExit> _blockedExits = new();
 
-    // Current exploration target
-    private int? _targetZoneId;
 
-    // Track zone changes to periodically retry blocked exits
-    private int _zoneChangesSinceBlockedExitRetry = 0;
 
-    public MissionSolver(GameState state, GameData gameData, WorldGenerator worldGenerator)
+    public MissionSolver(GameState state, GameData gameData, WorldGenerator worldGenerator,
+        Func<Zone,int,int,bool>? canWalk=null)
     {
         _state = state;
         _gameData = gameData;
         _worldGenerator = worldGenerator;
+        _canWalk=canWalk;
     }
 
     /// <summary>
     /// Reset tracking when starting a new game.
     /// </summary>
+    // Persist factual interaction history and the in-flight mission intention,
+    // while discarding paths, block searches, and failure caches on resume.
+    public sealed class ReplayIntent
+    {
+        public List<(int Zone,int Item)> Consumed { get; set; } = new();
+        public Dictionary<int,int> RoomReturns { get; set; } = new();
+        public Dictionary<int,(int Zone,int X,int Y)> DoorReturnPoints { get; set; } = new();
+        public (int Zone,int Item,int X,int Y)? OpenedPassage { get; set; }
+        public int? PendingReward { get; set; }
+        public int? ItemRouteFocus { get; set; }
+        public int[] NeededItems { get; set; } = [];
+        public (int Zone,int Action)? NativeFocus { get; set; }
+        public (int Zone,int Action)? NativeContinuation { get; set; }
+    }
+    public ReplayIntent CaptureReplayIntent() => new()
+    {
+        Consumed=_consumedInteractions.ToList(), PendingReward=_pendingRewardItem,
+        RoomReturns=new(_roomReturns), DoorReturnPoints=new(_doorReturnPoints), OpenedPassage=_openedPassage, ItemRouteFocus=_itemRouteFocus,
+        NeededItems=_neededNativeItems.ToArray(), NativeFocus=_nativeGoalFocus,NativeContinuation=_nativeGoalContinuation
+    };
+    public void RestoreReplayIntent(ReplayIntent intent)
+    {
+        foreach(var pair in intent.RoomReturns) _roomReturns[pair.Key]=pair.Value;
+        foreach(var pair in intent.DoorReturnPoints) _doorReturnPoints[pair.Key]=pair.Value;
+        _openedPassage=intent.OpenedPassage;
+        _consumedInteractions.UnionWith(intent.Consumed);
+        _pendingRewardItem=intent.PendingReward;
+        _itemRouteFocus=intent.ItemRouteFocus;
+        if(_itemRouteFocus is int used && !_state.HasItem(used) && intent.Consumed.Any(p=>p.Item==used))
+            _itemRouteFocus=null;
+        _neededNativeItems.UnionWith(intent.NeededItems);
+        _nativeGoalFocus=intent.NativeFocus;
+        _nativeGoalContinuation=intent.NativeContinuation;
+    }
+
     public void Reset()
     {
+        _localPuzzlePlan=null;_localPuzzleStep=0;_localPuzzleFailures.Clear();
+        _nativeGoalFocus = null;
+        _nativeGoalContinuation = null;
+        _nativeOpeningFocus = null;
+        _blockWalkStart = null;
+        _nativeArrangement = null;
+        _consumedInteractions.Clear();
+        _failedNativeArrangements.Clear();
+        _nativeRewardRequests.Clear();
+        _neededNativeItems.Clear();
+        _routePreparations.Clear();
+        _departedAreas.Clear(); _unchangedPortalCycles.Clear(); _unchangedZoneCycles.Clear();
+        _openingRoute = false;
+        _openedPassage = null;
+        _staticAreaRevision = null;
+        _staticArea.Clear();
+        _blockPlan.Clear();
+        _blockPlanZone = -1;
+        _failedBlockMap = null;
+        _failedCombatApproach = null;
+        _pendingRewardItem = null;
+        _itemRouteFocus=null; _itemRouteRevision=0;
+        _reportedMissingSources.Clear();
+        _roomReturns.Clear();
+        _doorReturnPoints.Clear();
+        ActionGraph = null;
+        PlannedRoute = Array.Empty<WorldActionGraph.Edge>();
         _visitedZones.Clear();
         _talkedToNpcs.Clear();
-        _usedItemsOnNpcs.Clear();
         _collectedItems.Clear();
         _enteredDoors.Clear();
+        _failedDoorStates.Clear();
+        _failedScriptStates.Clear();
+        _completedScriptStates.Clear();
+        _failedScriptSemanticStates.Clear();
+        _unchangedScriptAttempts.Clear();
+        _failedPassageStates.Clear();
+        _failedPassageSemanticStates.Clear();
+        _unchangedPassageAttempts.Clear();
         _unreachablePositions.Clear();
+        _reachabilityRevision = null;
         _blockedExits.Clear();
-        _targetZoneId = null;
-        _zoneChangesSinceBlockedExitRetry = 0;
+        _unreachableRouteTiles.Clear();
+        _unreachableRouteActions.Clear();
     }
 
     /// <summary>
-    /// Mark a zone exit as temporarily blocked (can't reach the edge).
+    /// Mark a zone exit as blocked for the current area layout (can't reach the edge).
     /// Will be retried after visiting several other zones.
     /// </summary>
     public void MarkExitBlocked(Direction dir)
     {
         var key = (_state.CurrentZoneId, dir);
-        _blockedExits[key] = _zoneChangesSinceBlockedExitRetry;
-        Console.WriteLine($"[BOT] Marked exit {dir} from zone {_state.CurrentZoneId} as temporarily blocked");
+        if (_state.CurrentZone is not { } zone) return;
+        var component = StaticWalkingArea();
+        bool structural = !component.Any(p => dir switch
+        { Direction.Up => p.Y == 0, Direction.Down => p.Y == zone.Height-1,
+            Direction.Left => p.X == 0, _ => p.X == zone.Width-1 });
+        _blockedExits[key] = new(BlockPuzzlePlanner.Layout(zone), NavigationActors(), structural, new(component));
+        Console.WriteLine($"[BOT] Marked exit {dir} from zone {_state.CurrentZoneId} as {(structural ? "terrain-blocked" : "temporarily obstructed")}");
     }
 
     /// <summary>
-    /// Check if a zone exit is blocked. Blocked exits are retried after visiting several zones.
+    /// Check whether this entrance/component has an unchanged blocked exit.
     /// </summary>
     public bool IsExitBlocked(Direction dir) => IsExitBlocked(_state.CurrentZoneId, dir);
 
@@ -77,17 +182,14 @@ public partial class MissionSolver
     private bool IsExitBlocked(int zoneId, Direction dir)
     {
         var key = (zoneId, dir);
-        if (!_blockedExits.TryGetValue(key, out int blockedAtCount))
-            return false;
-
-        // Retry blocked exits after visiting several zones
-        if (_zoneChangesSinceBlockedExitRetry - blockedAtCount >= BlockedExitRetryThreshold)
-        {
-            _blockedExits.Remove(key);
-            Console.WriteLine($"[BOT] Retrying previously blocked exit {dir} from zone {zoneId}");
-            return false;
-        }
-        return true;
+        if (!_blockedExits.TryGetValue(key, out var blocked)) return false;
+        if (zoneId != _state.CurrentZoneId) return false;
+        var zone = _gameData.Zones[zoneId];
+        if (blocked.Layout != BlockPuzzlePlanner.Layout(zone) || !blocked.Structural && blocked.Actors != NavigationActors())
+        { _blockedExits.Remove(key); return false; }
+        // A different entrance can reach a different pocket in the same area.
+        // Future-zone routes calculate their own component from their predicted landing.
+        return zoneId == _state.CurrentZoneId && blocked.Component.Contains((_state.PlayerX,_state.PlayerY));
     }
 
     /// <summary>
@@ -95,12 +197,8 @@ public partial class MissionSolver
     /// </summary>
     public void OnZoneChanged()
     {
-        _zoneChangesSinceBlockedExitRetry++;
-        ForgetUnreachableHere();
-    }
-
-    public void ForgetUnreachableHere() =>
         _unreachablePositions.RemoveWhere(p => p.zoneId == _state.CurrentZoneId);
+    }
 
     /// <summary>
     /// Mark current zone as visited.
@@ -133,6 +231,9 @@ public partial class MissionSolver
         if (_state.IsGameWon)
             return MissionPhase.Completed;
 
+        if (_gameData.GameType == GameType.YodaStories && world.Mission?.IsCompleted == true)
+            return onDagobah ? MissionPhase.TalkToYoda : MissionPhase.ReturnToDagobah;
+
         // Check if we have the starting item from Yoda
         if (world.StartingItemId.HasValue && !_state.HasItem(world.StartingItemId.Value))
         {
@@ -148,27 +249,68 @@ public partial class MissionSolver
         return MissionPhase.SolvePuzzles;
     }
 
-    /// <summary>
-    /// Gets the current objective based on exploration state.
-    /// Priority order:
-    /// 1. Kill nearby enemies (safety)
-    /// 2. Pick up items in current zone
-    /// 3. Talk to friendly NPCs we haven't talked to
-    /// 4. Try using inventory items on NPCs
-    /// 5. Enter unexplored doors
-    /// 6. Move to unexplored connected zones
-    /// 7. If all explored, return to Dagobah
-    /// </summary>
+    /// <summary>Choose the next mission dependency, its route, or the briefing/travel action.</summary>
     public BotObjective GetCurrentObjective()
     {
+        _planningDecision++;
+        RefreshReachability();
+        // The board hashes validate each queued move. Finish an existing local
+        // solution before repeating the expensive whole-mission dependency search.
+        if (_blockPlan.Count > 0 && PlannedBlockMove(new BotObjective(), continueOnly: true) is { } blockMove)
+            return WithStuckCheck(blockMove);
+        if (ContinueOpenedPassage() is { } passage) return passage;
         var phase = GetCurrentPhase();
         var world = _worldGenerator.CurrentWorld;
 
-        // Worlds from the original generator carry their whole chain; follow it directly.
-        if (world is { Sectors.Count: > 0 })
+        // Native worlds use dependency planning once the briefing/travel phase is over.
+        if (world is { Sectors.Count: > 0 } &&
+            (_gameData.GameType != GameType.YodaStories || !world.DagobahZones.Contains(_state.CurrentZoneId)))
         {
             MarkZoneVisited();
-            return WithStuckCheck(GetSectorObjective(world) ?? CreateExplorationObjective());
+            if(ContinueLocalPuzzle(world) is { } localStep) return localStep;
+            if(TryLocalPuzzle(world) is { } localPlan) return localPlan;
+            // Local replay defers live actors. Keep the same deepest item
+            // dependency with the live planner instead of abandoning its supply
+            // room and restarting the outer reward route.
+            if(_itemRouteFocus is int fetching)
+            {
+                if(_state.HasItem(fetching)) _itemRouteFocus=null;
+                else
+                {
+                    RefreshGraph(world);
+                    if(FetchItem(world,fetching) is { } dependency && dependency.Type is not
+                        (ObjectiveType.Explore or ObjectiveType.PlanningBlocked or ObjectiveType.UnresolvedReward))
+                        return WithStuckCheck(dependency);
+                }
+            }
+            // Native-world missions still need their authored return to Yoda.
+            // Once the final artifact is acquired, stop planning optional
+            // sector rewards and take the X-Wing back to Dagobah.
+            if (_gameData.GameType == GameType.YodaStories && world.Mission?.IsCompleted == true)
+                return WithStuckCheck(new BotObjective { Type=ObjectiveType.UseXWing,
+                    Description="Return to Dagobah with the mission reward" });
+            // An explicit briefing is a mission prerequisite even when the
+            // final room already has a visible route in the world graph.
+            if (_gameData.GameType == GameType.IndianaJones &&
+                world.Mission is { CurrentStep: 0, IsCompleted: false, CurrentPuzzleStep.RequiredItemId: 0 } &&
+                GetSectorObjective(world) is { } briefing)
+                return WithStuckCheck(briefing);
+            // Follow the authored mission chain in order. The finale graph can
+            // expose several later items at once; selecting among those while
+            // an earlier mission puzzle is active can bounce the bot between
+            // routes without completing either branch.
+            if (world.Mission is { IsCompleted: false, CurrentPuzzleStep: not null })
+            {
+                RefreshGraph(world);
+                // The authored chain is authoritative even when its next step
+                // is temporarily blocked. Returning its recovery objective lets
+                // the bot explore a reachable route or report the blocker; falling
+                // through to the finale graph can select later, unrelated rewards
+                // and repeatedly route around the same inaccessible dependency.
+                if (GetSectorObjective(world) is { } missionStep)
+                    return WithStuckCheck(missionStep);
+            }
+            return WithStuckCheck(GetGraphObjective(world) ?? GetSectorObjective(world) ?? CreatePlanningBlockedObjective());
         }
 
         // Mark current zone as visited
@@ -243,7 +385,7 @@ public partial class MissionSolver
                 };
 
             case MissionPhase.SolvePuzzles:
-                return CreateExplorationObjective();
+                return CreatePlanningBlockedObjective();
 
             case MissionPhase.Completed:
                 return new BotObjective
@@ -266,56 +408,8 @@ public partial class MissionSolver
         if (world == null)
             return new BotObjective { Type = ObjectiveType.Explore };
 
-        // PRIORITY: Pick up R2D2/Locator first if we don't have it (it's on Dagobah!)
-        if (!_state.HasLocator)
-        {
-            // First check if R2D2 NPC is in current zone
-            var r2d2Npc = FindR2D2Npc();
-            if (r2d2Npc != null)
-            {
-                Console.WriteLine($"[BOT] R2D2 NPC found at ({r2d2Npc.X},{r2d2Npc.Y}), IsReadyToCollect={r2d2Npc.IsReadyToCollect}");
-                if (r2d2Npc.IsReadyToCollect)
-                {
-                    // Walk over R2D2 to collect it
-                    return new BotObjective
-                    {
-                        Type = ObjectiveType.WalkToPosition,
-                        Description = "Walk over R2D2 to collect it",
-                        TargetX = r2d2Npc.X,
-                        TargetY = r2d2Npc.Y
-                    };
-                }
-                else
-                {
-                    // Talk to R2D2 to make it ready to collect
-                    return new BotObjective
-                    {
-                        Type = ObjectiveType.TalkToNpc,
-                        Description = "Talk to R2D2",
-                        TargetNpc = r2d2Npc,
-                        TargetX = r2d2Npc.X,
-                        TargetY = r2d2Npc.Y
-                    };
-                }
-            }
-
-            // Search other Dagobah zones for R2D2
-            var (r2d2ZoneId, foundR2D2) = FindR2D2InDagobah();
-            if (foundR2D2 != null && r2d2ZoneId.HasValue)
-            {
-                if (r2d2ZoneId.Value != _state.CurrentZoneId)
-                {
-                    Console.WriteLine($"[BOT] R2D2 is in zone {r2d2ZoneId.Value}, navigating there");
-                    return new BotObjective
-                    {
-                        Type = ObjectiveType.ChangeZone,
-                        Description = $"Go to R2D2's zone ({r2d2ZoneId.Value})",
-                        TargetZoneId = r2d2ZoneId.Value
-                    };
-                }
-            }
-        }
-
+        // The briefing objective must stay focused on Yoda. Optional R2 collection
+        // is handled by the departure phase after the mission has been received.
         // Find Yoda NPC
         var yoda = FindYodaNpc();
         if (yoda != null)
@@ -333,6 +427,7 @@ public partial class MissionSolver
         // Yoda not in current zone - need to navigate
         if (world.YodaZoneId.HasValue && _state.CurrentZoneId != world.YodaZoneId.Value)
         {
+            if (GraphTravel(world, world.YodaZoneId.Value) is { } route) return route;
             return new BotObjective
             {
                 Type = ObjectiveType.ChangeZone,
@@ -348,176 +443,11 @@ public partial class MissionSolver
         };
     }
 
-    /// <summary>
-    /// Creates exploration-based objective. Systematically explores and interacts
-    /// with everything in the zone before moving on.
-    /// </summary>
-    private BotObjective CreateExplorationObjective()
+    private BotObjective CreatePlanningBlockedObjective() => new BotObjective
     {
-        // Priority 0: Get the locator/R2D2 if we don't have it (highest priority after safety)
-        if (!_state.HasLocator)
-        {
-            var r2d2Npc = FindR2D2Npc();
-            if (r2d2Npc != null)
-            {
-                Console.WriteLine($"[BOT] R2D2 NPC found at ({r2d2Npc.X},{r2d2Npc.Y}), IsReadyToCollect={r2d2Npc.IsReadyToCollect}");
-                if (r2d2Npc.IsReadyToCollect)
-                {
-                    // Walk over R2D2 to collect it
-                    return new BotObjective
-                    {
-                        Type = ObjectiveType.WalkToPosition,
-                        Description = "Walk over R2D2 to collect it",
-                        TargetX = r2d2Npc.X,
-                        TargetY = r2d2Npc.Y
-                    };
-                }
-                else
-                {
-                    // Talk to R2D2 to make it ready to collect
-                    return new BotObjective
-                    {
-                        Type = ObjectiveType.TalkToNpc,
-                        Description = "Talk to R2D2",
-                        TargetNpc = r2d2Npc,
-                        TargetX = r2d2Npc.X,
-                        TargetY = r2d2Npc.Y
-                    };
-                }
-            }
-        }
-
-        // Priority 1: Kill nearby enemies (safety first!)
-        var enemy = FindNearestEnemy();
-        if (enemy != null)
-        {
-            return new BotObjective
-            {
-                Type = ObjectiveType.KillEnemy,
-                Description = $"Defeat {GetNpcName(enemy)}",
-                TargetNpc = enemy,
-                TargetX = enemy.X,
-                TargetY = enemy.Y
-            };
-        }
-
-        // Priority 2: Pick up any zone object items in the zone
-        var item = FindUnpickedItem();
-        if (item != null)
-        {
-            return new BotObjective
-            {
-                Type = ObjectiveType.PickupItem,
-                Description = $"Pick up item at ({item.X},{item.Y})",
-                TargetX = item.X,
-                TargetY = item.Y
-            };
-        }
-
-        // Priority 2b: Pick up any tile items (like health kits, weapons on ground)
-        var tileItem = FindTileItem();
-        if (tileItem != null)
-        {
-            return new BotObjective
-            {
-                Type = ObjectiveType.PickupItem,
-                Description = $"Pick up tile item at ({tileItem.Value.X},{tileItem.Value.Y})",
-                TargetX = tileItem.Value.X,
-                TargetY = tileItem.Value.Y
-            };
-        }
-
-        // Priority 3: Talk to friendly NPCs we haven't talked to yet
-        var untalkedNpc = FindUntalkedFriendlyNpc();
-        if (untalkedNpc != null)
-        {
-            return new BotObjective
-            {
-                Type = ObjectiveType.TalkToNpc,
-                Description = $"Talk to {GetNpcName(untalkedNpc)}",
-                TargetNpc = untalkedNpc,
-                TargetX = untalkedNpc.X,
-                TargetY = untalkedNpc.Y
-            };
-        }
-
-        // Priority 4: Try using inventory items on friendly NPCs
-        var (npcForItem, itemToUse) = FindNpcToUseItemOn();
-        if (npcForItem != null && itemToUse.HasValue)
-        {
-            return new BotObjective
-            {
-                Type = ObjectiveType.UseItemOnNpc,
-                Description = $"Use item on {GetNpcName(npcForItem)}",
-                TargetNpc = npcForItem,
-                TargetX = npcForItem.X,
-                TargetY = npcForItem.Y,
-                RequiredItemId = itemToUse.Value
-            };
-        }
-
-        // Priority 5: Enter unexplored doors in current zone
-        var door = FindUnenteredDoor();
-        if (door != null)
-        {
-            return new BotObjective
-            {
-                Type = ObjectiveType.EnterDoor,
-                Description = $"Enter door at ({door.X},{door.Y})",
-                TargetX = door.X,
-                TargetY = door.Y,
-                TargetZoneId = door.Argument != 0xFFFF ? door.Argument : null
-            };
-        }
-
-        // Priority 6: Move to unexplored connected zones
-        var unexploredZone = FindUnexploredConnectedZone();
-        if (unexploredZone.HasValue)
-        {
-            var dir = GetDirectionToAdjacentZone(unexploredZone.Value);
-            if (dir.HasValue)
-            {
-                return new BotObjective
-                {
-                    Type = ObjectiveType.ChangeZone,
-                    Description = $"Explore zone {unexploredZone.Value}",
-                    TargetZoneId = unexploredZone.Value,
-                    Direction = dir.Value
-                };
-            }
-        }
-
-        // Priority 7: All explored - check if we should return to Dagobah
-        // (This might mean we've completed everything or are stuck)
-        if (_state.IsGameWon)
-        {
-            return new BotObjective
-            {
-                Type = ObjectiveType.UseXWing,
-                Description = "Return to Dagobah - Mission Complete!"
-            };
-        }
-
-        // Still exploring - try to find any unexplored zone in the world
-        var anyUnexplored = FindAnyUnexploredZone();
-        if (anyUnexplored.HasValue)
-        {
-            // Navigate toward it
-            _targetZoneId = anyUnexplored.Value;
-            return new BotObjective
-            {
-                Type = ObjectiveType.Explore,
-                Description = $"Navigate toward zone {anyUnexplored.Value}"
-            };
-        }
-
-        // Truly stuck or complete - try returning to Dagobah
-        return new BotObjective
-        {
-            Type = ObjectiveType.UseXWing,
-            Description = "Return to Dagobah"
-        };
-    }
+        Type = ObjectiveType.PlanningBlocked,
+        Description = "No executable mission instruction; saving planner state",
+    };
 
     /// <summary>
     /// Finds Yoda NPC in current zone.
@@ -536,10 +466,11 @@ public partial class MissionSolver
     {
         NPC? nearest = null;
         int nearestDist = int.MaxValue;
+        var accessible = StaticWalkingArea();
 
         foreach (var npc in _state.ZoneNPCs)
         {
-            if (!npc.IsEnabled || !npc.IsAlive || !npc.IsHostile)
+            if (!npc.IsEnabled || !npc.IsAlive || !npc.IsHostile || npc.IsInvulnerable)
                 continue;
 
             // Skip NPCs at invalid positions (65535 = unset/placeholder)
@@ -550,6 +481,9 @@ public partial class MissionSolver
             // that, or the bot walks straight back into the same fight.
             if (_unreachablePositions.Contains((_state.CurrentZoneId, npc.X, npc.Y)))
                 continue;
+
+            if (!new[] { (npc.X,npc.Y-1), (npc.X,npc.Y+1), (npc.X-1,npc.Y), (npc.X+1,npc.Y) }.Any(accessible.Contains))
+                continue; // Unrelated enemy movement cannot open a route through static walls.
 
             int dist = npc.DistanceTo(_state.PlayerX, _state.PlayerY);
             if (dist < nearestDist)
@@ -604,6 +538,8 @@ public partial class MissionSolver
             if (_unreachablePositions.Contains((_state.CurrentZoneId, npc.X, npc.Y)))
                 continue;
 
+            if (!new[] { (npc.X,npc.Y-1),(npc.X,npc.Y+1),(npc.X-1,npc.Y),(npc.X+1,npc.Y) }.Any(StaticWalkingArea().Contains)) continue;
+
             int dist = npc.DistanceTo(_state.PlayerX, _state.PlayerY);
             if (dist < nearestDist)
             {
@@ -616,55 +552,11 @@ public partial class MissionSolver
     }
 
     /// <summary>
-    /// Finds an NPC we haven't tried using items on, and an item to use.
-    /// </summary>
-    private (NPC? npc, int? itemId) FindNpcToUseItemOn()
-    {
-        if (_state.Inventory.Count == 0)
-            return (null, null);
-
-        foreach (var npc in _state.ZoneNPCs)
-        {
-            if (!npc.IsEnabled || !npc.IsAlive || npc.IsHostile)
-                continue;
-
-            // Skip NPCs at invalid positions
-            if (!IsValidPosition(npc.X, npc.Y))
-                continue;
-
-            // Skip unreachable positions
-            if (_unreachablePositions.Contains((_state.CurrentZoneId, npc.X, npc.Y)))
-                continue;
-
-            // Find an item we haven't tried on this NPC
-            foreach (var itemId in _state.Inventory)
-            {
-                var key = (_state.CurrentZoneId, npc.X, npc.Y);
-                // We use a compound key including item ID
-                if (!_usedItemsOnNpcs.Contains((key.CurrentZoneId, key.X * 10000 + itemId, key.Y)))
-                {
-                    return (npc, itemId);
-                }
-            }
-        }
-
-        return (null, null);
-    }
-
-    /// <summary>
     /// Mark that we talked to an NPC.
     /// </summary>
     public void MarkTalkedTo(NPC npc)
     {
         _talkedToNpcs.Add((_state.CurrentZoneId, npc.X, npc.Y));
-    }
-
-    /// <summary>
-    /// Mark that we used an item on an NPC.
-    /// </summary>
-    public void MarkUsedItemOn(NPC npc, int itemId)
-    {
-        _usedItemsOnNpcs.Add((_state.CurrentZoneId, npc.X * 10000 + itemId, npc.Y));
     }
 
     /// <summary>
@@ -704,34 +596,16 @@ public partial class MissionSolver
     /// </summary>
     public NPC? FindR2D2Npc()
     {
+        // Other planets reuse R2Unit art for ordinary NPCs. Companion collection
+        // must not override native missions or chase a droid in another enclosure.
+        if (_worldGenerator.CurrentWorld?.DagobahZones.Contains(_state.CurrentZoneId) != true) return null;
+        var accessible = StaticWalkingArea();
         foreach (var npc in _state.ZoneNPCs)
         {
-            if (npc.IsEnabled && npc.IsAlive && IsR2D2Character(npc.CharacterId))
+            if (npc.IsEnabled && npc.IsAlive && IsR2D2Character(npc.CharacterId) &&
+                new[] { (npc.X,npc.Y-1),(npc.X,npc.Y+1),(npc.X-1,npc.Y),(npc.X+1,npc.Y) }.Any(accessible.Contains))
             {
                 return npc;
-            }
-        }
-        return null;
-    }
-
-    /// <summary>
-    /// Finds the locator/R2D2 item in the current zone (legacy zone object search).
-    /// </summary>
-    private ZoneObject? FindLocatorItem()
-    {
-        if (_state.CurrentZone == null) return null;
-
-        foreach (var obj in _state.CurrentZone.Objects)
-        {
-            if (obj.Type == ZoneObjectType.LocatorItem)
-            {
-                // Skip if already collected
-                if (_collectedItems.Contains((_state.CurrentZoneId, obj.X, obj.Y)))
-                    continue;
-                if (_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
-                    continue;
-
-                return obj;
             }
         }
         return null;
@@ -799,100 +673,6 @@ public partial class MissionSolver
     }
 
     /// <summary>
-    /// Finds the locator/R2D2 item across all Dagobah zones.
-    /// Returns (zoneId, object) or (null, null) if not found.
-    /// LEGACY: Also checks for zone object type LocatorItem.
-    /// </summary>
-    private (int? zoneId, ZoneObject? obj) FindLocatorInDagobah()
-    {
-        var world = _worldGenerator.CurrentWorld;
-        if (world == null)
-        {
-            Console.WriteLine("[BOT] FindLocatorInDagobah: No world!");
-            return (null, null);
-        }
-
-        Console.WriteLine($"[BOT] Searching for R2D2 in {world.DagobahZones.Count} Dagobah zones: [{string.Join(", ", world.DagobahZones)}]");
-
-        // First check current zone
-        var localLocator = FindLocatorItem();
-        if (localLocator != null)
-        {
-            Console.WriteLine($"[BOT] R2D2 found in current zone {_state.CurrentZoneId}");
-            return (_state.CurrentZoneId, localLocator);
-        }
-
-        // Search all Dagobah zones
-        foreach (var dagobahZoneId in world.DagobahZones)
-        {
-            if (dagobahZoneId < 0 || dagobahZoneId >= _gameData.Zones.Count)
-            {
-                Console.WriteLine($"[BOT] Invalid zone ID {dagobahZoneId}");
-                continue;
-            }
-
-            var zone = _gameData.Zones[dagobahZoneId];
-            Console.WriteLine($"[BOT] Checking zone {dagobahZoneId}: {zone.Objects.Count} objects");
-
-            foreach (var obj in zone.Objects)
-            {
-                if (obj.Type == ZoneObjectType.LocatorItem)
-                {
-                    Console.WriteLine($"[BOT] Found LocatorItem object in zone {dagobahZoneId} at ({obj.X},{obj.Y})");
-
-                    // Skip if already collected
-                    if (_collectedItems.Contains((dagobahZoneId, obj.X, obj.Y)))
-                    {
-                        Console.WriteLine($"[BOT] Already in _collectedItems, skipping");
-                        continue;
-                    }
-                    if (_state.IsObjectCollected(dagobahZoneId, obj.X, obj.Y))
-                    {
-                        Console.WriteLine($"[BOT] Already collected in state, skipping");
-                        continue;
-                    }
-
-                    Console.WriteLine($"[BOT] Found R2D2 in Dagobah zone {dagobahZoneId} at ({obj.X},{obj.Y})");
-                    return (dagobahZoneId, obj);
-                }
-            }
-        }
-
-        Console.WriteLine("[BOT] No R2D2 found in any Dagobah zone!");
-        return (null, null);
-    }
-
-    /// <summary>
-    /// Finds an item we haven't picked up yet (either zone objects or tile items).
-    /// </summary>
-    private ZoneObject? FindUnpickedItem()
-    {
-        if (_state.CurrentZone == null) return null;
-
-        // Check zone objects for items
-        foreach (var obj in _state.CurrentZone.Objects)
-        {
-            if (obj.Type == ZoneObjectType.CrateItem ||
-                obj.Type == ZoneObjectType.CrateWeapon ||
-                obj.Type == ZoneObjectType.LocatorItem)
-            {
-                // Skip if already collected
-                if (_collectedItems.Contains((_state.CurrentZoneId, obj.X, obj.Y)))
-                    continue;
-                if (_state.IsObjectCollected(_state.CurrentZoneId, obj.X, obj.Y))
-                    continue;
-                // Skip unreachable
-                if (_unreachablePositions.Contains((_state.CurrentZoneId, obj.X, obj.Y)))
-                    continue;
-
-                return obj;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
     /// Finds a tile item (like health kits, keys) that we haven't picked up yet.
     /// Checks both middle layer (1) and top layer (2) for items.
     /// </summary>
@@ -924,6 +704,7 @@ public partial class MissionSolver
                         if (_unreachablePositions.Contains((_state.CurrentZoneId, x, y)))
                             continue;
 
+                        if (!StaticWalkingArea().Contains((x,y))) continue;
                         return (x, y);
                     }
                 }
@@ -980,60 +761,6 @@ public partial class MissionSolver
     public void MarkDoorEntered(int x, int y)
     {
         _enteredDoors.Add((_state.CurrentZoneId, x, y));
-    }
-
-    /// <summary>
-    /// Finds an unexplored zone connected to current zone.
-    /// </summary>
-    private int? FindUnexploredConnectedZone()
-    {
-        var world = _worldGenerator.CurrentWorld;
-        if (world == null) return null;
-
-        if (!world.Connections.TryGetValue(_state.CurrentZoneId, out var connections))
-            return null;
-
-        // Check each direction for unexplored zones, skipping blocked exits
-        (int? zoneId, Direction dir)[] candidates = {
-            (connections.North, Direction.Up),
-            (connections.South, Direction.Down),
-            (connections.East, Direction.Right),
-            (connections.West, Direction.Left)
-        };
-
-        foreach (var (zoneId, dir) in candidates)
-        {
-            if (zoneId.HasValue && !_visitedZones.Contains(zoneId.Value) && !IsExitBlocked(dir))
-            {
-                return zoneId.Value;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// Finds any unexplored zone in the world (for when we need to navigate further).
-    /// </summary>
-    private int? FindAnyUnexploredZone()
-    {
-        var world = _worldGenerator.CurrentWorld;
-        if (world?.Grid == null) return null;
-
-        // Scan the grid for unexplored zones
-        for (int y = 0; y < world.GridHeight; y++)
-        {
-            for (int x = 0; x < world.GridWidth; x++)
-            {
-                var zoneId = world.Grid[y, x];
-                if (zoneId.HasValue && !_visitedZones.Contains(zoneId.Value))
-                {
-                    return zoneId.Value;
-                }
-            }
-        }
-
-        return null;
     }
 
     /// <summary>
@@ -1221,7 +948,15 @@ public enum ObjectiveType
     PullObject,
     Explore,
     FindNpc,
-    WalkToPosition  // Walk to a specific position (e.g., to collect R2D2 after talking)
+    BumpTarget,
+    AttackTile,
+    UnresolvedReward,
+    PlanningBlocked,
+    TraversePassage,
+    WalkToPosition, // Walk to a specific position (e.g., to collect R2D2 after talking)
+    ClearObject,   // Planning goal: uncover a scripted tile and reach a cardinal approach.
+    WaitForActor,  // Retain the object plan while a friendly actor vacates a required cell.
+    GuideActor    // Reach a guiding stance and let a native fleeing actor take a real step.
 }
 
 /// <summary>
@@ -1236,5 +971,17 @@ public class BotObjective
     public int? TargetZoneId { get; set; }
     public NPC? TargetNpc { get; set; }
     public int? RequiredItemId { get; set; }
+    public int? ExpectedRewardItemId { get; set; }
     public Direction? Direction { get; set; }
+    public int? CrossingX { get; set; }
+    public int? CrossingY { get; set; }
+    public int? ArrivalX { get; set; }
+    public int? ArrivalY { get; set; }
+    public bool PassageRequiresBump { get; set; }
+    public bool ScriptedZoneChange { get; set; }
+    public bool AvoidFloorSwitches { get; set; }
+    public bool ScriptedInteraction { get; set; }
+    public int? ApproachX { get; set; }
+    public int? ApproachY { get; set; }
+    public int? ScriptIndex { get; set; }
 }

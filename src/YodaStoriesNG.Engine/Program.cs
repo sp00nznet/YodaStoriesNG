@@ -6,9 +6,92 @@ class Program
 {
     static int Main(string[] args)
     {
+        // Options may appear before or after the data path; keep legacy positional modes.
+        var positional = new List<string>();
+        int? commandSeed = null;
+        bool headless = args.Contains("--headless-bot");
+        bool headlessSmooth = false;
+        double botSpeed = 20, botSeconds = 1800;
+        WorldSize botSize = WorldSize.Medium;
+        string? botLogRoot = null, botResume = null;
+        for (int i=0;i<args.Length;i++)
+        {
+            string option=args[i];
+            string name=option.Split('=')[0];
+            if (headless && name is "--headless-bot" or "--smooth" or "--no-smooth")
+            {
+                if (name == "--smooth") headlessSmooth = true;
+                if (name == "--no-smooth") headlessSmooth = false;
+            }
+            else if (name is "--speed" or "--bot-seconds" or "--bot-log-dir" or "--world-size" or "--bot-resume")
+            {
+                string? value=option.Contains('=') ? option[(option.IndexOf('=')+1)..] : ++i<args.Length ? args[i] : null;
+                if (!headless || string.IsNullOrWhiteSpace(value))
+                { Console.Error.WriteLine($"{name} needs a value and --headless-bot."); return 2; }
+                if (name == "--bot-resume") botResume=Path.GetFullPath(value);
+                else if (name == "--bot-log-dir") botLogRoot=Path.GetFullPath(value);
+                else if (name == "--world-size")
+                {
+                    if (!Enum.TryParse(value,true,out botSize) || !Enum.IsDefined(botSize))
+                    { Console.Error.WriteLine("Use --world-size Small, Medium or Large."); return 2; }
+                }
+                else
+                {
+                    if (!double.TryParse(value,System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture,out double number) || !double.IsFinite(number) ||
+                        number < 0 || name == "--bot-seconds" && (number == 0 || number > 86400))
+                    { Console.Error.WriteLine("Speed must be nonnegative (0 = unlimited); bot seconds must be in (0,86400]."); return 2; }
+                    if (name == "--speed") botSpeed=number; else botSeconds=number;
+                }
+            }
+            else if (option.Equals("--seed",StringComparison.OrdinalIgnoreCase) || option.StartsWith("--seed=",StringComparison.OrdinalIgnoreCase))
+            {
+                string? value=option.Contains('=') ? option[(option.IndexOf('=')+1)..] : ++i<args.Length ? args[i] : null;
+                if(commandSeed.HasValue || !int.TryParse(value,System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,out int seed))
+                {
+                    Console.Error.WriteLine("Use --seed <32-bit integer> once. Example: YodaStoriesNG Yoda --seed 12345");
+                    return 2;
+                }
+                commandSeed=seed;
+            }
+            else positional.Add(option);
+        }
+        if(commandSeed.HasValue) Environment.SetEnvironmentVariable("YSNG_SEED",commandSeed.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        args=positional.ToArray();
+        if(args.Contains("--help") || args.Contains("-h"))
+        {
+            Console.WriteLine("Usage: YodaStoriesNG [data-directory|game.dta|game.daw] [--seed INTEGER]");
+            Console.WriteLine("Headless: Yoda --headless-bot --seed 12345 --speed 20 --bot-seconds 1800 [--smooth]");
+            Console.WriteLine("Headless options: --speed 0 runs without throttling; --world-size Medium; --bot-log-dir PATH. Movement defaults to tile mode; --smooth enables smooth movement.");
+            Console.WriteLine("Checkpoints are saved automatically during headless runs. Resume: --bot-resume PATH/checkpoint-0001.json.gz (same game data; planner starts fresh).");
+            Console.WriteLine("Puzzle catalogue: --puzzle-catalogue DATA OUTPUT_DIRECTORY");
+            Console.WriteLine("Offline local plan: --puzzle-plan DATA CHECKPOINT SECTOR AcquireItem|SolveSector|Win ITEM OUTPUT_JSON [MAX_STATES=3000] [SECONDS=30]");
+            Console.WriteLine("Use unpacked data. Optional YSNG_PUZZLE_PLAN_DIR loads matching local plans after independent engine replay.");
+            Console.WriteLine("Exit codes: 0 mission complete, 1 bot stopped/game over, 2 invalid arguments, 3 simulation limit, 130 cancelled.");
+            Console.WriteLine("--seed also accepts --seed=INTEGER and overrides YSNG_SEED. Match game data, world size, and build to reproduce a world.");
+            return 0;
+        }
+
         // Needs no game data and opens no window - keep it before everything else.
         if (args.Contains("--self-test"))
             return Dev.SelfTest.Run();
+
+        if(args.Length>=3 && args[0]=="--puzzle-catalogue")
+            return Dev.PuzzleCatalogueReport.Run(args[1],args[2]);
+
+        // Bind a local proof to a real generated checkpoint, never an invented
+        // inventory or a pristine template with unselected random variants.
+        if(args.Length>=7 && args[0]=="--puzzle-plan" && int.TryParse(args[3],out int localSector) &&
+            Enum.TryParse<Bot.LocalPuzzleGoalKind>(args[4],true,out var localKind) && Enum.IsDefined(localKind) &&
+            localKind!=Bot.LocalPuzzleGoalKind.ReachCell &&
+            int.TryParse(args[5],out int localItem))
+            return GameEngine.SolvePuzzleOffline(args[1],args[2],args[6],new(localKind,localSector,localItem),
+                args.Length>7 && int.TryParse(args[7],out int localStates) ? Math.Clamp(localStates,1,100000) : 3000,
+                args.Length>8 && int.TryParse(args[8],out int localSeconds) ? Math.Clamp(localSeconds,1,300) : 30);
+
+        if(args.FirstOrDefault() is "--puzzle-plan" or "--puzzle-catalogue")
+        { Console.Error.WriteLine("Invalid puzzle command. Run --help for catalogue and offline-plan arguments.");return 2; }
 
         if (args.Length >= 2 && args[0] == "--pickup-audit")
             return GameEngine.AuditPickups(args[1]);
@@ -31,6 +114,18 @@ class Program
         // Headless: generate many worlds from a data file and report how they went.
         if (args.Length >= 2 && args[0] == "--generate")
             return Dev.GenerateWorlds.Run(args[1], args.Length >= 3 ? int.Parse(args[2]) : 200);
+
+        if (headless)
+        {
+            if (args.Length > 1 || args.Any(a=>a.StartsWith("--")))
+            { Console.Error.WriteLine("Supply one data directory/file and supported headless options; see --help."); return 2; }
+            string location=args.FirstOrDefault() ?? "Yoda";
+            string? file=File.Exists(location) ? location : Data.GameDataFile.Find(location,"yodesk.dta") ??
+                Data.GameDataFile.Find(location,"desktop.daw");
+            if (file == null) { Console.Error.WriteLine($"No game data found at {location}"); return 2; }
+            try { return GameEngine.RunHeadlessBot(file,botSpeed,botSeconds,botSize,headlessSmooth,botLogRoot,botResume); }
+            catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+        }
 
         Console.WriteLine("========================================");
         Console.WriteLine("     Yoda Stories NG");

@@ -7,6 +7,34 @@ namespace YodaStoriesNG.Engine.Game;
 // and script paths. Initialize/Run/Render are never called: no SDL window is created.
 public unsafe partial class GameEngine
 {
+    internal static void TestMultiRoomFlight()
+    {
+        var data=new GameData(); data.Tiles.Add(new Tile { Id=0,Flags=TileFlags.Floor });
+        for(int id=0;id<3;id++)
+        {
+            var zone=new Zone { Id=id,Width=6,Height=6,TileGrid=new ushort[6,6,3] }; data.Zones.Add(zone);
+            for(int y=0;y<6;y++) for(int x=0;x<6;x++)
+            { zone.SetTile(x,y,1,ushort.MaxValue); zone.SetTile(x,y,2,ushort.MaxValue); }
+        }
+        data.Zones[0].Actions.Add(new Data.Action { Instructions={new Instruction { Opcode=InstructionOpcode.HideHero },
+            new Instruction { Opcode=InstructionOpcode.ChangeZone,Arguments={1,0,0} }} });
+        data.Zones[1].Actions.Add(new Data.Action { Conditions={new Condition { Opcode=ConditionOpcode.EnterByPlane }},
+            Instructions={new Instruction { Opcode=InstructionOpcode.ChangeZone,Arguments={2,2,2} }} });
+        data.Zones[2].Actions.Add(new Data.Action { Conditions={new Condition { Opcode=ConditionOpcode.EnterByPlane }},
+            Instructions={new Instruction { Opcode=InstructionOpcode.SetCounter,Arguments={7} },new Instruction { Opcode=InstructionOpcode.ShowHero }} });
+        var engine=new GameEngine("") { _gameData=data,_showingTitleScreen=false };
+        engine._actionExecutor=new ActionExecutor(data,engine._state);
+        engine.LoadZone(0,1,1);
+        engine._actionExecutor.ExecuteZoneActions(ActionTrigger.Walk);
+        if(!engine.CompleteScriptedTravel() || engine._state.HeroVisible)
+            throw new InvalidOperationException("intermediate flight room discarded HideHero");
+        if(!engine.CompleteScriptedTravel() || engine._state.CurrentZoneId!=2 ||
+            engine._state.GetCounter(2)!=7 || !engine._state.HeroVisible)
+            throw new InvalidOperationException("multi-room flight did not execute its final landing");
+        engine._state.HeroVisible=false; engine.LoadZone(1,1,1);
+        if(!engine._state.HeroVisible) throw new InvalidOperationException("ordinary entry retained an interrupted hidden hero");
+    }
+
     public static int AuditXWingTravel(string dataFile, bool smooth = false)
     {
         var output = Console.Out;
@@ -54,8 +82,6 @@ public unsafe partial class GameEngine
                     // Walk into the real cockpit, not the distant transit marker.
                     engine._state.PlayerX = 6;
                     engine._state.PlayerY = 12;
-                    // Also exercise leaving an unsolved area after object manipulation.
-                    engine.MarkObjectsMoved(engine._state.CurrentZone!);
                     if (shortcut) engine.TravelToPlanet();
                     else engine.AuditMovementStep(0, -1, Direction.Up);
                     engine.AwaitXWingLanding(route.Zone);
@@ -69,8 +95,6 @@ public unsafe partial class GameEngine
 
                     stage = $"return trip {trip + 1}";
                     // The landing script leaves Luke one step below the cockpit.
-                    // Also exercise leaving an unsolved area after object manipulation.
-                    engine.MarkObjectsMoved(engine._state.CurrentZone!);
                     if (shortcut) engine.TravelToPlanet();
                     else
                     {
@@ -135,7 +159,6 @@ public unsafe partial class GameEngine
                 if (world.StartingItemId.HasValue) engine._state.AddItem(world.StartingItemId.Value);
                 engine._state.PlayerX = 6;
                 engine._state.PlayerY = 12;
-                engine.MarkObjectsMoved(engine._state.CurrentZone!);
                 engine.AuditMovementStep(0, -1, Direction.Up);
                 if (world.Mission.GoalPuzzle.Item1 == 1788)
                 {
@@ -144,7 +167,6 @@ public unsafe partial class GameEngine
                     engine.AwaitXWingLanding(642, expectParkedShip: false);
                     engine._state.PlayerX = 3;
                     engine._state.PlayerY = 7;
-                    engine.MarkObjectsMoved(engine._state.CurrentZone!);
                     engine.AuditMovementStep(0, 1, Direction.Down);
                     engine.AwaitXWingLanding(world.LandingZoneId, expectParkedShip: false);
                 }

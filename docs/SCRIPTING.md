@@ -87,7 +87,7 @@ in slot 0 and the position in slots 1 to 3. The tables below give the real order
 | `0x06` | `RandomIs` | value | The zone random equals `value`. |
 | `0x07` | `RandomIsGreaterThan` | value | Zone random > `value`. |
 | `0x08` | `RandomIsLessThan` | value | Zone random < `value`. |
-| `0x09` | `EnterByPlane` | - | The hero arrived by vehicle rather than on foot. |
+| `0x09` | `EnterByPlane` | - | The hero arrived through a room transition or by vehicle. |
 | `0x0A` | `TileAtIs` | **tile**, x, y, layer | The tile at (x, y, layer) is `tile`. **Note the order.** |
 | `0x0B` | `MonsterIsDead` | index | Monster `index` in this zone is dead. |
 | `0x0C` | `HasNoActiveMonsters` | - | No enabled living monsters remain. |
@@ -255,22 +255,22 @@ the script editor - has one table.
 | `0x01` | `StandingOn` | | `0x00` | `PlaceTile` |
 | `0x02` | `Bump` | | `0x01` | `MoveTile` |
 | `0x03` | `PlacedItemIs` | | `0x02` | `RemoveTile` |
-| `0x04` | `ZoneNotInitialized` | | `0x03` | `EnableMonster` |
-| `0x05` | `ZoneEntered` | | `0x04` | `DisableMonster` |
+| `0x04` | `ZoneNotInitialized` | | `0x03` | `EnableHotspot` |
+| `0x05` | `ZoneEntered` | | `0x04` | `DisableHotspot` |
 | `0x06` | `CounterIs` | | `0x05` | `SpeakHero` |
-| `0x09` | `HasGoalItem` | | `0x06` | `Redraw` |
+| `0x09` | `IndyGameWon` | | `0x06` | `Wait` |
 | `0x0A` | `HasItem` | | `0x09` | `SetCounter` |
 | `0x0C` | `RandomIsGreaterThan` | | `0x0A` | `AddToCounter` |
 | `0x0D` | `RandomIs` | | `0x0B` | `PlaySound` |
-| `0x0E` | `RandomIsLessThan` | | `0x0C` | `Wait` |
-| `0x0F` | has this sector's find item (`HasItem -1`) | | `0x0D` | `RollDice` |
-| `0x10` | `EnterByPlane` (arrived by vehicle) | | `0x0E` / `0x0F` | `HideHero` / `ShowHero` |
+| `0x0E` | `RandomIsLessThan` | | `0x0C` | `Redraw` |
+| `0x0F` | `ZoneIsSolved` | | `0x0D` | `RollDice` |
+| `0x10` | `EnterByPlane` (post-transition arrival) | | `0x0E` / `0x0F` | `HideHero` / `ShowHero` |
 | `0x11` | `MonsterIsDead` | | `0x10` | `DrawTile` |
 | `0x12` | `HasNoActiveMonsters` | | `0x11` | `SetTileNeedsDisplay` |
 | `0x13` | `TileAtIs` | | `0x12` | `MoveHeroTo` |
 | `0x14` | `RequiredItemIs` | | `0x13` | `SetRectNeedsDisplay` |
-| `0x15` | `EndingIs` | | `0x15` | `DisableAction` |
-| `0x16` | `HealthIsLessThan` | | `0x16` / `0x17` | `EnableHotspot` / `DisableHotspot` |
+| `0x15` | `StartingItemIs` | | `0x15` | `DisableAction` |
+| `0x16` | `HealthIsLessThan` | | `0x16` / `0x17` | `EnableMonster` / `DisableMonster` |
 | | | | `0x18` / `0x19` | `EnableAllMonsters` / `DisableAllMonsters` |
 | | | | `0x1A` | `MoveHeroBy` |
 | | | | `0x1B` | `WinGame` - fires as you take the artefact |
@@ -282,8 +282,17 @@ the script editor - has one table.
 | | | | `0x21` | `MarkAsSolved` |
 | | | | `0x22` | `ChangeZone` |
 
-Least certain: `0x09` (only ever gates handing Marcus the artefact) and `0x10`. Not yet
-decoded: instructions `0x14` (4 uses) and `0x23` (15); they parse to `0xFF` and do nothing.
+The Indy condition mapping is based on the DESKADV switch recovered in
+[Yodecomp's IactScript table](https://github.com/shinyquagsire23/Yodecomp/blob/main/src/IactScript.cpp).
+In particular, `0x09` tests the won state, `0x0F` tests the solved-zone flag,
+`0x15` tests the starting item, and `0x0C`/`0x0E` compare random values in opposite directions.
+The random comparisons above correct the reference table's direction: all ten paired
+ranges in the shipped Indy scripts would otherwise be impossible. For example, zone 138's
+middle layouts require a random value greater than 1 and less than 4.
+Instruction `0x14` is a full redraw; `0x23` is a no-op.
+Indy dispatches the post-transition arrival phase after area replacement, including adjacent-area
+entry. Door arrivals dispatch it in both games. This script phase is separate from preparing
+Yoda's X-wing landing sprites.
 
 ## Known divergences from the original
 

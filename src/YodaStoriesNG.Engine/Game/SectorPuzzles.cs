@@ -1,4 +1,5 @@
 using YodaStoriesNG.Engine.Data;
+using YodaStoriesNG.Engine.Bot;
 
 namespace YodaStoriesNG.Engine.Game;
 
@@ -26,6 +27,10 @@ public class SectorPuzzles
     private readonly GameState _state;
     private readonly WorldMap _world;
     private readonly HashSet<int> _laidDown = new();
+
+    internal int[] CheckpointLaidDown() => _laidDown.ToArray();
+    internal void RestoreLaidDown(IEnumerable<int> zones)
+    { _laidDown.Clear(); _laidDown.UnionWith(zones); }
 
     public event Action<string, string>? OnSpeak;
     public event Action<int>? OnSound;
@@ -65,9 +70,6 @@ public class SectorPuzzles
         return (At(sector.PuzzleIndex), At(sector.PuzzleIndex + 1));
     }
 
-    /// <summary>Allow an unsolved area's generated contents to be laid down again after reset.</summary>
-    public void ResetArea(int zoneId) => _laidDown.Remove(zoneId);
-
     /// <summary>First visit only: put generated items and NPCs where the hotspots say.</summary>
     public void LayDown(Zone zone)
     {
@@ -84,17 +86,98 @@ public class SectorPuzzles
 
     private void Place(Zone zone, bool includeNpcs)
     {
+        if(!includeNpcs && _state.CurrentZoneId==zone.Id)
+            RelocateUnreachableFindItem(zone);
         foreach (var hotspot in zone.Objects)
         {
             int arg = hotspot.Argument == 0xFFFF ? -1 : hotspot.Argument;
             bool holdsTile = (int)hotspot.Type is 0 or 2 or 5 or 6 or 8 || includeNpcs && (int)hotspot.Type is 1 or 7;
             if (!hotspot.Enabled || arg < 0 || !holdsTile) continue;
-            if (zone.GetTile(hotspot.X, hotspot.Y, 1) != 0xFFFF) continue;
+            if (zone.GetTile(hotspot.X, hotspot.Y, 1) != 0xFFFF)
+            {
+                // Generated rewards occasionally inherit a crate hotspot whose
+                // authored cell is permanently covered by a fixed wall/object.
+                // Keep movable covers puzzle-driven, and keep scripted openings
+                // at their authored location; relocate only an otherwise
+                // unreachable generated pickup to the nearest reachable floor.
+                int cover = zone.GetTile(hotspot.X, hotspot.Y, 1);
+                bool fixedCover = cover < _data.Tiles.Count && _data.Tiles[cover].IsObject &&
+                    !_data.Tiles[cover].IsDraggable;
+                bool sealedMovableCover = cover < _data.Tiles.Count && _data.Tiles[cover].IsDraggable &&
+                    !HasClearablePickupRoute(zone, hotspot.X, hotspot.Y);
+                bool scriptOpensCell = zone.Actions.Any(action => action.Instructions.Any(i =>
+                    i.Arguments.Count >= 3 && i.Arguments[0] == hotspot.X && i.Arguments[1] == hotspot.Y &&
+                    i.Arguments[2] == 1 && i.Opcode is InstructionOpcode.RemoveTile or InstructionOpcode.MoveTile ||
+                    i.Arguments.Count >= 4 && i.Arguments[0] == hotspot.X && i.Arguments[1] == hotspot.Y &&
+                    i.Arguments[2] == 1 && i.Opcode == InstructionOpcode.PlaceTile &&
+                    (i.Arguments[3] < 0 || i.Arguments[3] >= _data.Tiles.Count || !_data.Tiles[i.Arguments[3]].IsObject)));
+                bool generatedTrader = includeNpcs && hotspot.Type == SpawnLocation &&
+                    _world.Sectors.GetValueOrDefault(zone.Id) is { PuzzleIndex: >= 0 } sector && sector.Npc == arg;
+                if ((!generatedTrader && (int)hotspot.Type != (int)ZoneObjectType.Trigger) ||
+                    !(fixedCover || sealedMovableCover) || scriptOpensCell ||
+                    !TryRelocatePickup(zone, hotspot)) continue;
+            }
             if (_state.IsObjectCollected(zone.Id, hotspot.X, hotspot.Y) ||
                 _state.CollectedObjects.Contains($"{zone.Id}_{hotspot.X}_{hotspot.Y}_tile") ||
                 _state.CollectedObjects.Contains($"{zone.Id}_{hotspot.X}_{hotspot.Y}_r2d2")) continue;
             zone.SetTile(hotspot.X, hotspot.Y, 1, (ushort)arg);
         }
+    }
+
+    // Randomly selected Find rewards can land in a disconnected component of
+    // an authored map. If no script refers to the hotspot coordinate, move
+    // that direct pickup to the nearest reachable floor tile so the required
+    // item remains collectable in this generated world.
+    private void RelocateUnreachableFindItem(Zone zone)
+    {
+        if(_world.Sectors.GetValueOrDefault(zone.Id) is not { FindItem:>0 } sector) return;
+        var hotspot=zone.Objects.FirstOrDefault(h=>h.Enabled && h.Type==ZoneObjectType.Trigger &&
+            h.Argument==sector.FindItem);
+        if(hotspot==null || zone.GetTile(hotspot.X,hotspot.Y,1)!=sector.FindItem) return;
+        int x=hotspot.X,y=hotspot.Y;
+        if(zone.Actions.Any(a=>a.Conditions.Any(c=>c.Arguments.Count>=2 &&
+            c.Arguments[0]==x && c.Arguments[1]==y && c.Opcode is ConditionOpcode.Bump or
+                ConditionOpcode.StandingOn or ConditionOpcode.PlacedItemIs or ConditionOpcode.TileAtIs))) return;
+        var pathfinder=new Pathfinder(_data,_state) { AllowDiagonal=false };
+        if(pathfinder.FindPath(zone,_state.PlayerX,_state.PlayerY,x,y,_state.ZoneNPCs)!=null) return;
+        zone.SetTile(x,y,1,0xFFFF);
+        if(!TryRelocatePickup(zone,hotspot))
+        {
+            zone.SetTile(x,y,1,(ushort)sector.FindItem);
+            return;
+        }
+        Console.WriteLine($"[PUZZLE] Relocated unreachable Find reward {sector.FindItem} in zone {zone.Id} from ({x},{y}) to ({hotspot.X},{hotspot.Y})");
+    }
+
+    private bool HasClearablePickupRoute(Zone zone, int x, int y)
+    {
+        if (_state.CurrentZoneId != zone.Id) return false;
+        return BlockPuzzlePlanner.Plan(_data,zone,_state,new[] { (x,y) },Array.Empty<BlockPuzzlePlanner.Placement>(),
+            clearTiles:new[] { (x,y) }) is { Count: > 0 };
+    }
+
+    private bool TryRelocatePickup(Zone zone, ZoneObject hotspot)
+    {
+        if (_state.CurrentZoneId != zone.Id) return false;
+        var pathfinder = new Pathfinder(_data, _state) { AllowDiagonal = false };
+        var candidates = new List<(int X, int Y, int Steps, int Distance)>();
+        for (int y = 0; y < zone.Height; y++)
+        for (int x = 0; x < zone.Width; x++)
+        {
+            if (zone.GetTile(x, y, 1) != 0xFFFF ||
+                (x == _state.PlayerX && y == _state.PlayerY) ||
+                zone.Objects.Any(other => !ReferenceEquals(other, hotspot) && other.Enabled && other.X == x && other.Y == y) ||
+                zone.Monsters.Any(m => m.X == x && m.Y == y)) continue;
+            int baseTile = zone.GetTile(x, y, 0);
+            if (baseTile < _data.Tiles.Count && _data.Tiles[baseTile].IsObject) continue;
+            var path = pathfinder.FindPath(zone, _state.PlayerX, _state.PlayerY, x, y, _state.ZoneNPCs);
+            if (path != null) candidates.Add((x, y, path.Count, Math.Abs(x - hotspot.X) + Math.Abs(y - hotspot.Y)));
+        }
+        if (candidates.Count == 0) return false;
+        var target = candidates.OrderBy(c => c.Steps).ThenBy(c => c.Distance).First();
+        hotspot.X = target.X;
+        hotspot.Y = target.Y;
+        return true;
     }
 
     /// <summary>Whether approaching this tile invokes a generated NPC interaction.</summary>
@@ -157,6 +240,28 @@ public class SectorPuzzles
         return true;
     }
 
+    internal static bool UsesHeldItem(Zone zone,int item,int requiredItem) =>
+        zone.Actions.Any(a=>a.Conditions.Any(c=>c.Opcode==ConditionOpcode.HasItem && c.Arguments.Count>0 &&
+            (c.Arguments[0]==item || c.Arguments[0]==-1 && requiredItem==item))) &&
+        !zone.Actions.Any(a=>a.Conditions.Any(c=>c.Opcode==ConditionOpcode.PlacedItemIs && c.Arguments.Count>=5 &&
+            (c.Arguments[4]==item || c.Arguments[4]==-1 && requiredItem==item)));
+
+    /// <summary>Whether the native hotspot puzzle still owns this exact item/target pair.</summary>
+    internal bool CanPlaceItem(int item,int x,int y)
+    {
+        if(Sector is not { } sector || _state.CurrentZone is not { } zone)
+            return false;
+        if(sector.Solved || sector.RequiredItem!=item) return false;
+        // Keep the native interpreter as the final authority on puzzle type,
+        // but retry it for the exact required-item lock. Blockade locks often
+        // use the no-argument sentinel because their required item lives in
+        // the sector record rather than the hotspot.
+        bool matchingLock=zone.Objects.Any(h=>h.Enabled && h.X==x && h.Y==y && h.Type==Lock &&
+            (h.Argument==item || h.Argument==0xFFFF && sector.Type is ZoneType.BlockadeNorth or
+                ZoneType.BlockadeSouth or ZoneType.BlockadeEast or ZoneType.BlockadeWest));
+        return matchingLock;
+    }
+
     /// <summary>Using <paramref name="item"/> on (x, y). Returns true if a sector puzzle took it.</summary>
     public bool PlaceItem(int item, int x, int y)
     {
@@ -165,12 +270,16 @@ public class SectorPuzzles
         // Select by interaction role, not whichever hotspot was stored first.
         var hotspot = zone.Objects.FirstOrDefault(h => h.X == x && h.Y == y && h.Enabled && h.Type == Lock);
 
+        // A Lock marker can be metadata on a script's variable cell. A native
+        // HasItem gate tests possession; using the fallback must not eat its key.
+        if(hotspot!=null && UsesHeldItem(zone,item,sector.RequiredItem)) return false;
+
         if (sector.PuzzleIndex < 0 || sector.Solved)
         {
             // Blockades and solved sectors: the required item opens a Lock.
             if (hotspot?.Type != Lock || sector.RequiredItem != item) return false;
             SetSolved(sector);
-            _state.RemoveItem(item);
+            ConsumePuzzleItem(item);
             return true;
         }
 
@@ -195,7 +304,7 @@ public class SectorPuzzles
         {
             if (hotspot?.Type != Lock || hotspot.Argument != item) return NoGo();
             SetSolved(sector);
-            _state.RemoveItem(item);
+            ConsumePuzzleItem(item);
             // The find item's drop spot opens; show it now rather than on the next visit.
             foreach (var drop in zone.Objects.Where(h => h.Type == DropQuestItem && h.Argument == sector.FindItem))
             {
@@ -207,6 +316,12 @@ public class SectorPuzzles
         }
 
         return false;
+    }
+
+    private void ConsumePuzzleItem(int item)
+    {
+        if(item>=0 && item<_data.Tiles.Count && (_data.Tiles[item].Flags & TileFlags.ItemKeycard)!=0) return;
+        _state.RemoveItem(item);
     }
 
     private bool NoGo()

@@ -149,16 +149,18 @@ public unsafe class TitleScreen : IDisposable
             (bottomRight, tileSize, tileSize)
         };
 
+        var tileRenderer = new TileRenderer();
         foreach (var (tileId, offsetX, offsetY) in tileOffsets)
         {
             var tile = _tiles[tileId];
+            var tilePixels = tileRenderer.ConvertTileToArgb32(tile);
             for (int y = 0; y < tileSize; y++)
             {
                 for (int x = 0; x < tileSize; x++)
                 {
                     int srcIndex = y * tileSize + x;
                     int dstIndex = (offsetY + y) * textureSize + (offsetX + x);
-                    pixels[dstIndex] = Palette.GetColor(tile.PixelData[srcIndex]);
+                    pixels[dstIndex] = tilePixels[srcIndex];
                 }
             }
         }

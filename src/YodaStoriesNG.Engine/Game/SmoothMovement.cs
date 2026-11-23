@@ -23,7 +23,7 @@ public unsafe partial class GameEngine
     private Func<bool>? _smoothPullSource;
     private bool ReadPullInput() => _smoothPullSource?.Invoke() ?? (_renderer != null && IsShiftHeld());
     private bool MovementModePending => _smoothMovement != _smoothMovementRequested;
-    private bool MovementUIBlocked => !_movementFocused || _debugMapWindow?.IsLocatorOpen == true || _menuBar?.IsMenuOpen == true ||
+    private bool MovementUIBlocked => (!_movementFocused && _bot?.IsRunning != true) || _debugMapWindow?.IsLocatorOpen == true || _menuBar?.IsMenuOpen == true ||
         _controllerOverlay?.IsOpen == true || _controlsWindow?.IsOpen == true || _state.IsPaused;
     private (double X, double Y) PlayerRenderPosition => _playerStep is { } step
         ? (step.X, step.Y) : (_state.PlayerX, _state.PlayerY);
@@ -52,6 +52,9 @@ public unsafe partial class GameEngine
     {
         if (_playerStep != null || _npcSteps.Count != 0) return;
         _smoothMovement = _smoothMovementRequested;
+        // Bot routes execute exact tile steps; keep the user preference and
+        // enemy interpolation independent from that planning mode.
+        _state.SmoothMovementEnabled = _smoothMovement && _bot?.IsRunning != true;
     }
 
     private void CancelSmoothMovement()
@@ -96,22 +99,26 @@ public unsafe partial class GameEngine
         if (_state.ZoneNPCs.Any(n => n != actor && n.IsEnabled && n.IsAlive && n.X == x && n.Y == y &&
             !(collect && n.IsReadyToCollect && IsR2D2Character(n.CharacterId)))) return false;
         int tile = zone.GetTile(x, y, 1);
-        return tile == ushort.MaxValue || tile >= _gameData!.Tiles.Count ||
-            !_gameData.Tiles[tile].IsSolid || IsNPCMapSprite(x, y, (ushort)tile);
+        return tile == ushort.MaxValue || tile >= _gameData!.Tiles.Count || !_gameData.Tiles[tile].IsObject;
     }
 
-    private bool DiagonalSideClear(int x, int y)
+    private bool DiagonalSideClear(int x, int y,NPC? actor=null)
     {
         var zone = _state.CurrentZone;
         if (zone == null || x < 0 || y < 0 || x >= zone.Width || y >= zone.Height ||
-            IsGroundBlocked(zone, x, y) || IsScriptedActorTile(zone, x, y) || MovementReserved(x, y)) return false;
-        if (_state.ZoneNPCs.Any(n => n.IsEnabled && n.IsAlive && n.X == x && n.Y == y)) return false;
+            MovementReserved(x, y,actor)) return false;
+        if (actor!=null && _state.PlayerX==x && _state.PlayerY==y) return false;
+        if (_state.ZoneNPCs.Any(n => n!=actor && n.IsEnabled && n.IsAlive && n.X == x && n.Y == y)) return false;
         int tile = zone.GetTile(x, y, 1);
+        if(IsGroundBlocked(zone,x,y) ||
+            actor==null && _smoothMovement && tile<_gameData!.Tiles.Count && _gameData.Tiles[tile].IsObject) return false;
         // Authored maps contain diagonal openings beside walls and movable rocks.
         // Side cells are not entered: the destination still needs to be walkable,
         // and pushing or pulling a block remains cardinal.
-        return tile == ushort.MaxValue || tile < _gameData!.Tiles.Count &&
-            !_gameData.Tiles[tile].IsCharacter;
+        // Static NPC artwork can border an authored diagonal opening too.
+        // The destination is still checked by SmoothCellClear; live actors and
+        // reservations above continue to block crossing a moving character.
+        return tile == ushort.MaxValue || tile < _gameData!.Tiles.Count;
     }
 
     private bool CanSlidePlayerTo(int dx, int dy)
@@ -120,7 +127,7 @@ public unsafe partial class GameEngine
         return DiagonalSideClear(x + dx, y) && DiagonalSideClear(x, y + dy) &&
             SmoothCellClear(x + dx, y + dy, collect: true) && !IsCardinalInteraction(x + dx, y + dy) &&
             !_state.CurrentZone!.Objects.Any(o => o.Enabled && o.X == x + dx && o.Y == y + dy &&
-                o.Type is ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit or ZoneObjectType.Teleporter or
+                o.Type is ZoneObjectType.Teleporter or
                     ZoneObjectType.VehicleToPrimary or ZoneObjectType.VehicleToSecondary);
     }
 
@@ -132,7 +139,12 @@ public unsafe partial class GameEngine
     private bool RequestSmoothPlayerStep(int dx, int dy, Direction facing, bool pull)
     {
         if (_playerStep != null || MovementModePending || MovementUIBlocked || _state.IsGameOver ||
-            _actionExecutor?.IsBusy == true || !_state.HeroVisible || _messages.HasDialogue || _state.CurrentZone == null) return false;
+            _actionExecutor?.IsBusy == true || !HeroControlAvailable || _messages.HasDialogue || _state.CurrentZone == null)
+        {
+            _bot?.TraceDebug("movement-denied",new { StepPending=_playerStep!=null,MovementModePending,MovementUIBlocked,
+                _state.IsGameOver,ScriptBusy=_actionExecutor?.IsBusy,_state.HeroVisible,Dialogue=_messages.HasDialogue });
+            return false;
+        }
         dx = Math.Sign(dx); dy = Math.Sign(dy);
         if (dx == 0 && dy == 0) return false;
         int x = _state.PlayerX, y = _state.PlayerY;
@@ -140,7 +152,7 @@ public unsafe partial class GameEngine
         if (diagonal && (pull || !DiagonalSideClear(x + dx, y) || !DiagonalSideClear(x, y + dy) ||
             !SmoothCellClear(x + dx, y + dy, collect: true) || IsCardinalInteraction(x + dx, y + dy) ||
             _state.CurrentZone.Objects.Any(o => o.Enabled && o.X == x + dx && o.Y == y + dy &&
-                o.Type is ZoneObjectType.DoorEntrance or ZoneObjectType.DoorExit or ZoneObjectType.Teleporter or
+                o.Type is ZoneObjectType.Teleporter or
                     ZoneObjectType.VehicleToPrimary or ZoneObjectType.VehicleToSecondary))) return false;
         facing = StepFacing(dx, dy, facing);
         _state.PlayerDirection = facing;
@@ -152,7 +164,6 @@ public unsafe partial class GameEngine
             x + dx < _state.CurrentZone.Width && y + dy < _state.CurrentZone.Height &&
             !IsGroundBlocked(_state.CurrentZone, x + dx, y + dy) &&
             tile < _gameData!.Tiles.Count && _gameData.Tiles[tile].IsDraggable &&
-            _state.CurrentZone.GetTile(x + dx * 2, y + dy * 2, 1) == ushort.MaxValue &&
             SmoothCellClear(x + dx * 2, y + dy * 2) && !MovementReserved(x + dx, y + dy);
         if (!clear && !push || !diagonal && IsCardinalInteraction(x + dx, y + dy) && !push)
         {
@@ -164,10 +175,10 @@ public unsafe partial class GameEngine
                 _committingSmoothStep = true;
                 try { TryMovePlayer(dx, dy, facing, pull); }
                 finally { _committingSmoothStep = false; }
-                if (_messages.HasDialogue || _actionExecutor?.IsBusy == true || !_state.HeroVisible ||
+                if (_messages.HasDialogue || _actionExecutor?.IsBusy == true || !HeroControlAvailable ||
                     previousZone != _state.CurrentZoneId) return true;
             }
-            if (!diagonal && !pull && !IsCardinalInteraction(x + dx, y + dy))
+            if (_bot?.IsRunning != true && !diagonal && !pull && !IsCardinalInteraction(x + dx, y + dy))
                 foreach (var slide in dx == 0 ? new[] { (-1, dy), (1, dy) } : new[] { (dx, 1), (dx, -1) })
                     if (CanSlidePlayerTo(slide.Item1, slide.Item2) &&
                         RequestSmoothPlayerStep(slide.Item1, slide.Item2, facing, false)) return true;
@@ -234,9 +245,11 @@ public unsafe partial class GameEngine
 
     private void PollSmoothMovement()
     {
+        // Background simulation is for the bot, not held keyboard/controller input.
+        if (!_movementFocused) { _suppressHeldMovement = true; return; }
         var input = ReadSmoothInput();
         if (input.X == 0 && input.Y == 0) _suppressHeldMovement = false;
-        if (MovementUIBlocked || _actionExecutor?.IsBusy == true || !_state.HeroVisible || _messages.HasDialogue)
+        if (MovementUIBlocked || _actionExecutor?.IsBusy == true || !HeroControlAvailable || _messages.HasDialogue)
         { _suppressHeldMovement = true; return; }
         if (input.X == 0 && input.Y == 0) return;
         if (_suppressHeldMovement || _bot?.IsRunning == true || _playerStep != null || MovementModePending) return;
@@ -262,9 +275,11 @@ public unsafe partial class GameEngine
         if (_state.IsGameOver || _state.Health <= 0) { CancelSmoothMovement(); return; }
         // Scripts can relocate a hero directly. Never tween across a scripted jump.
         if (_playerStep is { } stale && (stale.FromX != _state.PlayerX || stale.FromY != _state.PlayerY ||
-            _actionExecutor?.IsBusy == true || !_state.HeroVisible)) CancelSmoothMovement();
-        if (_actionExecutor?.IsBusy == true || !_state.HeroVisible)
-        { CancelSmoothMovement(); return; }
+            !HeroControlAvailable)) CancelSmoothMovement();
+        if (!HeroControlAvailable) { CancelSmoothMovement(); return; }
+        // Background animation waits pause an ordinary step. Discarding it on
+        // every short wait can prevent the actor from ever reaching a tile.
+        if (_actionExecutor?.IsBusy == true) { _suppressHeldMovement=true; return; }
         if (MovementUIBlocked) { _suppressHeldMovement = true; return; }
         if (!_smoothMovement) { ApplyPendingMovementMode(); return; }
         _bumpCooldown = Math.Max(0, _bumpCooldown - deltaTime);
@@ -281,14 +296,18 @@ public unsafe partial class GameEngine
             bool pull = step.Pull || (step.FromX == step.ToX || step.FromY == step.ToY) && ReadPullInput();
             try { TryMovePlayer(step.ToX - step.FromX, step.ToY - step.FromY, step.Facing, pull); }
             finally { _committingSmoothStep = false; }
-            if (_actionExecutor?.IsBusy == true || !_state.HeroVisible) break;
+            _bot?.TraceDebug("step-finished",new { step.FromX,step.FromY,step.ToX,step.ToY,
+                ActualX=_state.PlayerX,ActualY=_state.PlayerY,step.Duration });
+            if (_actionExecutor?.IsBusy == true || !HeroControlAvailable) break;
             if (_pendingMovementAction is { } action)
             { _pendingMovementAction = null; action(); break; }
             if (remaining < 1e-10) break;
             PollSmoothMovement();
         }
-        if (_actionExecutor?.IsBusy == true || !_state.HeroVisible)
-        { CancelSmoothMovement(); return; }
+        if (!HeroControlAvailable) { CancelSmoothMovement(); return; }
+        // Background animation waits pause an ordinary step. Discarding it on
+        // every short wait can prevent the actor from ever reaching a tile.
+        if (_actionExecutor?.IsBusy == true) { _suppressHeldMovement=true; return; }
         foreach (var pair in _npcSteps.ToArray())
         {
             var npc = pair.Key; var step = pair.Value;
@@ -342,8 +361,15 @@ public unsafe partial class GameEngine
         bool horizontal = Math.Abs(dx) >= Math.Abs(dy);
         int sx = Math.Sign(dx), sy = Math.Sign(dy);
         if (TryStart(sx, sy)) return;
-        if (horizontal) { if (!TryStart(sx, 0)) TryStart(0, sy); }
-        else if (!TryStart(0, sy)) TryStart(sx, 0);
+        if (horizontal) { if (TryStart(sx, 0) || TryStart(0, sy)) return; }
+        else if (TryStart(0, sy) || TryStart(sx, 0)) return;
+        if(npc.Behavior==NPCBehavior.Fleeing)
+        {
+            foreach(var escape in FleeAlternatives(npc))
+                if(TryStart(escape.X,escape.Y)) return;
+            if(npc.X==_state.PlayerX || npc.Y==_state.PlayerY)
+                npc.Direction=GetDirectionToward(npc.X,npc.Y,_state.PlayerX,_state.PlayerY);
+        }
 
         bool TryStart(int x, int y)
         {
@@ -352,7 +378,7 @@ public unsafe partial class GameEngine
             if (npc.Behavior == NPCBehavior.Wandering &&
                 (Math.Abs(tx - npc.StartX) > npc.WanderRadius || Math.Abs(ty - npc.StartY) > npc.WanderRadius)) return false;
             if (!SmoothCellClear(tx, ty, npc) || x != 0 && y != 0 &&
-                (!SmoothCellClear(tx, npc.Y, npc) || !SmoothCellClear(npc.X, ty, npc))) return false;
+                (!DiagonalSideClear(tx, npc.Y, npc) || !DiagonalSideClear(npc.X, ty, npc))) return false;
             var step = new MovementStep(npc.X, npc.Y, x, y, npc.MoveCooldown, StepFacing(x, y, npc.Direction));
             if (HasStepConflict(step, npc)) return false;
             npc.Direction = step.Facing;

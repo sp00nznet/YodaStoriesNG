@@ -94,6 +94,7 @@ public class OriginalWorldGenerator
 
     /// <summary>Hotspot arguments for this world, per zone id, as the generator rewrote them.</summary>
     public Dictionary<int, int[]> HotspotArguments { get; } = new();
+    public HashSet<(int Zone,int Index)> PopulatedHotspots { get; } = new();
 
     public Sector[] Sectors => _sectors;
     public MapGenerator Map => _map;
@@ -748,6 +749,7 @@ public class OriginalWorldGenerator
         int index = zone.Objects.IndexOf(hotspot);
         if (index == -1) return false;
         ArgumentsFor(zone)[index] = item;
+        PopulatedHotspots.Add((zone.Id,index));
         return true;
     }
 

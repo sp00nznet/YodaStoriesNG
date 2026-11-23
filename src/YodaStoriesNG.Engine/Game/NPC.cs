@@ -19,6 +19,7 @@ public enum NPCBehavior
 public class NPC
 {
     public int CharacterId { get; set; }
+    public int NativeMonsterIndex { get; set; } = -1;
     public int X { get; set; }
     public int Y { get; set; }
     public int StartX { get; set; }  // Original spawn position
@@ -29,6 +30,7 @@ public class NPC
     public bool IsAlive => Health > 0;
     public bool IsEnabled { get; set; } = true;
     public bool IsHostile { get; set; } = false;
+    public bool IsInvulnerable { get; set; }
 
     // AI behavior
     public NPCBehavior Behavior { get; set; } = NPCBehavior.Wandering;
@@ -103,6 +105,7 @@ public class NPC
     /// </summary>
     public bool TakeDamage(int damage)
     {
+        if(IsInvulnerable) return false;
         Health -= damage;
         if (Health <= 0)
         {

@@ -64,6 +64,9 @@ public enum ConditionOpcode : ushort
     PlacedItemIsNot = 0x17,         // Placed item does NOT match (x, y, layer, tileA, tileB)
     HeroIsAt = 0x18,                // Hero at position (x, y)
     SectorCounterIs = 0x19,         // Zone sector-counter == value
+    IndyGameWon = 0x110,
+    IndyGameLost = 0x111,
+    StartingItemIs = 0x112,
     NpcIs = 0x100,                  // Engine extension: current NPC (not a native sector counter)
     SectorCounterIsLessThan = 0x1A, // Zone sector-counter < value
     HasNpc = 0x101,                 // Engine extension: interacting with an NPC

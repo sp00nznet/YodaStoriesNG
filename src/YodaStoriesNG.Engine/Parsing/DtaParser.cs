@@ -471,6 +471,8 @@ public class DtaParser
     /// into Yoda's numbering, so everything downstream - the executor, the script editor -
     /// has one opcode table. See docs/SCRIPTING.md.
     /// </summary>
+    // Indy condition numbers verified against the DESKADV switch mapping in
+    // https://github.com/shinyquagsire23/Yodecomp/blob/main/src/IactScript.cpp
     private static readonly Dictionary<int, int> IndyConditions = new()
     {
         [0x01] = (int)ConditionOpcode.StandingOn,
@@ -479,18 +481,22 @@ public class DtaParser
         [0x04] = (int)ConditionOpcode.ZoneNotInitialized,
         [0x05] = (int)ConditionOpcode.ZoneEntered,
         [0x06] = (int)ConditionOpcode.CounterIs,
-        [0x09] = (int)ConditionOpcode.HasGoalItem,         // gate on handing Marcus the artefact
+        [0x08] = (int)ConditionOpcode.IndyGameLost,
+        [0x09] = (int)ConditionOpcode.IndyGameWon,
         [0x0a] = (int)ConditionOpcode.HasItem,
+        // Indy compares the stored random value against its operand in the
+        // opposite order to the previously used mapping. All ten authored
+        // paired ranges otherwise become impossible (for example >4 AND <1).
         [0x0c] = (int)ConditionOpcode.RandomIsGreaterThan,
         [0x0d] = (int)ConditionOpcode.RandomIs,
         [0x0e] = (int)ConditionOpcode.RandomIsLessThan,
-        [0x0f] = IndyHasFindItem,                           // picked up this sector's item
+        [0x0f] = (int)ConditionOpcode.ZoneIsSolved,
         [0x10] = (int)ConditionOpcode.EnterByPlane,        // arrived by vehicle or tunnel
         [0x11] = (int)ConditionOpcode.MonsterIsDead,
         [0x12] = (int)ConditionOpcode.HasNoActiveMonsters,
         [0x13] = (int)ConditionOpcode.TileAtIs,
         [0x14] = (int)ConditionOpcode.RequiredItemIs,
-        [0x15] = (int)ConditionOpcode.EndingIs,
+        [0x15] = (int)ConditionOpcode.StartingItemIs,
         [0x16] = (int)ConditionOpcode.HealthIsLessThan,
     };
 
@@ -499,14 +505,14 @@ public class DtaParser
         [0x00] = (int)InstructionOpcode.PlaceTile,
         [0x01] = (int)InstructionOpcode.MoveTile,
         [0x02] = (int)InstructionOpcode.RemoveTile,
-        [0x03] = (int)InstructionOpcode.EnableMonster,
-        [0x04] = (int)InstructionOpcode.DisableMonster,
+        [0x03] = (int)InstructionOpcode.EnableHotspot,
+        [0x04] = (int)InstructionOpcode.DisableHotspot,
         [0x05] = (int)InstructionOpcode.SpeakHero,
-        [0x06] = (int)InstructionOpcode.Redraw,
+        [0x06] = (int)InstructionOpcode.Wait,
         [0x09] = (int)InstructionOpcode.SetCounter,
         [0x0a] = (int)InstructionOpcode.AddToCounter,
         [0x0b] = (int)InstructionOpcode.PlaySound,
-        [0x0c] = (int)InstructionOpcode.Wait,
+        [0x0c] = (int)InstructionOpcode.Redraw,
         [0x0d] = (int)InstructionOpcode.RollDice,
         [0x0e] = (int)InstructionOpcode.HideHero,
         [0x0f] = (int)InstructionOpcode.ShowHero,
@@ -514,9 +520,10 @@ public class DtaParser
         [0x11] = (int)InstructionOpcode.SetTileNeedsDisplay,
         [0x12] = (int)InstructionOpcode.MoveHeroTo,
         [0x13] = (int)InstructionOpcode.SetRectNeedsDisplay,
+        [0x14] = (int)InstructionOpcode.Redraw,
         [0x15] = (int)InstructionOpcode.DisableAction,
-        [0x16] = (int)InstructionOpcode.EnableHotspot,
-        [0x17] = (int)InstructionOpcode.DisableHotspot,
+        [0x16] = (int)InstructionOpcode.EnableMonster,
+        [0x17] = (int)InstructionOpcode.DisableMonster,
         [0x18] = (int)InstructionOpcode.EnableAllMonsters,
         [0x19] = (int)InstructionOpcode.DisableAllMonsters,
         [0x1a] = (int)InstructionOpcode.MoveHeroBy,
@@ -530,17 +537,14 @@ public class DtaParser
         [0x22] = (int)InstructionOpcode.ChangeZone,
     };
 
-    /// <summary>Indy 0x0f has no Yoda twin; it becomes HasItem with -1, "this sector's find item".</summary>
-    private const int IndyHasFindItem = -2;
-
-    /// <summary>Opcodes not yet decoded (conditions 0x07/0x08, instructions 0x14/0x23) - kept visible, not guessed.</summary>
+    /// <summary>Unsupported opcodes and Indy's reserved no-op instructions remain visible as 0xFF.</summary>
     private const int IndyUnknown = 0xFF;
 
     private Dictionary<int, int>? _indyConditions => _data.GameType == GameType.IndianaJones ? IndyConditions : null;
     private Dictionary<int, int>? _indyInstructions => _data.GameType == GameType.IndianaJones ? IndyInstructions : null;
 
     private static int MapIndy(Dictionary<int, int> table, int opcode) =>
-        table.TryGetValue(opcode, out var mapped) ? (mapped == IndyHasFindItem ? (int)ConditionOpcode.HasItem : mapped) : IndyUnknown;
+        table.TryGetValue(opcode, out var mapped) ? mapped : IndyUnknown;
 
     private Data.Action ParseAction(BinaryReader reader)
     {
@@ -555,8 +559,6 @@ public class DtaParser
             for (int i = 0; i < conditionCount && reader.BaseStream.Position < endPos; i++)
             {
                 var (opcode, args, text) = ReadActionItem(reader);
-                if (_indyConditions != null && opcode == 0x0f && args.Count > 0)
-                    args[0] = -1; // IndyHasFindItem: HasItem(-1), this sector's find item
                 action.Conditions.Add(new Condition
                 {
                     Opcode = (ConditionOpcode)(_indyConditions != null ? MapIndy(_indyConditions, opcode) : opcode),
@@ -705,6 +707,7 @@ public class DtaParser
 
         // Both games store the character type after the fixed-size name field.
         var storedType = (CharacterType)BitConverter.ToUInt16(data, 26);
+        character.MovementType=BitConverter.ToInt16(data,28);
         character.Type = storedType is CharacterType.Hero or CharacterType.Enemy or CharacterType.Weapon
             ? storedType : InferCharacterType(character.Name, index);
         // Yoda uses an animated CHAR record for the collectible companion as well.
