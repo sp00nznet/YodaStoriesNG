@@ -91,10 +91,15 @@ public unsafe partial class GameEngine
             if (c.Opcode == ConditionOpcode.HasNoActiveMonsters)
             {
                 var (state, _) = Scene(data, Copy(original));
-                state.ZoneNPCs.Add(new NPC { IsEnabled = false, Health = 10, IsHostile = true });
-                state.ZoneNPCs.Add(new NPC { IsEnabled = true, Health = 0, IsHostile = true });
-                Require(Holds(c, state), "disabled/dead monsters blocked completion");
-                state.ZoneNPCs.Add(new NPC { IsEnabled = true, Health = 10, IsHostile = false });
+                // Only native zone monsters count, alive ones block even while
+                // disabled (later waves held back by the script; see #9).
+                state.ZoneNPCs.Add(new NPC { IsEnabled = true, Health = 10, IsHostile = true });
+                state.ZoneNPCs.Add(new NPC { IsEnabled = true, Health = 0, IsHostile = true, NativeMonsterIndex = 0 });
+                Require(Holds(c, state), "dead or non-native monsters blocked completion");
+                var wave = new NPC { IsEnabled = false, Health = 10, IsHostile = true, NativeMonsterIndex = 1 };
+                state.ZoneNPCs.Add(wave);
+                Require(!Holds(c, state), "disabled native wave monster was ignored");
+                wave.IsEnabled = true; wave.IsHostile = false;
                 Require(!Holds(c, state), "active nonhostile native monster was ignored");
             }
             if (c.Opcode == ConditionOpcode.ZoneIsSolved)
